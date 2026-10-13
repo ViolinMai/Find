@@ -1,0 +1,28 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.venv/
+venv/
+ENV/
+
+# Patch script artifacts & Backups
+*.bak
+patch.txt
+full_project_dump.txt
+.patch_tmp_*
+
+# Find app caches & local indices
+*.cache/
+index_cache.json
+thumbs/
+
+# OS & Editor generated files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*~

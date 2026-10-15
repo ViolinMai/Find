@@ -10,8 +10,8 @@ Rectangle {
     border.color: Theme.borderDim
     border.width: 1
 
-    readonly property var chosen: backend.picker.selectedPaths
-    readonly property string displayChosen: chosen.length > 0 ? chosen.join(", ") : (backend.picker.mode === "folder" ? backend.currentPath : "No item selected")
+    readonly property var chosen: (backend && backend.picker) ? backend.picker.selectedPaths : []
+    readonly property string displayChosen: chosen.length > 0 ? chosen.join(", ") : ((backend && backend.picker && backend.picker.mode === "folder") ? backend.currentPath : "No item selected")
 
     RowLayout {
         anchors.fill: parent
@@ -20,7 +20,7 @@ Rectangle {
         spacing: 12
 
         Text {
-            text: backend.picker.mode === "folder" ? "Selected Folder:" : "Selected File(s):"
+            text: (backend && backend.picker && backend.picker.mode === "folder") ? "Selected Folder:" : "Selected File(s):"
             color: Theme.textSecondary
             font.bold: true
             font.pixelSize: Theme.fontSizeNormal
@@ -47,7 +47,7 @@ Rectangle {
 
         // Filter info pill
         Rectangle {
-            visible: backend.picker.filterDisplay !== ""
+            visible: (backend && backend.picker) ? (backend.picker.filterDisplay !== "") : false
             implicitWidth: filterTxt.implicitWidth + 16
             height: Math.round(28 * Theme.scaleFactor)
             color: Theme.bgBase
@@ -57,15 +57,15 @@ Rectangle {
             Text {
                 id: filterTxt
                 anchors.centerIn: parent
-                text: backend.picker.filterDisplay
+                text: (backend && backend.picker) ? backend.picker.filterDisplay : ""
                 color: Theme.textTertiary
                 font.pixelSize: Theme.fontSizeSmall
             }
         }
 
         Button {
-            text: backend.picker.mode === "folder" ? "Select Current Folder" : "Select"
-            enabled: root.chosen.length > 0 || backend.picker.mode === "folder"
+            text: (backend && backend.picker && backend.picker.mode === "folder") ? "Select Current Folder" : "Select"
+            enabled: root.chosen.length > 0 || (backend && backend.picker && backend.picker.mode === "folder")
             contentItem: Text {
                 text: parent.text
                 color: parent.enabled ? Theme.textPrimary : Theme.textTertiary

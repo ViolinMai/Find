@@ -3,7 +3,7 @@ import QtQuick.Controls
 import QtQuick.Layouts
 import ".."
 
-Menu {
+StyledMenu {
     id: root
 
     property string targetPath: ""
@@ -11,41 +11,16 @@ Menu {
     property bool isDir: false
     property bool isItemTarget: false
 
-    delegate: MenuItem {
-        id: menuItem
-        implicitWidth: Math.round(180 * Theme.scaleFactor)
-        implicitHeight: Math.round(32 * Theme.scaleFactor)
-
-        contentItem: Text {
-            text: menuItem.text
-            color: menuItem.enabled ? Theme.textPrimary : Theme.textTertiary
-            font.pixelSize: Theme.fontSizeNormal
-            verticalAlignment: Text.AlignVCenter
-            leftPadding: Math.round(8 * Theme.scaleFactor)
-        }
-
-        background: Rectangle {
-            color: menuItem.highlighted ? Theme.bgHover : "transparent"
-            radius: Theme.radiusSmall
-        }
-    }
-
-    background: Rectangle {
-        implicitWidth: Math.round(200 * Theme.scaleFactor)
-        color: Theme.bgSurface
-        border.color: Theme.borderDim
-        border.width: 1
-        radius: Theme.radiusMedium
-    }
-
-    // Context-Aware Items for Folder / File / Background
-    Action {
+    StyledMenuItem {
+        iconGlyph: root.isDir ? "📂" : "🚀"
         text: root.isDir ? "Open Folder" : "Open File"
         visible: root.isItemTarget
+        font.bold: true
         onTriggered: backend.openEntry(root.targetPath)
     }
 
-    Action {
+    StyledMenuItem {
+        iconGlyph: "💻"
         text: "Open Terminal Here"
         visible: root.isDir || !root.isItemTarget
         onTriggered: backend.openInTerminal(root.isItemTarget ? root.targetPath : backend.currentPath)
@@ -59,13 +34,15 @@ Menu {
         }
     }
 
-    Action {
+    StyledMenuItem {
+        iconGlyph: "🔗"
         text: "Copy Path"
         visible: root.isItemTarget
         onTriggered: backend.copyToClipboard(root.targetPath)
     }
 
-    Action {
+    StyledMenuItem {
+        iconGlyph: "⟳"
         text: "Refresh"
         visible: !root.isItemTarget
         onTriggered: backend.refresh()
@@ -79,9 +56,11 @@ Menu {
         }
     }
 
-    Action {
+    StyledMenuItem {
+        iconGlyph: "🗑️"
         text: "Move to Trash"
         visible: root.isItemTarget
+        isDanger: true
         onTriggered: backend.moveToTrash(root.targetPath)
     }
 }

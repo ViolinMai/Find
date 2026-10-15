@@ -1,4 +1,4 @@
-import re
+import fnmatch
 from PySide6.QtCore import QObject, Signal, Property, Slot
 
 
@@ -11,8 +11,8 @@ class PickerContext(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self._is_active = False
-        self._mode = "file"  # "file", "folder", "multi_file"
-        self._filter_patterns = []  # e.g. ["*.png", "*.jpg"]
+        self._mode = "file"
+        self._filter_patterns = []
         self._title = "Select File"
         self._selected_paths = []
         self._filter_display = "All Supported Files"
@@ -44,9 +44,9 @@ class PickerContext(QObject):
         self._title = title if title else ("Select Folder" if mode == "folder" else "Select File")
         self._filter_display = filter_str if filter_str else "All Files (*.*)"
 
-        # Parse glob filter patterns (e.g., "*.png;*.jpg" or "image/png")
         if filter_str and "*.*" not in filter_str:
-            self._filter_patterns = [p.strip().lower() for p in filter_str.replace(";", " ").replace(",", " ").split() if p.strip()]
+            raw_pats = filter_str.replace(";", " ").replace(",", " ").split()
+            self._filter_patterns = [p.strip().lower() for p in raw_pats if p.strip()]
         else:
             self._filter_patterns = []
 
@@ -65,15 +65,12 @@ class PickerContext(QObject):
 
     def matches_filter(self, filename: str, is_dir: bool) -> bool:
         if is_dir:
-            return True  # Always allow folders so user can navigate
-        if not self._filter_patterns:
             return True
-        ext = "." + filename.split(".")[-1].lower() if "." in filename else ""
+        if not self._filter_patterns or "*" in self._filter_patterns:
+            return True
+        name_lower = filename.lower()
         for pat in self._filter_patterns:
-            clean = pat.lstrip("*")
-            if clean.startswith(".") and ext == clean:
-                return True
-            if clean == filename.lower():
+            if fnmatch.fnmatch(name_lower, pat):
                 return True
         return False
 
@@ -86,7 +83,7 @@ class PickerContext(QObject):
             return
 
         if is_dir:
-            return  # In file mode, selecting folder doesn't stage it as return file
+            return
 
         if self._mode == "multi_file":
             if path in self._selected_paths:

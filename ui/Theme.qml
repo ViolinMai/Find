@@ -2,38 +2,39 @@ pragma Singleton
 import QtQuick
 
 QtObject {
-    // Scaling Factor
-    readonly property real scaleFactor: 1.5
+    readonly property real scaleFactor: 1.35
 
-    // Colors
-    readonly property color bgBase: "#1c1c1f"
-    readonly property color bgSidebar: "#18181b"
-    readonly property color bgSurface: "#232327"
-    readonly property color bgCard: "#27272b"
-    readonly property color bgHover: "#333338"
-    readonly property color bgSelected: "#3a3a42"
-    readonly property color borderDim: "#2e2e34"
+    // Base background with clean, high translucency
+    readonly property color bgBase: (typeof backend !== "undefined" && backend && backend.transparentBlur) ? "#a8131317" : "#18181c"
+    readonly property color bgSidebar: (typeof backend !== "undefined" && backend && backend.transparentBlur) ? "#b4101014" : "#141418"
+
+    // Opaque and solid elements
+    readonly property color bgSurface: "#222228"
+    readonly property color bgCard: "#26262d"
+    readonly property color bgHover: "#32323b"
+    readonly property color bgSelected: "#383844"
+    readonly property color borderDim: "#34343e"
     readonly property color borderFocus: "#0078d4"
 
-    // Text colors
-    readonly property color textPrimary: "#ffffff"
-    readonly property color textSecondary: "#9e9ea6"
-    readonly property color textTertiary: "#6e6e76"
-    readonly property color textDanger: "#ef4444"
+    // Text colors (Full opacity)
+    readonly property color textPrimary: "#f8fafc"
+    readonly property color textSecondary: "#a1a1aa"
+    readonly property color textTertiary: "#71717a"
+    readonly property color textDanger: "#f87171"
 
     // Accents
     readonly property color accent: "#0078d4"
-    readonly property color accentHover: "#1984d8"
+    readonly property color accentHover: "#1a88e0"
 
-    // Metrics (Scaled 1.5x)
+    // Metrics
     readonly property int radiusSmall: Math.round(4 * scaleFactor)
     readonly property int radiusMedium: Math.round(6 * scaleFactor)
-    readonly property int radiusLarge: Math.round(8 * scaleFactor)
+    readonly property int radiusLarge: Math.round(9 * scaleFactor)
 
-    // Fonts (Scaled 1.5x)
+    // Fonts
     readonly property int fontSizeSmall: Math.round(11 * scaleFactor)
-    readonly property int fontSizeNormal: Math.round(13 * scaleFactor)
-    readonly property int fontSizeMedium: Math.round(14 * scaleFactor)
+    readonly property int fontSizeNormal: Math.round(12.5 * scaleFactor)
+    readonly property int fontSizeMedium: Math.round(13.5 * scaleFactor)
     readonly property int fontSizeTitle: Math.round(15 * scaleFactor)
-    readonly property int fontSizeIcon: Math.round(18 * scaleFactor)
+    readonly property int fontSizeIcon: Math.round(17 * scaleFactor)
 }

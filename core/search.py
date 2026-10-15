@@ -26,7 +26,6 @@ class IndexTask(QRunnable):
             if not base_dir.exists():
                 continue
             for root, dirs, files in os.walk(str(base_dir)):
-                # Skip hidden directories
                 dirs[:] = [d for d in dirs if not d.startswith(".")]
                 try:
                     r_stat = os.stat(root)
@@ -41,12 +40,18 @@ class IndexTask(QRunnable):
                     pass
 
         try:
-            with open(self.index_file, "w", encoding="utf-8") as f:
+            tmp_index = self.index_file.with_suffix(".tmp")
+            with open(tmp_index, "w", encoding="utf-8") as f:
                 json.dump(updated, f)
+            os.replace(tmp_index, self.index_file)
         except Exception:
             pass
 
-        self.finish_callback(updated)
+        try:
+            if callable(self.finish_callback):
+                self.finish_callback(updated)
+        except RuntimeError:
+            pass
 
 
 class SearchManager(QObject):
@@ -74,8 +79,11 @@ class SearchManager(QObject):
         self.thread_pool.start(task)
 
     def _on_index_done(self, updated):
-        self.index_data = updated
-        self.indexingCompleted.emit()
+        try:
+            self.index_data = updated
+            self.indexingCompleted.emit()
+        except RuntimeError:
+            pass
 
     def query(self, search_text: str):
         if not search_text:
@@ -94,8 +102,8 @@ class SearchManager(QObject):
                         "is_dir": False
                     })
                     count += 1
-                    if count >= 100:  # Cap at 100 results for speed
+                    if count >= 120:
                         break
-            if count >= 100:
+            if count >= 120:
                 break
         self.searchResultsReady.emit(results)

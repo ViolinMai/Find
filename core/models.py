@@ -14,10 +14,12 @@ class FileListModel(QAbstractListModel):
     RawModRole = Qt.ItemDataRole.UserRole + 10
     RawCreatedRole = Qt.ItemDataRole.UserRole + 11
     ThumbRole = Qt.ItemDataRole.UserRole + 12
+    FolderPreviewsRole = Qt.ItemDataRole.UserRole + 13
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._entries = []
+        self._path_to_row = {}
 
     def rowCount(self, parent=QModelIndex()):
         return len(self._entries)
@@ -51,6 +53,8 @@ class FileListModel(QAbstractListModel):
             return entry.get("raw_created", 0)
         elif role == self.ThumbRole:
             return entry.get("thumb", "")
+        elif role == self.FolderPreviewsRole:
+            return entry.get("folder_previews", [])
         return None
 
     def roleNames(self):
@@ -67,17 +71,34 @@ class FileListModel(QAbstractListModel):
             self.RawModRole: b"raw_mod",
             self.RawCreatedRole: b"raw_created",
             self.ThumbRole: b"thumb",
+            self.FolderPreviewsRole: b"folder_previews",
         }
 
     def set_entries(self, entries):
         self.beginResetModel()
         self._entries = entries
+        self._path_to_row = {e["path"]: idx for idx, e in enumerate(entries)}
         self.endResetModel()
 
     def update_thumbnail(self, file_path, thumb_path):
-        for idx, entry in enumerate(self._entries):
-            if entry["path"] == file_path:
-                entry["thumb"] = thumb_path
-                model_idx = self.index(idx, 0)
-                self.dataChanged.emit(model_idx, model_idx, [self.ThumbRole])
-                break
+        idx = self._path_to_row.get(file_path)
+        if idx is not None and 0 <= idx < len(self._entries):
+            self._entries[idx]["thumb"] = thumb_path
+            model_idx = self.index(idx, 0)
+            self.dataChanged.emit(model_idx, model_idx, [self.ThumbRole])
+
+    def update_folder_previews(self, folder_path, previews):
+        idx = self._path_to_row.get(folder_path)
+        if idx is not None and 0 <= idx < len(self._entries):
+            self._entries[idx]["folder_previews"] = previews
+            model_idx = self.index(idx, 0)
+            self.dataChanged.emit(model_idx, model_idx, [self.FolderPreviewsRole])
+
+    def update_entry_size(self, item_path, size_str, raw_size=0):
+        idx = self._path_to_row.get(item_path)
+        if idx is not None and 0 <= idx < len(self._entries):
+            self._entries[idx]["size"] = size_str
+            if raw_size > 0:
+                self._entries[idx]["raw_size"] = raw_size
+            model_idx = self.index(idx, 0)
+            self.dataChanged.emit(model_idx, model_idx, [self.SizeRole, self.RawSizeRole])

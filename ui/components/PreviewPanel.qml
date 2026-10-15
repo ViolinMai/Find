@@ -7,19 +7,17 @@ Rectangle {
     id: root
     color: Theme.bgSidebar
 
-    readonly property var item: backend.selectedItem
+    readonly property var item: backend ? backend.selectedItem : null
     readonly property bool hasSelection: item && item.path !== undefined && item.path !== ""
 
     function safeVal(val) {
         return (val !== undefined && val !== null) ? String(val) : ""
     }
 
-    visible: hasSelection
-
     ColumnLayout {
         anchors.fill: parent
-        anchors.margins: Math.round(14 * Theme.scaleFactor)
-        spacing: Math.round(10 * Theme.scaleFactor)
+        anchors.margins: 12
+        spacing: 10
 
         Text {
             text: "Details & Preview"
@@ -28,104 +26,129 @@ Rectangle {
             font.bold: true
         }
 
-        // Preview Viewport
-        Rectangle {
+        // Preview Viewport (Adapts to aspect ratio & shows FolderPreviewIcon for folders)
+        Item {
             Layout.fillWidth: true
-            Layout.preferredHeight: Math.round(180 * Theme.scaleFactor)
-            color: Theme.bgBase
-            radius: Theme.radiusMedium
-            border.color: Theme.borderDim
-            border.width: 1
-            clip: true
+            Layout.preferredHeight: Math.min(Math.round(180 * Theme.scaleFactor), Math.max(95, root.height * 0.36))
 
-            // Image Preview or Video Thumbnail
-            Image {
-                anchors.fill: parent
-                anchors.margins: 4
+            // Folder Preview inside Details Panel
+            FolderPreviewIcon {
+                visible: root.hasSelection && root.item.is_dir === true
+                width: Math.min(parent.width * 0.78, parent.height * 0.94)
+                height: width * 0.88
+                anchors.centerIn: parent
+                previews: (root.hasSelection && root.item.folder_previews) ? root.item.folder_previews : []
+            }
+
+            // Image or Video Preview with Floating Aspect-Ratio Frame
+            Item {
                 visible: root.hasSelection && (root.item.is_image === true || (root.item.is_video === true && root.safeVal(root.item.thumb) !== ""))
-                source: visible ? (root.item.is_image ? "file://" + root.safeVal(root.item.path) : "file://" + root.safeVal(root.item.thumb)) : ""
-                fillMode: Image.PreserveAspectFit
-                asynchronous: true
-                cache: true
-            }
-
-            // Video Details Header (Placed on the Left)
-            RowLayout {
-                anchors.left: parent.left
-                anchors.top: parent.top
-                anchors.margins: 10
-                visible: root.hasSelection && root.item.is_video === true
-                spacing: 8
-
-                Text {
-                    text: "🎬"
-                    font.pixelSize: Math.round(28 * Theme.scaleFactor)
-                }
-                ColumnLayout {
-                    spacing: 2
-                    Text {
-                        text: root.hasSelection && root.safeVal(root.item.resolution) !== "" ? root.safeVal(root.item.resolution) : "Video Media"
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontSizeNormal
-                        font.bold: true
-                    }
-                    Text {
-                        text: root.hasSelection && root.safeVal(root.item.codec) !== "" ? root.safeVal(root.item.codec) : ""
-                        color: Theme.textSecondary
-                        font.pixelSize: Theme.fontSizeSmall
-                    }
-                }
-            }
-
-            // Text Preview
-            ScrollView {
                 anchors.fill: parent
-                anchors.margins: 8
-                visible: root.hasSelection && root.safeVal(root.item.preview_text) !== "" && !root.item.is_image && !root.item.is_video
+
+                Image {
+                    id: panelImg
+                    anchors.centerIn: parent
+                    width: parent.width
+                    height: parent.height
+                    source: parent.visible ? (root.item.is_image ? "file://" + root.safeVal(root.item.path) : "file://" + root.safeVal(root.item.thumb)) : ""
+                    fillMode: Image.PreserveAspectFit
+                    asynchronous: true
+                    cache: true
+                    mipmap: true
+                }
+
+                Rectangle {
+                    anchors.centerIn: panelImg
+                    width: panelImg.paintedWidth > 0 ? panelImg.paintedWidth + 4 : 0
+                    height: panelImg.paintedHeight > 0 ? panelImg.paintedHeight + 4 : 0
+                    radius: Theme.radiusMedium
+                    color: "transparent"
+                    border.color: Theme.borderDim
+                    border.width: 1
+                    visible: panelImg.status === Image.Ready
+                }
+            }
+
+            // Text / Code Preview Box
+            Rectangle {
+                anchors.fill: parent
+                visible: root.hasSelection && root.safeVal(root.item.preview_text) !== "" && !root.item.is_image && !root.item.is_video && !root.item.is_dir
+                color: Theme.bgSurface
+                radius: Theme.radiusMedium
+                border.color: Theme.borderDim
+                border.width: 1
                 clip: true
 
-                Text {
-                    width: parent.width
-                    text: root.hasSelection ? root.safeVal(root.item.preview_text) : ""
-                    color: Theme.textSecondary
-                    font.family: "monospace"
-                    font.pixelSize: Theme.fontSizeSmall
-                    wrapMode: Text.WrapAnywhere
+                ScrollView {
+                    anchors.fill: parent
+                    anchors.margins: 8
+                    clip: true
+
+                    Text {
+                        width: parent.width
+                        text: root.hasSelection ? root.safeVal(root.item.preview_text) : ""
+                        color: Theme.textSecondary
+                        font.family: "monospace"
+                        font.pixelSize: Theme.fontSizeSmall
+                        wrapMode: Text.WrapAnywhere
+                    }
                 }
             }
 
-            // Folder and Generic Fallback
-            Text {
-                anchors.centerIn: parent
-                visible: root.hasSelection && !root.item.is_image && (!root.item.is_video || root.safeVal(root.item.thumb) === "") && root.safeVal(root.item.preview_text) === ""
-                text: (root.hasSelection && root.item.is_dir) ? "📁 Folder" : "No preview available"
-                color: Theme.textTertiary
-                font.pixelSize: Theme.fontSizeNormal
+            // Empty / No Selection Fallback
+            Rectangle {
+                anchors.fill: parent
+                visible: !root.hasSelection || (!root.item.is_dir && !root.item.is_image && (!root.item.is_video || root.safeVal(root.item.thumb) === "") && root.safeVal(root.item.preview_text) === "")
+                color: Theme.bgSurface
+                radius: Theme.radiusMedium
+                border.color: Theme.borderDim
+                border.width: 1
+
+                Text {
+                    anchors.centerIn: parent
+                    width: parent.width - 16
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                    text: root.hasSelection ? "📄 No preview available" : "📂 Select an item to inspect"
+                    color: Theme.textTertiary
+                    font.pixelSize: Theme.fontSizeNormal
+                }
             }
         }
 
-        // Details Section
-        ScrollView {
+        // Details Metadata Section
+        Flickable {
+            id: detailsFlick
             Layout.fillWidth: true
             Layout.fillHeight: true
+            contentWidth: width
+            contentHeight: detailsCol.implicitHeight + 12
             clip: true
+            boundsBehavior: Flickable.StopAtBounds
+
+            ScrollBar.vertical: ScrollBar {
+                policy: ScrollBar.AsNeeded
+            }
 
             ColumnLayout {
-                width: parent.width
-                spacing: Math.round(8 * Theme.scaleFactor)
+                id: detailsCol
+                width: detailsFlick.width
+                spacing: 7
 
                 Text {
                     Layout.fillWidth: true
-                    text: root.hasSelection ? root.safeVal(root.item.name) : ""
+                    text: root.hasSelection ? root.safeVal(root.item.name) : "Current Location"
                     color: Theme.textPrimary
                     font.pixelSize: Theme.fontSizeTitle
                     font.bold: true
+                    wrapMode: Text.WrapAnywhere
+                    maximumLineCount: 2
                     elide: Text.ElideRight
                 }
 
                 Rectangle {
                     Layout.fillWidth: true
-                    height: 1
+                    implicitHeight: 1
                     color: Theme.borderDim
                 }
 
@@ -133,23 +156,26 @@ Rectangle {
                     property string label: ""
                     property string val: ""
                     visible: val !== ""
+                    Layout.fillWidth: true
+                    spacing: 6
 
                     Text {
-                        Layout.preferredWidth: Math.round(85 * Theme.scaleFactor)
+                        Layout.preferredWidth: Math.min(85, root.width * 0.35)
                         text: parent.label
                         color: Theme.textTertiary
                         font.pixelSize: Theme.fontSizeSmall
+                        elide: Text.ElideRight
                     }
                     Text {
                         Layout.fillWidth: true
                         text: parent.val
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSizeSmall
-                        elide: Text.ElideRight
+                        elide: Text.ElideMiddle
                     }
                 }
 
-                DetailRow { label: "Type"; val: root.hasSelection ? root.safeVal(root.item.type) : "" }
+                DetailRow { label: "Type"; val: root.hasSelection ? root.safeVal(root.item.type) : "Directory" }
                 DetailRow { label: "Size"; val: root.hasSelection ? root.safeVal(root.item.size) : "" }
                 DetailRow { label: "Modified"; val: root.hasSelection ? root.safeVal(root.item.modified) : "" }
 
@@ -161,7 +187,7 @@ Rectangle {
                 DetailRow { label: "Bitrate"; val: root.hasSelection ? root.safeVal(root.item.bitrate) : "" }
                 DetailRow { label: "Audio Codec"; val: root.hasSelection ? root.safeVal(root.item.audio_codec) : "" }
 
-                DetailRow { label: "Path"; val: root.hasSelection ? root.safeVal(root.item.path) : "" }
+                DetailRow { label: "Path"; val: root.hasSelection ? root.safeVal(root.item.path) : (backend ? backend.currentPath : "") }
             }
         }
     }

@@ -1,61 +1,80 @@
 import os
 import re
 import sys
+import json
 import shutil
 import difflib
 import textwrap
 import tempfile
-from collections import Counter
 
 USAGE = """
 ================================================================================
-MAI ADVANCED SYNC & PATCH MANAGER (Zero-Indent Top-Level Engine v4.0)
+MAI ADVANCED SYNC & PATCH MANAGER (v5.0 - Top-Level + Inline + QML Smart Engine)
 ================================================================================
 Block formats in 'patch.txt'   (every block must end with '### END'):
 
 1) Full file replacement / creation:
-   ### FILE: path/to/file.rs
+   ### FILE: path/to/file.qml
    <full file contents>
    ### END
 
-2) Top-level item operations (.rs and .py only):
+2) Inline Context-Anchored Edits (Works on .qml, .py, .rs, .toml, .ini, etc.):
+   ### EDIT: ui/main.qml
+   <<< FIND
+   readonly property bool effectiveShowPreview: userShowPreview && (width >= 960 || height >= 760)
+   ===
+   readonly property bool effectiveShowPreview: userShowPreview && (width >= 800 || height >= 600)
+   >>>
+   <<< FIND
+   function endRightDrag() {
+       isRightDragging = false
+   }
+   ===
+   function endRightDrag() {
+       isRightDragging = false
+       draggedFilePath = ""
+   }
+   >>>
+   ### END
+
+   * Supports multiple <<< FIND ... === ... >>> hunks inside a single ### EDIT block.
+   * Indentation-insensitive matching: Even if your FIND or REPLACE block has 0 indent
+     (or wrong base indent), the engine matches the exact relative structure and
+     automatically re-indents your replacement to match the target file's exact level!
+   * Uniqueness guarantee: Rejects the patch if FIND matches 0 times or >1 times.
+   * Empty replacement (nothing between === and >>>) cleanly deletes the matched lines.
+
+3) QML Smart Scoped Operations (.qml only - Zero-Indent Friendly):
+   ### QML FIX: ui/main.qml          -> Replace function, id-block, component, or property
+   ### QML ADD: ui/main.qml          -> Add inside root (or inside 'target_id' via @inside)
+   ### QML DELETE: ui/main.qml       -> Delete by selector (e.g. 'function foo', 'id: bar')
+   ### QML: ui/main.qml              -> Upsert (FIX if exists, else ADD)
+
+   * Recognizes QML targets automatically at ANY nesting depth:
+     - Functions:   function beginRightDrag(path, name, icon, globalPt) { ... }
+     - ID Objects:  Rectangle { id: mainContainer ... }  (matched by 'id: mainContainer')
+     - Components:  component ToolBtn: Rectangle { ... } (matched by 'component ToolBtn')
+     - Properties:  property bool userShowSidebar: true  (or readonly/default/required)
+     - Signals:     signal clicked()
+   * For QML ADD, you can optionally specify where to insert using a header comment:
+     // @inside: mainContainer   (inserts at the end of the component with id: mainContainer)
+     // @before: previewPanel    (inserts right before the component with id: previewPanel)
+     // @after: addressBar       (inserts right after the component with id: addressBar)
+     (If omitted, QML ADD inserts cleanly inside the root QML object before its closing '}')
+
+4) Top-level item operations (.rs and .py only):
    ### ITEM ADD: path/to/file.rs      -> add new item(s); ERROR if it already exists
    ### ITEM FIX: path/to/file.rs      -> replace existing item(s); ERROR if missing
    ### ITEM DELETE: path/to/file.rs   -> delete item(s); body = only the signature line(s)
-   ### ITEM: path/to/file.rs          -> legacy upsert (replace if exists, else add)
+   ### ITEM: path/to/file.rs          -> upsert (replace if exists, else add)
 
-   * An item = a zero-indent definition (fn struct enum union trait impl mod type
-     const static use macro_rules extern / python: def class import var) INCLUDING
-     its attributes/decorators and doc comments, up to the next top-level item.
-   * Braces/brackets are balanced with a real lexer (strings, chars, raw strings,
-     lifetimes and nested comments are ignored), so '}' inside text cannot fool it.
-   * One block may contain several items (FIX/ADD). DELETE takes several lines:
-         ### ITEM DELETE: src/main.rs
-         fn old_helper
-         struct OldThing
-         use core::fmt::Write;
-         ### END
-   * FIX keeps the old attributes/docs if your new text has none; if your new
-     text has its own attributes/docs they replace the old ones.
-   * Item identity = (kind, name); 'pub' / 'unsafe' / 'const fn' etc. are ignored.
-     impl blocks are identified by their header (impl<T> Trait for Type).
-   * 'use' / 'import' are identified by their exact statement; new ones are
-     inserted after the last existing use/import.
-   * Indentation is auto-adapted (tabs/spaces, 2/4 width) to the target file.
-
-Safety:
-   * Everything is staged in memory first. ANY error -> NOTHING is written and
-     patch.txt is kept so you can fix it.
-   * After each operation the file is re-parsed and verified: every other item
-     must be byte-identical. Otherwise the whole patch is rejected.
-   * CRLF/LF, BOM and final newline of each file are preserved. Non UTF-8 files
-     are never touched. Originals are saved as <file>.bak.
-
-Usage:
-   1. Paste blocks into 'patch.txt'.
-   2. python updateRUSTkernel.py            (apply)
-      python updateRUSTkernel.py --check    (validate only, write nothing)
-   3. If 'patch.txt' is empty, a project dump is written to 'full_project_dump.txt'.
+Safety & Revert:
+   * Staged in memory first. ANY error -> NOTHING is written and patch.txt is kept.
+   * QML & Rust & Python brace/bracket/string/comment balance is lexically verified
+     after every operation. Malformed edits are rejected before touching disk.
+   * CRLF/LF, BOM and final newline are preserved.
+   * Project-wide snapshot of affected files is saved in '.project_backup/' before
+     each update. Run 'python updateMAX.py --re' to revert the last update!
 ================================================================================
 """
 
@@ -69,15 +88,17 @@ IGNORED_DIRS = {
     "__pycache__", ".git", "dist", "build", ".venv", "venv",
     "node_modules", ".dart_tool", "ephemeral",
     ".gradle", ".idea", ".vscode", "Pods", ".fvm",
-    "data", "downloads", "shared", "debug", "tools", "x86_64-unknown-none"
+    "data", "downloads", "shared", "debug", "tools", "x86_64-unknown-none",
+    ".project_backup"
 }
 
 DUMP_FILENAME = "full_project_dump.txt"
 PATCH_FILENAME = "patch.txt"
+BACKUP_DIR = ".project_backup"
 
 
 # ==============================================================================
-# Project dump (unchanged behaviour)
+# Project dump
 # ==============================================================================
 
 def is_source_file(filename):
@@ -160,9 +181,30 @@ class Item:
         return s if len(s) <= 70 else s[:67] + "..."
 
 
+class QmlNode:
+    """A recognized QML construct at any nesting level:
+    kind in ('function', 'id', 'component', 'property', 'signal')"""
+    __slots__ = ("start", "header", "end", "kind", "name", "indent")
+
+    def __init__(self, start, header, end, kind, name, indent):
+        self.start = start
+        self.header = header
+        self.end = end
+        self.kind = kind
+        self.name = name
+        self.indent = indent
+
+    @property
+    def key(self):
+        return (self.kind, self.name)
+
+    def label(self):
+        return f"qml:{self.kind} '{self.name}'"
+
+
 TYPE_KINDS = {'struct', 'enum', 'union', 'type', 'trait'}
 VALUE_KINDS = {'const', 'static'}
-SEMI_KINDS = {'const', 'static', 'type', 'use', 'extern_crate'}   # continue past '}' until ';'
+SEMI_KINDS = {'const', 'static', 'type', 'use', 'extern_crate'}
 GROUPED_KINDS = {'use', 'import'}
 
 
@@ -233,7 +275,7 @@ def mask_rust(t):
                 _blank(out, i, i + 3)
                 i += 3
             else:
-                i += 1          # lifetime
+                i += 1
         else:
             i += 1
     return ''.join(out)
@@ -271,6 +313,622 @@ def mask_python(t):
     return ''.join(out)
 
 
+def mask_qml(t):
+    """Mask JS/QML comments (// and /* */), strings (", ', `), and regex literals."""
+    n = len(t)
+    out = list(t)
+    i = 0
+    last_non_ws = ''
+    while i < n:
+        c = t[i]
+        if c == '/' and t.startswith('//', i):
+            j = t.find('\n', i)
+            j = n if j == -1 else j
+            _blank(out, i, j)
+            i = j
+        elif c == '/' and t.startswith('/*', i):
+            j = t.find('*/', i + 2)
+            if j == -1:
+                return None
+            _blank(out, i, j + 2)
+            i = j + 2
+        elif c in ('"', "'", '`'):
+            j = i + 1
+            while j < n:
+                if t[j] == '\\':
+                    j += 2
+                    continue
+                if t[j] == c:
+                    break
+                if c != '`' and t[j] == '\n':
+                    return None
+                j += 1
+            if j >= n:
+                return None
+            _blank(out, i, j + 1)
+            last_non_ws = '"'
+            i = j + 1
+        elif c == '/' and last_non_ws in ('(', ',', '=', ':', '[', '!', '&', '|', '?', '{', '}', ';', ''):
+            j = i + 1
+            in_class = False
+            valid_regex = False
+            while j < n and t[j] != '\n':
+                if t[j] == '\\':
+                    j += 2
+                    continue
+                if t[j] == '[':
+                    in_class = True
+                elif t[j] == ']':
+                    in_class = False
+                elif t[j] == '/' and not in_class:
+                    valid_regex = True
+                    break
+                j += 1
+            if valid_regex and j > i + 1:
+                k = j + 1
+                while k < n and t[k].isalpha():
+                    k += 1
+                _blank(out, i, k)
+                last_non_ws = '/'
+                i = k
+            else:
+                last_non_ws = c
+                i += 1
+        else:
+            if not c.isspace():
+                last_non_ws = c
+            i += 1
+    return ''.join(out)
+
+
+def verify_syntax_balance(ext, lines, rel):
+    """Verify balanced braces/brackets/parens and valid strings/comments for .qml, .rs, .py."""
+    text = '\n'.join(lines)
+    if ext == '.qml':
+        masked = mask_qml(text)
+        if masked is None:
+            raise PatchError(f"{rel}: unterminated string literal or block comment in QML")
+        stack = []
+        pairs = {'}': '{', ']': '[', ')': '('}
+        for line_idx, mline in enumerate(masked.split('\n'), 1):
+            for ch in mline:
+                if ch in '{[(':
+                    stack.append((ch, line_idx))
+                elif ch in '}])':
+                    if not stack or stack[-1][0] != pairs[ch]:
+                        raise PatchError(f"{rel}:{line_idx}: unbalanced '{ch}' in QML after edit")
+                    stack.pop()
+        if stack:
+            ch, ln = stack[-1]
+            raise PatchError(f"{rel}:{ln}: unclosed '{ch}' in QML after edit")
+    elif ext == '.rs':
+        parse_rust(lines)
+    elif ext == '.py':
+        parse_python(lines)
+
+
+# ==============================================================================
+# QML Smart Parser (Functions, ID-Blocks, Inline Components, Properties, Signals)
+# ==============================================================================
+
+_QML_FUNC_RE = re.compile(r'^\s*function\s+([A-Za-z_]\w*)\s*\(')
+_QML_COMP_RE = re.compile(r'^\s*component\s+([A-Za-z_]\w*)\s*:\s*[A-Za-z_][\w.]*')
+_QML_PROP_RE = re.compile(
+    r'^\s*(?:(?:default|readonly|required)\s+)*property\s+(?:[A-Za-z_]\w*(?:<[A-Za-z_]\w*>)?)\s+([A-Za-z_]\w*)\b'
+)
+_QML_ALIAS_RE = re.compile(
+    r'^\s*(?:(?:default|readonly|required)\s+)*property\s+alias\s+([A-Za-z_]\w*)\b'
+)
+_QML_SIGNAL_RE = re.compile(r'^\s*signal\s+([A-Za-z_]\w*)\b')
+_QML_ID_LINE_RE = re.compile(r'^\s*id\s*:\s*([A-Za-z_]\w*)\s*(?:;)?\s*$')
+
+
+def _find_balanced_end(ml, start_line, open_ch='{', close_ch='}'):
+    depth = 0
+    started = False
+    for j in range(start_line, len(ml)):
+        for ch in ml[j]:
+            if ch == open_ch:
+                depth += 1
+                started = True
+            elif ch == close_ch:
+                depth -= 1
+                if started and depth == 0:
+                    return j
+                if depth < 0:
+                    return None
+    return None
+
+
+def _attach_leading_comments(lines, ml, header_line):
+    start = header_line
+    while start > 0:
+        prev_raw = lines[start - 1].strip()
+        prev_m = ml[start - 1].strip()
+        if prev_raw and not prev_m and (prev_raw.startswith('//') or prev_raw.startswith('/*') or prev_raw.startswith('*')):
+            start -= 1
+        else:
+            break
+    return start
+
+
+def parse_qml_nodes(lines, attach_comments=True):
+    """Returns a list of QmlNode items found across all nesting levels in a QML file."""
+    text = '\n'.join(lines)
+    masked = mask_qml(text)
+    if masked is None:
+        raise PatchError("unterminated string or comment in QML")
+    ml = masked.split('\n')
+    n = len(lines)
+    nodes = []
+
+    for i in range(n):
+        m = ml[i]
+        ms = m.strip()
+        if not ms:
+            continue
+        indent = len(lines[i]) - len(lines[i].lstrip(' \t'))
+
+        # 1. Function definition
+        fm = _QML_FUNC_RE.match(m)
+        if fm:
+            fname = fm.group(1)
+            end_j = _find_balanced_end(ml, i, '{', '}')
+            if end_j is None:
+                raise PatchError(f"QML line {i + 1}: unbalanced braces in function '{fname}'")
+            st = _attach_leading_comments(lines, ml, i) if attach_comments else i
+            nodes.append(QmlNode(st, i, end_j + 1, 'function', fname, indent))
+            continue
+
+        # 2. Inline component definition: `component Name: BaseType {`
+        cm = _QML_COMP_RE.match(m)
+        if cm and '{' in m:
+            cname = cm.group(1)
+            end_j = _find_balanced_end(ml, i, '{', '}')
+            if end_j is None:
+                raise PatchError(f"QML line {i + 1}: unbalanced braces in component '{cname}'")
+            st = _attach_leading_comments(lines, ml, i) if attach_comments else i
+            nodes.append(QmlNode(st, i, end_j + 1, 'component', cname, indent))
+            continue
+
+        # 3. Signal declaration
+        sm = _QML_SIGNAL_RE.match(m)
+        if sm:
+            sname = sm.group(1)
+            end_j = i
+            if '(' in m and ')' not in m:
+                end_j = _find_balanced_end(ml, i, '(', ')') or i
+            st = _attach_leading_comments(lines, ml, i) if attach_comments else i
+            nodes.append(QmlNode(st, i, end_j + 1, 'signal', sname, indent))
+            continue
+
+        # 4. Property declaration (single-line or multi-line binding block/array)
+        pm = _QML_PROP_RE.match(m) or _QML_ALIAS_RE.match(m)
+        if pm:
+            pname = pm.group(1)
+            end_j = i
+            delta_brace = m.count('{') - m.count('}')
+            delta_brack = m.count('[') - m.count(']')
+            delta_paren = m.count('(') - m.count(')')
+            if delta_brace > 0:
+                end_j = _find_balanced_end(ml, i, '{', '}')
+            elif delta_brack > 0:
+                end_j = _find_balanced_end(ml, i, '[', ']')
+            elif delta_paren > 0:
+                end_j = _find_balanced_end(ml, i, '(', ')')
+            if end_j is None:
+                raise PatchError(f"QML line {i + 1}: unbalanced expression in property '{pname}'")
+            st = _attach_leading_comments(lines, ml, i) if attach_comments else i
+            nodes.append(QmlNode(st, i, end_j + 1, 'property', pname, indent))
+            continue
+
+        # 5. Object with `id: <name>` inside its immediate top body lines
+        if '{' in m:
+            depth = 0
+            found_id = None
+            for k in range(i, min(n, i + 12)):
+                for ch in ml[k]:
+                    if ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                if k > i and depth > 1:
+                    break
+                idm = _QML_ID_LINE_RE.match(ml[k])
+                if idm and depth == 1:
+                    found_id = idm.group(1)
+                    break
+                if depth <= 0:
+                    break
+            if found_id:
+                end_j = _find_balanced_end(ml, i, '{', '}')
+                if end_j is None:
+                    raise PatchError(f"QML line {i + 1}: unbalanced braces for object id '{found_id}'")
+                st = _attach_leading_comments(lines, ml, i) if attach_comments else i
+                nodes.append(QmlNode(st, i, end_j + 1, 'id', found_id, indent))
+
+    return nodes
+
+
+def reindent_block(block_lines, target_indent_spaces):
+    """Shift a dedented/arbitrary-indented list of lines so its base indent is `target_indent_spaces`."""
+    if not block_lines:
+        return []
+    dedented = textwrap.dedent('\n'.join(block_lines)).split('\n')
+    prefix = ' ' * target_indent_spaces
+    return [(prefix + l if l.strip() else '') for l in dedented]
+
+
+def parse_qml_directives(body_lines):
+    """Extract optional // @inside: id, // @before: id, // @after: id from top of QML patch body."""
+    directives = {}
+    cleaned = []
+    dir_re = re.compile(r'^\s*//\s*@(inside|before|after)\s*:\s*([A-Za-z_]\w*)\s*$', re.I)
+    for l in body_lines:
+        m = dir_re.match(l)
+        if m and not cleaned:
+            directives[m.group(1).lower()] = m.group(2)
+        else:
+            cleaned.append(l)
+    return directives, cleaned
+
+
+def parse_qml_delete_selectors(body_lines):
+    """Parse selectors in a ### QML DELETE block."""
+    sels = []
+    for raw in body_lines:
+        s = raw.strip().rstrip(';{').strip()
+        if not s or s.startswith('//'):
+            continue
+        m = re.match(r'^function\s+([A-Za-z_]\w*)', s)
+        if m:
+            sels.append(('function', m.group(1)))
+            continue
+        m = re.match(r'^id\s*:\s*([A-Za-z_]\w*)$', s) or re.match(r'^#([A-Za-z_]\w*)$', s)
+        if m:
+            sels.append(('id', m.group(1)))
+            continue
+        m = re.match(r'^component\s+([A-Za-z_]\w*)', s)
+        if m:
+            sels.append(('component', m.group(1)))
+            continue
+        m = _QML_PROP_RE.match(s) or _QML_ALIAS_RE.match(s) or re.match(r'^property\s+([A-Za-z_]\w*)$', s)
+        if m:
+            sels.append(('property', m.group(1)))
+            continue
+        m = _QML_SIGNAL_RE.match(s)
+        if m:
+            sels.append(('signal', m.group(1)))
+            continue
+        raise PatchError(
+            f"Unrecognized QML DELETE selector: '{s}'. "
+            f"Use 'function <name>', 'id: <id>', 'component <Name>', 'property <name>', or 'signal <name>'."
+        )
+    return sels
+
+
+def apply_qml_op(st, action, raw_body, rel, log):
+    lines = st['lines']
+    verify_syntax_balance('.qml', lines, rel)
+    body = clean_body(raw_body, dedent=True)
+    if not body:
+        raise PatchError("empty QML block body")
+
+    if action == 'DELETE':
+        sels = parse_qml_delete_selectors(body)
+        if not sels:
+            raise PatchError("QML DELETE body has no selectors")
+        for kind, name in sels:
+            nodes = parse_qml_nodes(lines, attach_comments=True)
+            matches = [nd for nd in nodes if nd.kind == kind and nd.name == name]
+            if not matches:
+                cands = [f"{nd.kind}:{nd.name}" for nd in nodes]
+                close = difflib.get_close_matches(f"{kind}:{name}", cands, n=4, cutoff=0.45)
+                raise PatchError(
+                    f"QML {kind} '{name}' not found in {rel}." +
+                    (f" Similar: {close}" if close else "")
+                )
+            if len(matches) > 1:
+                raise PatchError(
+                    f"QML {kind} '{name}' is ambiguous in {rel} (found at lines {[m.header + 1 for m in matches]}). "
+                    f"Use '### EDIT: {rel}' with <<< FIND ... === ... >>> instead."
+                )
+            t = matches[0]
+            del lines[t.start:t.end]
+            collapse_after_delete(lines, t.start)
+            verify_syntax_balance('.qml', lines, rel)
+            log.append(f"[-] QML DELETE {t.label()}  ({rel}:{t.start + 1}-{t.end})")
+        return
+
+    directives, body = parse_qml_directives(body)
+    body = clean_body(body, dedent=True)
+    if not body:
+        raise PatchError("empty QML body after directives")
+
+    snippet_nodes = parse_qml_nodes(body, attach_comments=True)
+    top_snippet_nodes = []
+    last_end = -1
+    for nd in sorted(snippet_nodes, key=lambda x: (x.start, -(x.end - x.start))):
+        if nd.start >= last_end:
+            top_snippet_nodes.append(nd)
+            last_end = nd.end
+
+    if not top_snippet_nodes and action in ('FIX', 'UPSERT'):
+        raise PatchError(
+            "No recognizable QML target in snippet (expected `function name()`, an object with `id: name`, "
+            "`component Name: Base`, `property ...`, or `signal ...`). For arbitrary lines use `### EDIT:`."
+        )
+
+    if action == 'ADD' and not top_snippet_nodes:
+        _insert_qml_raw_snippet(lines, body, directives, rel, log, label="qml:block")
+        verify_syntax_balance('.qml', lines, rel)
+        return
+
+    for snd in top_snippet_nodes:
+        file_nodes = parse_qml_nodes(lines, attach_comments=True)
+        matches = [nd for nd in file_nodes if nd.kind == snd.kind and nd.name == snd.name]
+
+        eff = action
+        if eff == 'UPSERT':
+            eff = 'FIX' if matches else 'ADD'
+
+        if eff == 'FIX':
+            if not matches:
+                cands = [f"{nd.kind}:{nd.name}" for nd in file_nodes]
+                close = difflib.get_close_matches(f"{snd.kind}:{snd.name}", cands, n=4, cutoff=0.45)
+                raise PatchError(
+                    f"QML {snd.kind} '{snd.name}' not found in {rel}." +
+                    (f" Similar: {close}." if close else "") +
+                    " (Use '### QML ADD:' or '### EDIT:' if creating new)"
+                )
+            if len(matches) > 1:
+                raise PatchError(
+                    f"QML {snd.kind} '{snd.name}' matched {len(matches)} times at lines "
+                    f"{[m.header + 1 for m in matches]} in {rel}; use '### EDIT:' with surrounding context"
+                )
+            target = matches[0]
+            has_comments = snd.header > snd.start
+            rep_start = target.start if has_comments else target.header
+            chunk = body[snd.start:snd.end]
+            reindented = reindent_block(chunk, target.indent)
+            if lines[rep_start:target.end] == reindented:
+                log.append(f"[=] QML FIX {snd.label()}  (already identical)")
+                continue
+            lines[rep_start:target.end] = reindented
+            verify_syntax_balance('.qml', lines, rel)
+            log.append(f"[+] QML FIX {snd.label()}  ({rel}:{rep_start + 1}-{rep_start + len(reindented)})")
+        elif eff == 'ADD':
+            if matches:
+                raise PatchError(
+                    f"QML {snd.kind} '{snd.name}' already exists at line {matches[0].header + 1} in {rel}; use '### QML FIX:'"
+                )
+            chunk = body[snd.start:snd.end]
+            _insert_qml_raw_snippet(lines, chunk, directives, rel, log, label=snd.label())
+            verify_syntax_balance('.qml', lines, rel)
+
+
+def _insert_qml_raw_snippet(lines, chunk, directives, rel, log, label="qml:item"):
+    file_nodes = parse_qml_nodes(lines, attach_comments=True)
+    masked = mask_qml('\n'.join(lines))
+    ml = masked.split('\n')
+
+    if 'before' in directives or 'after' in directives:
+        key = 'before' if 'before' in directives else 'after'
+        ref_name = directives[key]
+        matches = [nd for nd in file_nodes if nd.name == ref_name]
+        if not matches:
+            raise PatchError(f"QML @{key} target '{ref_name}' not found in {rel}")
+        ref = matches[0]
+        reindented = reindent_block(chunk, ref.indent)
+        pos = ref.start if key == 'before' else ref.end
+        ins = (reindented + ['']) if key == 'before' else ([''] + reindented)
+        lines[pos:pos] = ins
+        log.append(f"[+] QML ADD {label} (@{key}:{ref_name} at {rel}:{pos + 1})")
+        return
+
+    if 'inside' in directives:
+        parent_id = directives['inside']
+        matches = [nd for nd in file_nodes if nd.kind == 'id' and nd.name == parent_id]
+        if not matches:
+            raise PatchError(f"QML @inside id '{parent_id}' not found in {rel}")
+        parent = matches[0]
+        close_line = parent.end - 1
+        child_indent = parent.indent + 4
+        reindented = reindent_block(chunk, child_indent)
+        ins = [''] + reindented if lines[close_line - 1].strip() else reindented
+        lines[close_line:close_line] = ins
+        log.append(f"[+] QML ADD {label} (@inside:{parent_id} at {rel}:{close_line + 1})")
+        return
+
+    root_open = None
+    for i, m in enumerate(ml):
+        if '{' in m:
+            root_open = i
+            break
+    if root_open is None:
+        raise PatchError(f"{rel}: could not locate root QML object '{{'")
+    root_end = _find_balanced_end(ml, root_open, '{', '}')
+    if root_end is None:
+        raise PatchError(f"{rel}: unbalanced root QML object")
+    root_indent = len(lines[root_open]) - len(lines[root_open].lstrip(' \t'))
+    child_indent = root_indent + 4
+    reindented = reindent_block(chunk, child_indent)
+    ins = [''] + reindented if root_end > 0 and lines[root_end - 1].strip() else reindented
+    lines[root_end:root_end] = ins
+    log.append(f"[+] QML ADD {label} ({rel}:{root_end + 1})")
+
+
+# ==============================================================================
+# Inline Context-Anchored Editor (### EDIT: path/to/file)
+# ==============================================================================
+
+def parse_edit_hunks(body_lines, start_line_num):
+    """Parses one or more <<< FIND ... === ... >>> hunks inside an ### EDIT block."""
+    hunks = []
+    i = 0
+    n = len(body_lines)
+    while i < n:
+        s = body_lines[i].strip()
+        if not s:
+            i += 1
+            continue
+        if s.startswith('<<<'):
+            hunk_line = start_line_num + i
+            i += 1
+            find_lines = []
+            while i < n and not body_lines[i].strip().startswith('==='):
+                find_lines.append(body_lines[i].rstrip('\r'))
+                i += 1
+            if i >= n:
+                raise PatchError(f"line {hunk_line}: '<<< FIND' is missing '===' separator")
+            i += 1  # skip ===
+            rep_lines = []
+            while i < n and not body_lines[i].strip().startswith('>>>'):
+                rep_lines.append(body_lines[i].rstrip('\r'))
+                i += 1
+            if i >= n:
+                raise PatchError(f"line {hunk_line}: '<<< FIND' block is missing closing '>>>'")
+            i += 1  # skip >>>
+
+            while find_lines and not find_lines[0].strip():
+                find_lines.pop(0)
+            while find_lines and not find_lines[-1].strip():
+                find_lines.pop()
+            while rep_lines and not rep_lines[0].strip():
+                rep_lines.pop(0)
+            while rep_lines and not rep_lines[-1].strip():
+                rep_lines.pop()
+
+            if not find_lines:
+                raise PatchError(f"line {hunk_line}: empty FIND block inside '### EDIT'")
+            hunks.append((hunk_line, find_lines, rep_lines))
+        else:
+            raise PatchError(
+                f"line {start_line_num + i}: unexpected text outside '<<< FIND ... === ... >>>' in ### EDIT: "
+                f"{s[:50]!r}"
+            )
+    if not hunks:
+        raise PatchError("no '<<< FIND ... === ... >>>' hunks found in ### EDIT block")
+    return hunks
+
+
+def _min_indent(lines):
+    indents = [len(l) - len(l.lstrip(' ')) for l in lines if l.strip()]
+    return min(indents) if indents else 0
+
+
+def _relative_profile(lines):
+    """Returns (base_indent, [(rel_indent, stripped_text), ...]) for indentation-safe matching."""
+    expanded = [l.expandtabs(4).rstrip() for l in lines]
+    base = _min_indent(expanded)
+    profile = []
+    for l in expanded:
+        s = l.strip()
+        if not s:
+            profile.append((0, ''))
+        else:
+            lead = len(l) - len(l.lstrip(' '))
+            profile.append((lead - base, s))
+    return base, profile
+
+
+def find_hunk_in_lines(file_lines, find_lines, rel, hunk_line):
+    """Finds a unique occurrence of `find_lines` inside `file_lines`."""
+    m = len(find_lines)
+    n = len(file_lines)
+    if m > n:
+        raise PatchError(f"line {hunk_line}: FIND block ({m} lines) is longer than {rel} ({n} lines)")
+
+    # Pass 1: Exact match (with rstrip)
+    norm_find = [l.rstrip() for l in find_lines]
+    norm_file = [l.rstrip() for l in file_lines]
+    exact_matches = [
+        idx for idx in range(n - m + 1)
+        if norm_file[idx:idx + m] == norm_find
+    ]
+    if len(exact_matches) == 1:
+        idx = exact_matches[0]
+        target_base = _min_indent([l.expandtabs(4) for l in file_lines[idx:idx + m]])
+        return idx, idx + m, target_base
+    if len(exact_matches) > 1:
+        raise PatchError(
+            f"line {hunk_line}: FIND block is ambiguous in {rel} (matched {len(exact_matches)} times "
+            f"at lines {[x + 1 for x in exact_matches]}). Include 1-2 more surrounding context lines."
+        )
+
+    # Pass 2: Indentation-insensitive relative structure match
+    _, find_prof = _relative_profile(find_lines)
+    rel_matches = []
+    for idx in range(n - m + 1):
+        window = file_lines[idx:idx + m]
+        if window[0].strip() != find_prof[0][1]:
+            continue
+        w_base, w_prof = _relative_profile(window)
+        if w_prof == find_prof:
+            rel_matches.append((idx, w_base))
+
+    if len(rel_matches) == 1:
+        idx, target_base = rel_matches[0]
+        return idx, idx + m, target_base
+    if len(rel_matches) > 1:
+        raise PatchError(
+            f"line {hunk_line}: FIND block is ambiguous in {rel} (matched {len(rel_matches)} times "
+            f"at lines {[x[0] + 1 for x in rel_matches]}). Include more surrounding context lines."
+        )
+
+    first_non_empty = next((l.strip() for l in find_lines if l.strip()), "")
+    near_lines = []
+    if first_non_empty:
+        for idx, fl in enumerate(file_lines):
+            if first_non_empty in fl.strip() or difflib.SequenceMatcher(None, first_non_empty, fl.strip()).ratio() > 0.72:
+                near_lines.append(f"L{idx + 1}: {fl.strip()[:65]}")
+                if len(near_lines) >= 3:
+                    break
+
+    hint = f" Closest lines in {rel}: {near_lines}" if near_lines else ""
+    raise PatchError(
+        f"line {hunk_line}: FIND block not found in {rel} (starting with {first_non_empty[:55]!r}).{hint}"
+    )
+
+
+def apply_edit_block(st, ext, body_lines, op_line, rel, log):
+    lines = st['lines']
+    verify_syntax_balance(ext, lines, rel)
+    hunks = parse_edit_hunks(body_lines, op_line)
+
+    for h_idx, (hunk_line, find_lines, rep_lines) in enumerate(hunks, 1):
+        start_i, end_i, target_base_indent = find_hunk_in_lines(lines, find_lines, rel, hunk_line)
+        if not rep_lines:
+            del lines[start_i:end_i]
+            log.append(f"[-] EDIT   hunk #{h_idx} deleted lines {start_i + 1}-{end_i} in {rel}")
+            continue
+
+        find_base = _min_indent([l.expandtabs(4) for l in find_lines])
+        rep_expanded = [l.expandtabs(4).rstrip() for l in rep_lines]
+        rep_base = _min_indent(rep_expanded)
+
+        base_to_strip = find_base if rep_base >= find_base else rep_base
+        adapted_rep = []
+        for l in rep_expanded:
+            if not l.strip():
+                adapted_rep.append('')
+            else:
+                cur_indent = len(l) - len(l.lstrip(' '))
+                rel_offset = max(0, cur_indent - base_to_strip)
+                new_indent = target_base_indent + rel_offset
+                adapted_rep.append((' ' * new_indent) + l.lstrip(' '))
+
+        if lines[start_i:end_i] == adapted_rep:
+            log.append(f"[=] EDIT   hunk #{h_idx} at {rel}:{start_i + 1} (already identical)")
+        else:
+            lines[start_i:end_i] = adapted_rep
+            log.append(
+                f"[+] EDIT   hunk #{h_idx} applied ({rel}:{start_i + 1}-{start_i + len(adapted_rep)})"
+            )
+
+    verify_syntax_balance(ext, lines, rel)
+
+
 # ==============================================================================
 # Rust top-level item parser
 # ==============================================================================
@@ -280,7 +938,6 @@ _IDENT = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
 
 
 def rust_header(m):
-    """Classify a (masked) line -> (kind, raw_name) or (None, None)."""
     toks = _TOK.findall(m.strip())
     n, k = len(toks), 0
     if k < n and toks[k] == 'pub':
@@ -374,7 +1031,7 @@ def parse_rust(lines, attach_comments=False):
         if raw[0] in ' \t':
             i += 1
             continue
-        if not m.strip():                                  # comment-only line
+        if not m.strip():
             if s.startswith('///') or s.startswith('/**') or attach_comments:
                 if pending is None:
                     pending = i
@@ -432,7 +1089,6 @@ def py_header_name(ml, lines, header, end):
         t = ' '.join(' '.join(ml[header:end]).split())
         t = re.sub(r',\s*\)', ')', t)
         t = re.sub(r'\(\s+', '(', t)
-        t = re.sub(r'\s+\)', ')', t)
         return 'import', t
     mm = re.match(r'([A-Za-z_]\w*)\s*(?::[^=]+)?=(?!=)', m)
     if mm:
@@ -481,11 +1137,14 @@ def parse_items(ext, lines, attach_comments=False):
         return parse_rust(lines, attach_comments)
     if ext == '.py':
         return parse_python(lines, attach_comments)
-    raise PatchError(f"ITEM operations support only .rs and .py files (got '{ext}'); use '### FILE:' for this file")
+    raise PatchError(
+        f"ITEM operations support only .rs and .py files (got '{ext}'); "
+        f"use '### QML FIX:' or '### EDIT:' for QML/other files"
+    )
 
 
 # ==============================================================================
-# DELETE selectors  (short signatures, e.g. 'fn foo', 'impl A for B', 'class X')
+# DELETE selectors (Rust / Python)
 # ==============================================================================
 
 def parse_selectors(ext, body):
@@ -735,7 +1394,7 @@ def apply_upsert(st, ext, action, body, it, rel, log):
         if has_prefix and ext == '.rs':
             old_docs = [l for l in lines[t.start:t.header] if l.lstrip().startswith('///')]
             if old_docs and not any(l.lstrip().startswith(('///', '/**')) for l in new_lines[:it.header - it.start]):
-                new_lines = old_docs + new_lines          # keep existing doc comments
+                new_lines = old_docs + new_lines
         lines[rs:t.end] = new_lines
         delta = 0
         where = f"{rs + 1}-{rs + len(new_lines)}"
@@ -754,7 +1413,7 @@ def apply_upsert(st, ext, action, body, it, rel, log):
             last = items[-1] if items else None
             if (ext == '.py' and last is not None and last.kind == 'other'
                     and last.name.replace(' ', '').startswith('if__name__')):
-                p0 = last.start                       # keep the __main__ guard last
+                p0 = last.start
                 while p0 > 0 and not lines[p0 - 1].strip():
                     p0 -= 1
                 lines[p0:last.start] = [''] * sep + new_lines + ['', '']
@@ -803,7 +1462,10 @@ def apply_delete(st, ext, kind, name, cfg, rel, log):
 # Patch parsing
 # ==============================================================================
 
-HDR = re.compile(r'^###\s*(FILE|ITEM)\b(?:\s+(ADD|DELETE|FIX|UPSERT|REPLACE))?\s*:\s*(.+?)\s*$', re.I)
+HDR = re.compile(
+    r'^###\s*(FILE|ITEM|QML|EDIT)\b(?:\s+(ADD|DELETE|FIX|UPSERT|REPLACE))?\s*:\s*(.+?)\s*$',
+    re.I
+)
 END = re.compile(r'^###\s*END\b', re.I)
 
 
@@ -846,10 +1508,10 @@ def parse_patch(raw):
         if not closed:
             errors.append(f"line {start + 1}: block for '{rel}' is not closed with '### END'")
             continue
-        if kind == 'FILE' and action:
-            errors.append(f"line {start + 1}: '### FILE' does not take an action ({action})")
+        if kind in ('FILE', 'EDIT') and action:
+            errors.append(f"line {start + 1}: '### {kind}' does not take an action ({action})")
             continue
-        if kind == 'ITEM':
+        if kind in ('ITEM', 'QML'):
             action = {'': 'UPSERT', 'REPLACE': 'FIX'}.get(action, action)
         try:
             path = safe_path(rel)
@@ -891,6 +1553,7 @@ def process_file(rel, ops):
                 if st is None:
                     st = {'lines': [], 'final_nl': True, 'crlf': False, 'bom': False}
                 st['lines'] = body
+                verify_syntax_balance(ext, st['lines'], rel)
                 log.append(f"[+] FILE   {'replaced' if existed else 'created'}  {rel}")
                 continue
 
@@ -898,9 +1561,20 @@ def process_file(rel, ops):
                 hint = suggest_files(rel)
                 raise PatchError(f"target file '{rel}' does not exist" +
                                  (f" (did you mean {hint}?)" if hint else "") + "; use '### FILE:' to create files")
+
+            if op['kind'] == 'EDIT':
+                apply_edit_block(st, ext, op['body'], op['line'], rel, log)
+                continue
+
+            if op['kind'] == 'QML':
+                if ext != '.qml':
+                    raise PatchError(f"QML operations support only .qml files (got '{ext}')")
+                apply_qml_op(st, op['action'], op['body'], rel, log)
+                continue
+
             if ext not in ('.rs', '.py'):
-                parse_items(ext, [])            # raises the proper message
-            parse_items(ext, st['lines'])       # file must be well-formed before we touch it
+                parse_items(ext, [])
+            parse_items(ext, st['lines'])
             action = op['action']
 
             if action == 'DELETE':
@@ -940,18 +1614,97 @@ def process_file(rel, ops):
 
 
 # ==============================================================================
-# Main
+# Project-wide Backup & Revert (--re) + Main
 # ==============================================================================
 
-def write_staged(staged):
+def save_project_backup(staged, raw_patch=""):
+    """Saves a clean single-level snapshot of all affected files into .project_backup/."""
+    files_dir = os.path.join(BACKUP_DIR, "files")
+    if os.path.exists(BACKUP_DIR):
+        shutil.rmtree(BACKUP_DIR)
+    os.makedirs(files_dir, exist_ok=True)
+
+    manifest = {
+        "modified": [],
+        "created": []
+    }
+
+    for path, (_, existed) in staged.items():
+        norm_p = path.replace("\\", "/")
+        if existed and os.path.exists(path):
+            dest = os.path.join(files_dir, norm_p)
+            os.makedirs(os.path.dirname(dest), exist_ok=True)
+            shutil.copy2(path, dest)
+            manifest["modified"].append(norm_p)
+        else:
+            manifest["created"].append(norm_p)
+
+    if raw_patch:
+        with open(os.path.join(BACKUP_DIR, PATCH_FILENAME), "w", encoding="utf-8") as pf:
+            pf.write(raw_patch)
+
+    with open(os.path.join(BACKUP_DIR, "manifest.json"), "w", encoding="utf-8") as mf:
+        json.dump(manifest, mf, indent=2)
+
+
+def revert_last_update():
+    """Reverts the project to the exact state right before the last update (--re)."""
+    manifest_path = os.path.join(BACKUP_DIR, "manifest.json")
+    files_dir = os.path.join(BACKUP_DIR, "files")
+
+    if not os.path.exists(manifest_path):
+        print("\n[ERR] No backup snapshot found in '.project_backup/' to revert!")
+        return
+
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as mf:
+            manifest = json.load(mf)
+    except Exception as e:
+        print(f"\n[ERR] Failed to read backup manifest: {e}")
+        return
+
+    restored_count = 0
+    removed_count = 0
+
+    for rel_p in manifest.get("modified", []):
+        src = os.path.join(files_dir, rel_p)
+        if os.path.exists(src):
+            d = os.path.dirname(rel_p)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            shutil.copy2(src, rel_p)
+            print(f"  [↺] Restored: {rel_p}")
+            restored_count += 1
+
+    for rel_p in manifest.get("created", []):
+        if os.path.exists(rel_p):
+            try:
+                os.remove(rel_p)
+                print(f"  [-] Removed newly created file: {rel_p}")
+                removed_count += 1
+            except OSError:
+                pass
+
+    backup_patch = os.path.join(BACKUP_DIR, PATCH_FILENAME)
+    if os.path.exists(backup_patch):
+        shutil.copy2(backup_patch, PATCH_FILENAME)
+        print(f"  [↺] Restored last '{PATCH_FILENAME}' content")
+
+    shutil.rmtree(BACKUP_DIR, ignore_errors=True)
+    print(f"\n[OK] Reverted last update ({restored_count} restored, {removed_count} removed).")
+
+    tree_str, source_files = get_project_data('.')
+    write_full_dump(tree_str, source_files)
+
+
+def write_staged(staged, raw_patch=""):
     written = []
     try:
+        save_project_backup(staged, raw_patch)
         for path, (st, existed) in staged.items():
             d = os.path.dirname(path)
             if d:
                 os.makedirs(d, exist_ok=True)
-            if existed:
-                shutil.copyfile(path, path + ".bak")
             fd, tmp = tempfile.mkstemp(dir=d or '.', prefix='.patch_tmp_')
             try:
                 with os.fdopen(fd, 'wb') as f:
@@ -964,15 +1717,8 @@ def write_staged(staged):
                     os.remove(tmp)
             written.append((path, existed))
     except Exception as e:
-        print(f"\n[ERR] Write failed ({e}); rolling back...")
-        for path, existed in reversed(written):
-            try:
-                if existed:
-                    shutil.copyfile(path + ".bak", path)
-                else:
-                    os.remove(path)
-            except Exception:
-                pass
+        print(f"\n[ERR] Write failed ({e}); rolling back from '.project_backup/'...")
+        revert_last_update()
         return False
     return True
 
@@ -1001,7 +1747,7 @@ def apply_patch(dry_run=False):
         print("\nNothing was written. 'patch.txt' was kept.")
         return
     if not ops_map:
-        print("\n[ERR] No valid '### FILE:' / '### ITEM:' blocks found in patch.txt. Nothing written.")
+        print("\n[ERR] No valid '### FILE:' / '### ITEM:' / '### QML:' / '### EDIT:' blocks found in patch.txt.")
         return
 
     staged, errors = {}, []
@@ -1025,20 +1771,22 @@ def apply_patch(dry_run=False):
         print(f"\n[OK] --check: patch is valid for {len(staged)} file(s). Nothing was written.")
         return
 
-    if not write_staged(staged):
+    if not write_staged(staged, raw_patch):
         print("Nothing was changed. 'patch.txt' was kept.")
         return
 
     for rel in staged:
         print(f"  [+] Patched: {rel}")
-    shutil.copyfile(PATCH_FILENAME, PATCH_FILENAME + ".bak")
     with open(PATCH_FILENAME, 'w', encoding='utf-8') as f:
         f.write("")
-    print(f"\n[OK] Successfully applied patch to {len(staged)} file(s).")
+    print(f"\n[OK] Successfully applied patch to {len(staged)} file(s). (Use '--re' to undo)")
 
     tree_str, source_files = get_project_data('.')
     write_full_dump(tree_str, source_files)
 
 
 if __name__ == "__main__":
-    apply_patch(dry_run=('--check' in sys.argv or '--dry' in sys.argv))
+    if '--re' in sys.argv or '--revert' in sys.argv:
+        revert_last_update()
+    else:
+        apply_patch(dry_run=('--check' in sys.argv or '--dry' in sys.argv))

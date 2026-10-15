@@ -5,34 +5,57 @@ import ".."
 
 RowLayout {
     id: root
-    spacing: Math.round(10 * Theme.scaleFactor)
+    spacing: isUltraCompactBar ? 2 : Math.round(5 * Theme.scaleFactor)
 
+    property var appWindow: null
     property bool isEditingPath: false
     property bool isSearchActive: false
+    readonly property bool isCompactBar: width < Math.round(680 * Theme.scaleFactor)
+    readonly property bool isNarrowBar: width < Math.round(490 * Theme.scaleFactor)
+    readonly property bool isUltraCompactBar: width < Math.round(370 * Theme.scaleFactor)
+
+    function focusPathInput() {
+        root.isEditingPath = true
+        pathInput.forceActiveFocus()
+        pathInput.selectAll()
+    }
+
+    function toggleSearch() {
+        root.isSearchActive = !root.isSearchActive
+        if (root.isSearchActive) {
+            searchInput.forceActiveFocus()
+        } else {
+            backend.searchFast("")
+        }
+    }
 
     component ToolBtn: Rectangle {
         property string iconText: ""
         property string btnText: ""
         property bool isEnabled: true
+        property bool isActiveToggle: false
         signal clicked()
         signal rightClicked()
 
-        implicitWidth: btnText !== "" ? Math.round(80 * Theme.scaleFactor) : Math.round(38 * Theme.scaleFactor)
-        implicitHeight: Math.round(38 * Theme.scaleFactor)
+        readonly property bool showText: btnText !== "" && !root.isCompactBar
+        implicitWidth: showText ? Math.round(70 * Theme.scaleFactor) : Math.round((root.isNarrowBar ? 28 : 32) * Theme.scaleFactor)
+        implicitHeight: Math.round((root.isNarrowBar ? 28 : 32) * Theme.scaleFactor)
         radius: Theme.radiusMedium
-        color: !isEnabled ? "transparent" : (btnMouse.containsMouse ? Theme.bgHover : "transparent")
+        color: !isEnabled ? "transparent" : (isActiveToggle ? Theme.bgSelected : (btnMouse.containsMouse ? Theme.bgHover : "transparent"))
+        border.color: isActiveToggle ? Theme.accent : "transparent"
+        border.width: isActiveToggle ? 1 : 0
         opacity: isEnabled ? 1.0 : 0.35
 
         RowLayout {
             anchors.centerIn: parent
-            spacing: 6
+            spacing: 4
             Text {
                 text: iconText
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontSizeMedium
             }
             Text {
-                visible: btnText !== ""
+                visible: parent.parent.showText
                 text: btnText
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontSizeNormal
@@ -57,37 +80,57 @@ RowLayout {
         }
     }
 
-    // Left Navigation Controls
+    // Left Navigation & Panel Controls
     RowLayout {
-        spacing: 4
+        spacing: 2
         Layout.alignment: Qt.AlignVCenter
 
         ToolBtn {
+            iconText: "◧"
+            isActiveToggle: root.appWindow ? root.appWindow.userShowSidebar : true
+            onClicked: {
+                if (root.appWindow) {
+                    if (root.appWindow.isSidebarCompactRail) {
+                        root.appWindow.railExpandedOverride = true
+                    } else if (root.appWindow.railExpandedOverride) {
+                        root.appWindow.railExpandedOverride = false
+                    } else {
+                        root.appWindow.userShowSidebar = !root.appWindow.userShowSidebar
+                    }
+                }
+            }
+        }
+
+        ToolBtn {
             iconText: "←"
-            isEnabled: backend.canGoBack
-            onClicked: backend.goBack()
+            isEnabled: backend ? backend.canGoBack : false
+            onClicked: if (backend) backend.goBack()
         }
         ToolBtn {
+            visible: !root.isUltraCompactBar
             iconText: "→"
-            isEnabled: backend.canGoForward
-            onClicked: backend.goForward()
+            isEnabled: backend ? backend.canGoForward : false
+            onClicked: if (backend) backend.goForward()
         }
         ToolBtn {
+            visible: !root.isUltraCompactBar
             iconText: "↑"
             isEnabled: true
-            onClicked: backend.goUp()
+            onClicked: if (backend) backend.goUp()
         }
         ToolBtn {
+            visible: !root.isCompactBar
             iconText: "⟳"
             isEnabled: true
-            onClicked: backend.refresh()
+            onClicked: if (backend) backend.refresh()
         }
     }
 
-    // Center: Balanced Breadcrumbs & Search Area
+    // Center Address Bar (Protected minimum width so icons never collide!)
     Rectangle {
         Layout.fillWidth: true
-        implicitHeight: Math.round(40 * Theme.scaleFactor)
+        Layout.minimumWidth: Math.round(95 * Theme.scaleFactor)
+        implicitHeight: Math.round((root.isNarrowBar ? 30 : 35) * Theme.scaleFactor)
         radius: Theme.radiusMedium
         color: Theme.bgSurface
         border.color: (pathInput.activeFocus || searchInput.activeFocus) ? Theme.borderFocus : Theme.borderDim
@@ -96,9 +139,9 @@ RowLayout {
 
         RowLayout {
             anchors.fill: parent
-            anchors.leftMargin: Math.round(12 * Theme.scaleFactor)
-            anchors.rightMargin: Math.round(8 * Theme.scaleFactor)
-            spacing: 6
+            anchors.leftMargin: Math.round(8 * Theme.scaleFactor)
+            anchors.rightMargin: Math.round(6 * Theme.scaleFactor)
+            spacing: 4
 
             Text {
                 Layout.alignment: Qt.AlignVCenter
@@ -106,27 +149,38 @@ RowLayout {
                 font.pixelSize: Theme.fontSizeMedium
             }
 
-            // Normal Breadcrumbs View
-            ScrollView {
+            Flickable {
+                id: crumbFlick
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 visible: !root.isEditingPath && !root.isSearchActive
+                contentWidth: crumbRow.implicitWidth
+                contentHeight: height
                 clip: true
-                ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+                boundsBehavior: Flickable.StopAtBounds
+
+                onContentWidthChanged: {
+                    if (contentWidth > width) {
+                        contentX = contentWidth - width
+                    } else {
+                        contentX = 0
+                    }
+                }
 
                 RowLayout {
-                    spacing: 3
-                    anchors.verticalCenter: parent.verticalCenter
+                    id: crumbRow
+                    height: parent.height
+                    spacing: 2
 
                     Repeater {
-                        model: backend.breadcrumbs
+                        model: backend ? backend.breadcrumbs : []
                         delegate: RowLayout {
-                            spacing: 3
+                            spacing: 2
                             Layout.alignment: Qt.AlignVCenter
 
                             Rectangle {
-                                implicitHeight: Math.round(28 * Theme.scaleFactor)
-                                implicitWidth: crumbText.implicitWidth + Math.round(14 * Theme.scaleFactor)
+                                implicitHeight: Math.round(24 * Theme.scaleFactor)
+                                implicitWidth: crumbText.implicitWidth + Math.round(10 * Theme.scaleFactor)
                                 radius: Theme.radiusSmall
                                 color: crumbMouse.containsMouse ? Theme.bgHover : "transparent"
 
@@ -159,15 +213,12 @@ RowLayout {
 
                     Item {
                         Layout.fillWidth: true
-                        implicitHeight: 28
+                        implicitWidth: 32
+                        implicitHeight: 24
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.IBeamCursor
-                            onClicked: {
-                                root.isEditingPath = true
-                                pathInput.forceActiveFocus()
-                                pathInput.selectAll()
-                            }
+                            onClicked: root.focusPathInput()
                         }
                     }
                 }
@@ -178,12 +229,17 @@ RowLayout {
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignVCenter
                 visible: root.isEditingPath && !root.isSearchActive
-                text: backend.currentPath
+                text: backend ? backend.currentPath : ""
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontSizeNormal
                 verticalAlignment: TextInput.AlignVCenter
                 selectByMouse: true
                 selectionColor: Theme.accent
+                clip: true
+
+                Keys.onEscapePressed: {
+                    root.isEditingPath = false
+                }
 
                 onAccepted: {
                     backend.navigateTo(text)
@@ -206,6 +262,12 @@ RowLayout {
                 verticalAlignment: TextInput.AlignVCenter
                 selectByMouse: true
                 selectionColor: Theme.accent
+                clip: true
+
+                Keys.onEscapePressed: {
+                    root.isSearchActive = false
+                    backend.searchFast("")
+                }
 
                 onTextChanged: {
                     backend.searchFast(text)
@@ -213,23 +275,25 @@ RowLayout {
             }
 
             ToolBtn {
+                visible: !root.isNarrowBar
                 Layout.alignment: Qt.AlignVCenter
-                implicitWidth: Math.round(30 * Theme.scaleFactor)
-                implicitHeight: Math.round(30 * Theme.scaleFactor)
+                implicitWidth: Math.round(26 * Theme.scaleFactor)
+                implicitHeight: Math.round(26 * Theme.scaleFactor)
                 iconText: "📋"
-                onClicked: backend.copyToClipboard(backend.currentPath)
+                onClicked: if (backend) backend.copyToClipboard(backend.currentPath)
             }
 
             ToolBtn {
                 Layout.alignment: Qt.AlignVCenter
-                implicitWidth: Math.round(30 * Theme.scaleFactor)
-                implicitHeight: Math.round(30 * Theme.scaleFactor)
+                implicitWidth: Math.round(26 * Theme.scaleFactor)
+                implicitHeight: Math.round(26 * Theme.scaleFactor)
                 iconText: root.isEditingPath ? "✔" : "✎"
                 onClicked: {
-                    root.isEditingPath = !root.isEditingPath
                     if (root.isEditingPath) {
-                        pathInput.forceActiveFocus()
-                        pathInput.selectAll()
+                        backend.navigateTo(pathInput.text)
+                        root.isEditingPath = false
+                    } else {
+                        root.focusPathInput()
                     }
                 }
             }
@@ -238,158 +302,270 @@ RowLayout {
 
     // Right Action Panel
     RowLayout {
-        spacing: 6
+        spacing: 3
         Layout.alignment: Qt.AlignVCenter
 
         ToolBtn {
             iconText: root.isSearchActive ? "✕" : "🔍"
-            onClicked: {
-                root.isSearchActive = !root.isSearchActive
-                if (root.isSearchActive) {
-                    searchInput.forceActiveFocus()
-                } else {
-                    backend.searchFast("")
-                }
-            }
+            onClicked: root.toggleSearch()
         }
 
         ToolBtn {
+            visible: !root.isUltraCompactBar
             iconText: "＋"
             btnText: "New"
             onClicked: newMenu.popup()
 
-            Menu {
+            StyledMenu {
                 id: newMenu
-                MenuItem {
-                    text: "📁 Folder"
-                    onTriggered: backend.createItem("folder", "New Folder")
+                StyledMenuItem {
+                    iconGlyph: "📁"
+                    text: "Folder"
+                    font.bold: true
+                    onTriggered: backend.createItem("folder", "")
                 }
-                MenuSeparator {}
-                MenuItem {
-                    text: "📄 Text Document (.txt)"
-                    onTriggered: backend.createItem("txt", "New Text Document.txt")
+                MenuSeparator {
+                    contentItem: Rectangle { implicitHeight: 1; color: Theme.borderDim }
                 }
-                MenuItem {
-                    text: "🐍 Python Script (.py)"
-                    onTriggered: backend.createItem("py", "main.py")
+                StyledMenuItem {
+                    iconGlyph: "📄"
+                    text: "Text Document (.txt)"
+                    onTriggered: backend.createItem("txt", "")
                 }
-                MenuItem {
-                    text: "🦀 Rust File (.rs)"
-                    onTriggered: backend.createItem("rs", "main.rs")
+                StyledMenuItem {
+                    iconGlyph: "🐍"
+                    text: "Python Script (.py)"
+                    onTriggered: backend.createItem("py", "")
                 }
-                MenuItem {
-                    text: "📋 JSON File (.json)"
-                    onTriggered: backend.createItem("json", "config.json")
+                StyledMenuItem {
+                    iconGlyph: "🦀"
+                    text: "Rust Source (.rs)"
+                    onTriggered: backend.createItem("rs", "")
                 }
-                MenuItem {
-                    text: "🔗 Symbolic Link"
-                    onTriggered: backend.createItem("link", "Shortcut")
+                StyledMenuItem {
+                    iconGlyph: "📋"
+                    text: "JSON File (.json)"
+                    onTriggered: backend.createItem("json", "")
                 }
-                MenuSeparator {}
-                MenuItem {
-                    text: "◻️ Empty File"
-                    onTriggered: backend.createItem("empty", "file")
+                StyledMenuItem {
+                    iconGlyph: "🔗"
+                    text: "Symbolic Link"
+                    onTriggered: backend.createItem("link", "")
+                }
+                MenuSeparator {
+                    contentItem: Rectangle { implicitHeight: 1; color: Theme.borderDim }
+                }
+                StyledMenuItem {
+                    iconGlyph: "◻️"
+                    text: "Empty File"
+                    onTriggered: backend.createItem("empty", "")
                 }
             }
         }
 
         ToolBtn {
+            visible: !root.isNarrowBar
             iconText: "⇅"
             btnText: "Sort"
             onClicked: sortMenu.popup()
 
-            Menu {
+            StyledMenu {
                 id: sortMenu
-                MenuItem {
-                    text: "Name" + (backend.sortBy === "name" ? (backend.sortAscending ? " ▲" : " ▼") : "")
-                    onTriggered: backend.setSort("name")
+                StyledMenuItem {
+                    iconGlyph: (backend && backend.sortBy === "name") ? (backend.sortAscending ? "▲" : "▼") : ""
+                    text: "Name"
+                    onTriggered: if (backend) backend.setSort("name")
                 }
-                MenuItem {
-                    text: "Date Modified" + (backend.sortBy === "modified" ? (backend.sortAscending ? " ▲" : " ▼") : "")
-                    onTriggered: backend.setSort("modified")
+                StyledMenuItem {
+                    iconGlyph: (backend && backend.sortBy === "modified") ? (backend.sortAscending ? "▲" : "▼") : ""
+                    text: "Date Modified"
+                    onTriggered: if (backend) backend.setSort("modified")
                 }
-                MenuItem {
-                    text: "Date Created" + (backend.sortBy === "created" ? (backend.sortAscending ? " ▲" : " ▼") : "")
-                    onTriggered: backend.setSort("created")
+                StyledMenuItem {
+                    iconGlyph: (backend && backend.sortBy === "created") ? (backend.sortAscending ? "▲" : "▼") : ""
+                    text: "Date Created"
+                    onTriggered: if (backend) backend.setSort("created")
                 }
-                MenuItem {
-                    text: "Size" + (backend.sortBy === "size" ? (backend.sortAscending ? " ▲" : " ▼") : "")
-                    onTriggered: backend.setSort("size")
+                StyledMenuItem {
+                    iconGlyph: (backend && backend.sortBy === "size") ? (backend.sortAscending ? "▲" : "▼") : ""
+                    text: "Size"
+                    onTriggered: if (backend) backend.setSort("size")
                 }
             }
         }
 
-        // View Mode Switcher with Left Click (Toggle) and Right Click (Settings Menu)
         ToolBtn {
             id: viewModeBtn
-            iconText: backend.viewMode === "details" ? "☰" : "☵"
-            onClicked: backend.setViewMode(backend.viewMode === "details" ? "grid" : "details")
+            iconText: (backend && backend.viewMode === "details") ? "☰" : "☵"
+            onClicked: if (backend) backend.setViewMode(backend.viewMode === "details" ? "grid" : "details")
             onRightClicked: layoutSettingsMenu.popup(viewModeBtn, 0, viewModeBtn.height)
 
-            Menu {
+            StyledMenu {
                 id: layoutSettingsMenu
 
-                MenuItem {
+                StyledMenuItem {
                     text: "View: Details List"
                     checkable: true
-                    checked: backend.viewMode === "details"
-                    onTriggered: backend.setViewMode("details")
+                    checked: backend ? backend.viewMode === "details" : true
+                    onTriggered: if (backend) backend.setViewMode("details")
                 }
-                MenuItem {
-                    text: "View: Grid Cards"
+                StyledMenuItem {
+                    text: "View: Grid Mode"
                     checkable: true
-                    checked: backend.viewMode === "grid"
-                    onTriggered: backend.setViewMode("grid")
+                    checked: backend ? backend.viewMode === "grid" : false
+                    onTriggered: if (backend) backend.setViewMode("grid")
                 }
 
-                MenuSeparator {}
+                MenuSeparator {
+                    contentItem: Rectangle { implicitHeight: 1; color: Theme.borderDim }
+                }
 
-                Menu {
+                StyledMenuItem {
+                    text: "Grid Style: Floating Preview"
+                    checkable: true
+                    checked: backend ? backend.gridStyle === "floating" : true
+                    onTriggered: if (backend) { backend.setViewMode("grid"); backend.setGridStyle("floating"); }
+                }
+                StyledMenuItem {
+                    text: "Grid Style: Framed Cards"
+                    checkable: true
+                    checked: backend ? backend.gridStyle === "cards" : false
+                    onTriggered: if (backend) { backend.setViewMode("grid"); backend.setGridStyle("cards"); }
+                }
+
+                MenuSeparator {
+                    contentItem: Rectangle { implicitHeight: 1; color: Theme.borderDim }
+                }
+
+                StyledMenu {
                     title: "Grid Columns"
-                    MenuItem {
+                    iconGlyph: "🔢"
+
+                    StyledMenuItem {
                         text: "Auto Fit (Responsive)"
                         checkable: true
-                        checked: backend.gridColumns === 0
-                        onTriggered: { backend.setViewMode("grid"); backend.setGridColumns(0); }
+                        checked: backend ? backend.gridColumns === 0 : true
+                        onTriggered: if (backend) { backend.setViewMode("grid"); backend.setGridColumns(0); }
                     }
-                    MenuItem {
+                    StyledMenuItem {
                         text: "3 Columns"
                         checkable: true
-                        checked: backend.gridColumns === 3
-                        onTriggered: { backend.setViewMode("grid"); backend.setGridColumns(3); }
+                        checked: backend ? backend.gridColumns === 3 : false
+                        onTriggered: if (backend) { backend.setViewMode("grid"); backend.setGridColumns(3); }
                     }
-                    MenuItem {
+                    StyledMenuItem {
                         text: "4 Columns"
                         checkable: true
-                        checked: backend.gridColumns === 4
-                        onTriggered: { backend.setViewMode("grid"); backend.setGridColumns(4); }
+                        checked: backend ? backend.gridColumns === 4 : false
+                        onTriggered: if (backend) { backend.setViewMode("grid"); backend.setGridColumns(4); }
                     }
-                    MenuItem {
+                    StyledMenuItem {
                         text: "5 Columns"
                         checkable: true
-                        checked: backend.gridColumns === 5
-                        onTriggered: { backend.setViewMode("grid"); backend.setGridColumns(5); }
+                        checked: backend ? backend.gridColumns === 5 : false
+                        onTriggered: if (backend) { backend.setViewMode("grid"); backend.setGridColumns(5); }
                     }
-                    MenuItem {
+                    StyledMenuItem {
                         text: "6 Columns"
                         checkable: true
-                        checked: backend.gridColumns === 6
-                        onTriggered: { backend.setViewMode("grid"); backend.setGridColumns(6); }
+                        checked: backend ? backend.gridColumns === 6 : false
+                        onTriggered: if (backend) { backend.setViewMode("grid"); backend.setGridColumns(6); }
                     }
                 }
 
-                MenuSeparator {}
+                MenuSeparator {
+                    contentItem: Rectangle { implicitHeight: 1; color: Theme.borderDim }
+                }
 
-                MenuItem {
+                StyledMenuItem {
+                    text: "Show Hidden Files (Dotfiles)"
+                    shortcutText: "Ctrl+H"
+                    checkable: true
+                    checked: backend ? backend.showHidden : false
+                    onTriggered: if (backend) backend.toggleShowHidden()
+                }
+
+                MenuSeparator {
+                    contentItem: Rectangle { implicitHeight: 1; color: Theme.borderDim }
+                }
+
+                StyledMenuItem {
+                    iconGlyph: "📂"
                     text: "Apply to All Subfolders"
-                    onTriggered: backend.applyCurrentLayoutToSubfolders()
+                    onTriggered: if (backend) backend.applyCurrentLayoutToSubfolders()
                 }
             }
         }
 
         ToolBtn {
+            visible: !root.isNarrowBar
+            iconText: "◨"
+            isActiveToggle: root.appWindow ? root.appWindow.effectiveShowPreview : false
+            onClicked: {
+                if (root.appWindow) {
+                    root.appWindow.userShowPreview = !root.appWindow.userShowPreview
+                }
+            }
+        }
+
+        ToolBtn {
+            visible: !root.isNarrowBar
             iconText: "⚙️"
             onClicked: settingsDialog.open()
+        }
+
+        // Compact Overflow Menu Button (Appears automatically on narrow Hyprland tiles so icons never overlap)
+        ToolBtn {
+            visible: root.isNarrowBar
+            iconText: "⋯"
+            onClicked: overflowBarMenu.popup()
+
+            StyledMenu {
+                id: overflowBarMenu
+
+                StyledMenuItem {
+                    visible: root.isUltraCompactBar
+                    iconGlyph: "＋"
+                    text: "New Item..."
+                    onTriggered: newMenu.popup()
+                }
+                StyledMenuItem {
+                    visible: root.isUltraCompactBar
+                    iconGlyph: "↑"
+                    text: "Go Up Folder"
+                    onTriggered: if (backend) backend.goUp()
+                }
+                StyledMenuItem {
+                    iconGlyph: "⇅"
+                    text: "Sort By..."
+                    onTriggered: sortMenu.popup()
+                }
+                StyledMenuItem {
+                    iconGlyph: "◨"
+                    text: "Toggle Details Preview"
+                    checkable: true
+                    checked: root.appWindow ? root.appWindow.userShowPreview : false
+                    onTriggered: if (root.appWindow) root.appWindow.userShowPreview = !root.appWindow.userShowPreview
+                }
+                StyledMenuItem {
+                    iconGlyph: "📋"
+                    text: "Copy Current Path"
+                    onTriggered: if (backend) backend.copyToClipboard(backend.currentPath)
+                }
+                StyledMenuItem {
+                    iconGlyph: "⟳"
+                    text: "Refresh"
+                    onTriggered: if (backend) backend.refresh()
+                }
+                MenuSeparator {
+                    contentItem: Rectangle { implicitHeight: 1; color: Theme.borderDim }
+                }
+                StyledMenuItem {
+                    iconGlyph: "⚙️"
+                    text: "Settings"
+                    onTriggered: settingsDialog.open()
+                }
+            }
         }
     }
 

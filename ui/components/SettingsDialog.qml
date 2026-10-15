@@ -6,18 +6,17 @@ import ".."
 Dialog {
     id: root
     title: "Find - Settings"
-    width: Math.round(780 * Theme.scaleFactor)
-    height: Math.round(540 * Theme.scaleFactor)
+    width: Overlay.overlay ? Math.min(Math.round(740 * Theme.scaleFactor), Overlay.overlay.width - 20) : 780
+    height: Overlay.overlay ? Math.min(Math.round(520 * Theme.scaleFactor), Overlay.overlay.height - 20) : 550
     modal: true
-    anchors.centerIn: parent
+    anchors.centerIn: Overlay.overlay
 
-    property var hiddenItemsList: backend.getHiddenSidebarItems()
-    property var customQAList: backend.getAllCustomQuickAccess()
-    property var defaultIconsMap: backend.getDefaultTypeIcons()
+    property var hiddenItemsList: backend ? backend.getHiddenSidebarItems() : []
+    property var customQAList: backend ? backend.getAllCustomQuickAccess() : []
+    property var defaultIconsMap: backend ? backend.getDefaultTypeIcons() : ({})
     property int selectedQAIndex: -1
     property string activePickerTarget: ""
 
-    // Listen to internal picker return
     Connections {
         target: backend
         function onPickerCompleted(paths) {
@@ -32,7 +31,7 @@ Dialog {
                     backend.setDefaultTypeIcon(key, selected)
                     root.defaultIconsMap = backend.getDefaultTypeIcons()
                 }
-                backend.picker.deactivate()
+                backend.cancelPicker()
                 root.open()
             }
         }
@@ -46,7 +45,7 @@ Dialog {
     }
 
     header: Rectangle {
-        height: Math.round(48 * Theme.scaleFactor)
+        height: Math.round(46 * Theme.scaleFactor)
         color: Theme.bgCard
         radius: Theme.radiusLarge
 
@@ -54,12 +53,14 @@ Dialog {
             anchors.fill: parent
             anchors.leftMargin: 16
             anchors.rightMargin: 16
+            spacing: 10
 
             Text {
                 text: "⚙️ Find Settings"
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontSizeTitle
                 font.bold: true
+                visible: root.width > Math.round(460 * Theme.scaleFactor)
             }
 
             Item { Layout.fillWidth: true }
@@ -68,25 +69,166 @@ Dialog {
                 id: settingsTabs
                 background: Rectangle { color: "transparent" }
 
-                TabButton { text: "General & Cache" }
+                TabButton { text: "General & UI" }
                 TabButton { text: "Quick Access" }
-                TabButton { text: "Default Icons" }
-                TabButton { text: "Hidden Items" }
+                TabButton { text: "Icons" }
+                TabButton { text: "Hidden" }
             }
         }
     }
 
     StackLayout {
         anchors.fill: parent
-        anchors.margins: Math.round(16 * Theme.scaleFactor)
+        anchors.margins: Math.round(14 * Theme.scaleFactor)
         currentIndex: settingsTabs.currentIndex
 
-        // TAB 1: General & Cache
+        // TAB 1: General, Grid Style & Hyprland Layout
         ColumnLayout {
-            spacing: Math.round(14 * Theme.scaleFactor)
+            spacing: Math.round(12 * Theme.scaleFactor)
 
             Text {
-                text: "Storage & Cache Management"
+                text: "Grid Preview & Layout Style"
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontSizeMedium
+                font.bold: true
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 10
+                Text {
+                    text: "Media & Folder Display Mode:"
+                    color: Theme.textSecondary
+                    font.pixelSize: Theme.fontSizeNormal
+                    Layout.fillWidth: true
+                }
+
+                Button {
+                    text: "✨ Floating Preview"
+                    onClicked: if (backend) backend.setGridStyle("floating")
+                    contentItem: Text {
+                        text: parent.text
+                        color: "#ffffff"
+                        font.bold: backend ? backend.gridStyle === "floating" : true
+                        font.pixelSize: Theme.fontSizeSmall
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: Math.round(135 * Theme.scaleFactor)
+                        implicitHeight: Math.round(30 * Theme.scaleFactor)
+                        radius: Theme.radiusSmall
+                        color: (backend && backend.gridStyle === "floating") ? Theme.accent : Theme.bgCard
+                        border.color: (backend && backend.gridStyle === "floating") ? Theme.accentHover : Theme.borderDim
+                    }
+                }
+
+                Button {
+                    text: "🃏 Framed Cards"
+                    onClicked: if (backend) backend.setGridStyle("cards")
+                    contentItem: Text {
+                        text: parent.text
+                        color: "#ffffff"
+                        font.bold: backend ? backend.gridStyle === "cards" : false
+                        font.pixelSize: Theme.fontSizeSmall
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: Math.round(125 * Theme.scaleFactor)
+                        implicitHeight: Math.round(30 * Theme.scaleFactor)
+                        radius: Theme.radiusSmall
+                        color: (backend && backend.gridStyle === "cards") ? Theme.accent : Theme.bgCard
+                        border.color: (backend && backend.gridStyle === "cards") ? Theme.accentHover : Theme.borderDim
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Text {
+                    text: "Quick Access Sidebar Layout:"
+                    color: Theme.textSecondary
+                    font.pixelSize: Theme.fontSizeNormal
+                    Layout.fillWidth: true
+                }
+
+                Repeater {
+                    model: [
+                        { key: "auto", label: "Auto (Hyprland)" },
+                        { key: "full", label: "Full Sidebar" },
+                        { key: "rail", label: "Icon Rail" },
+                        { key: "topbar", label: "Top Strip" }
+                    ]
+                    delegate: Button {
+                        text: modelData.label
+                        onClicked: if (backend) backend.setSidebarMode(modelData.key)
+                        contentItem: Text {
+                            text: parent.text
+                            color: "#ffffff"
+                            font.bold: backend ? backend.sidebarMode === modelData.key : false
+                            font.pixelSize: Theme.fontSizeSmall
+                            horizontalAlignment: Text.AlignHCenter
+                        }
+                        background: Rectangle {
+                            implicitWidth: Math.round(96 * Theme.scaleFactor)
+                            implicitHeight: Math.round(28 * Theme.scaleFactor)
+                            radius: Theme.radiusSmall
+                            color: (backend && backend.sidebarMode === modelData.key) ? Theme.accent : Theme.bgCard
+                            border.color: (backend && backend.sidebarMode === modelData.key) ? Theme.accentHover : Theme.borderDim
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Text {
+                    text: "Transparent Window (Hyprland Blur Ready):"
+                    color: Theme.textSecondary
+                    font.pixelSize: Theme.fontSizeNormal
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                }
+                Switch {
+                    checked: backend ? backend.transparentBlur : false
+                    onToggled: if (backend) backend.transparentBlur = checked
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Text {
+                    text: "Show Hidden Files & Folders (Ctrl+H):"
+                    color: Theme.textSecondary
+                    font.pixelSize: Theme.fontSizeNormal
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                }
+                Switch {
+                    checked: backend ? backend.showHidden : false
+                    onToggled: if (backend) backend.setShowHidden(checked)
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Text {
+                    text: "Swap Left & Right Mouse Button Roles (Select/Drag):"
+                    color: Theme.textSecondary
+                    font.pixelSize: Theme.fontSizeNormal
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                }
+                Switch {
+                    checked: backend ? backend.swapMouseButtons : false
+                    onToggled: if (backend) backend.setSwapMouseButtons(checked)
+                }
+            }
+
+            Rectangle { Layout.fillWidth: true; height: 1; color: Theme.borderDim }
+
+            Text {
+                text: "Storage & Thumbnail Cache"
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontSizeMedium
                 font.bold: true
@@ -100,7 +242,7 @@ Dialog {
                     font.pixelSize: Theme.fontSizeNormal
                 }
                 Text {
-                    text: backend.currentCacheSize
+                    text: backend ? backend.currentCacheSize : "0 B"
                     color: Theme.accent
                     font.pixelSize: Theme.fontSizeNormal
                     font.bold: true
@@ -131,8 +273,8 @@ Dialog {
                     from: 100
                     to: 4000
                     stepSize: 50
-                    value: backend.maxCacheMb
-                    onMoved: backend.setMaxCacheMb(Math.round(value))
+                    value: backend ? backend.maxCacheMb : 500
+                    onMoved: if (backend) backend.setMaxCacheMb(Math.round(value))
                 }
             }
 
@@ -142,33 +284,25 @@ Dialog {
                 contentItem: Text {
                     text: parent.text
                     color: Theme.textDanger
+                    font.bold: true
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
                 }
                 background: Rectangle {
+                    implicitWidth: Math.round(140 * Theme.scaleFactor)
+                    implicitHeight: Math.round(32 * Theme.scaleFactor)
                     color: parent.hovered ? Theme.bgHover : Theme.bgCard
                     radius: Theme.radiusMedium
                     border.color: Theme.borderDim
                 }
             }
 
-            Rectangle {
-                Layout.fillWidth: true
-                height: 1
-                color: Theme.borderDim
-            }
-
-            Text {
-                text: "Configuration: ~/.config/find/config.json"
-                color: Theme.textTertiary
-                font.pixelSize: Math.round(10 * Theme.scaleFactor)
-            }
             Item { Layout.fillHeight: true }
         }
 
-        // TAB 2: Quick Access Editor (Uses Main Unified In-App Picker)
+        // TAB 2: Quick Access Editor
         RowLayout {
-            spacing: Math.round(16 * Theme.scaleFactor)
+            spacing: Math.round(14 * Theme.scaleFactor)
 
             ColumnLayout {
                 Layout.fillWidth: true
@@ -182,55 +316,52 @@ Dialog {
                     font.bold: true
                 }
 
-                ScrollView {
+                ListView {
+                    id: qaListView
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
+                    model: root.customQAList
+                    spacing: 4
 
-                    ListView {
-                        id: qaListView
-                        model: root.customQAList
-                        spacing: 4
+                    delegate: Rectangle {
+                        width: qaListView.width
+                        height: Math.round(34 * Theme.scaleFactor)
+                        radius: Theme.radiusSmall
+                        color: root.selectedQAIndex === index ? Theme.bgSelected : (itemHover.containsMouse ? Theme.bgHover : Theme.bgCard)
+                        border.color: Theme.borderDim
 
-                        delegate: Rectangle {
-                            width: qaListView.width - 10
-                            height: 34
-                            radius: Theme.radiusSmall
-                            color: root.selectedQAIndex === index ? Theme.bgSelected : (itemHover.containsMouse ? Theme.bgHover : Theme.bgCard)
-                            border.color: Theme.borderDim
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 8
+                            anchors.rightMargin: 8
+                            spacing: 8
 
-                            RowLayout {
-                                anchors.fill: parent
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 8
-                                spacing: 8
-
-                                Text { text: modelData.icon; font.pixelSize: Theme.fontSizeNormal }
-                                Text {
-                                    text: modelData.name
-                                    color: Theme.textPrimary
-                                    font.bold: true
-                                    Layout.preferredWidth: 90
-                                    elide: Text.ElideRight
-                                }
-                                Text {
-                                    text: modelData.path
-                                    color: Theme.textTertiary
-                                    Layout.fillWidth: true
-                                    elide: Text.ElideMiddle
-                                }
+                            Text { text: modelData.icon; font.pixelSize: Theme.fontSizeNormal }
+                            Text {
+                                text: modelData.name
+                                color: Theme.textPrimary
+                                font.bold: true
+                                Layout.preferredWidth: 90
+                                elide: Text.ElideRight
                             }
+                            Text {
+                                text: modelData.path
+                                color: Theme.textTertiary
+                                Layout.fillWidth: true
+                                elide: Text.ElideMiddle
+                            }
+                        }
 
-                            MouseArea {
-                                id: itemHover
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                onClicked: {
-                                    root.selectedQAIndex = index
-                                    nameInput.text = modelData.name
-                                    pathInput.text = modelData.path
-                                    iconInput.text = modelData.icon
-                                }
+                        MouseArea {
+                            id: itemHover
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            onClicked: {
+                                root.selectedQAIndex = index
+                                nameInput.text = modelData.name
+                                pathInput.text = modelData.path
+                                iconInput.text = modelData.icon
                             }
                         }
                     }
@@ -327,88 +458,21 @@ Dialog {
                     }
                 }
             }
-
-            Rectangle {
-                Layout.preferredWidth: Math.round(240 * Theme.scaleFactor)
-                Layout.fillHeight: true
-                color: Theme.bgSidebar
-                radius: Theme.radiusMedium
-                border.color: Theme.borderDim
-
-                ColumnLayout {
-                    anchors.fill: parent
-                    anchors.margins: 14
-                    spacing: 10
-
-                    Text {
-                        text: "Live Sidebar Preview"
-                        color: Theme.textTertiary
-                        font.pixelSize: Theme.fontSizeSmall
-                        font.bold: true
-                    }
-
-                    Rectangle {
-                        Layout.fillWidth: true
-                        height: 36
-                        radius: Theme.radiusMedium
-                        color: Theme.bgSelected
-
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 12
-                            anchors.rightMargin: 12
-                            spacing: 10
-
-                            Item {
-                                implicitWidth: 20
-                                implicitHeight: 20
-                                Image {
-                                    anchors.fill: parent
-                                    visible: iconInput.text.indexOf("/") !== -1 || iconInput.text.indexOf(".") !== -1
-                                    source: visible ? (iconInput.text.startsWith("/") ? "file://" + iconInput.text : iconInput.text) : ""
-                                    fillMode: Image.PreserveAspectFit
-                                }
-                                Text {
-                                    anchors.centerIn: parent
-                                    visible: !parent.children[0].visible
-                                    text: iconInput.text !== "" ? iconInput.text : "🏠"
-                                    font.pixelSize: Theme.fontSizeMedium
-                                }
-                            }
-
-                            Text {
-                                Layout.fillWidth: true
-                                text: nameInput.text !== "" ? nameInput.text : "Sample"
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontSizeNormal
-                                font.bold: true
-                                elide: Text.ElideRight
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: "Path: " + (pathInput.text !== "" ? pathInput.text : "-")
-                        color: Theme.textSecondary
-                        font.pixelSize: Theme.fontSizeSmall
-                        wrapMode: Text.WrapAnywhere
-                        Layout.fillWidth: true
-                    }
-
-                    Item { Layout.fillHeight: true }
-                }
-            }
         }
 
         // TAB 3: Default Icons Configuration
-        ScrollView {
+        Flickable {
+            id: iconFlick
             Layout.fillWidth: true
             Layout.fillHeight: true
+            contentWidth: width
+            contentHeight: iconCol.implicitHeight + 16
             clip: true
 
             ColumnLayout {
-                width: parent.width
-                spacing: 10
+                id: iconCol
+                width: iconFlick.width
+                spacing: 8
 
                 Text {
                     text: "Customize Default File & Folder Icons"
@@ -432,7 +496,7 @@ Dialog {
 
                     delegate: Rectangle {
                         Layout.fillWidth: true
-                        height: 42
+                        implicitHeight: Math.round(38 * Theme.scaleFactor)
                         color: Theme.bgCard
                         radius: Theme.radiusSmall
                         border.color: Theme.borderDim
@@ -444,10 +508,11 @@ Dialog {
                             spacing: 12
 
                             Text {
-                                Layout.preferredWidth: 160
+                                Layout.preferredWidth: 150
                                 text: modelData.label
                                 color: Theme.textPrimary
                                 font.bold: true
+                                elide: Text.ElideRight
                             }
 
                             Text {
@@ -482,42 +547,39 @@ Dialog {
                 font.bold: true
             }
 
-            ScrollView {
+            ListView {
+                id: hiddenListView
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
+                model: root.hiddenItemsList
+                spacing: 6
 
-                ListView {
-                    id: hiddenListView
-                    model: root.hiddenItemsList
-                    spacing: 6
+                delegate: Rectangle {
+                    width: hiddenListView.width
+                    height: Math.round(36 * Theme.scaleFactor)
+                    radius: Theme.radiusSmall
+                    color: Theme.bgCard
+                    border.color: Theme.borderDim
 
-                    delegate: Rectangle {
-                        width: hiddenListView.width - 10
-                        height: 38
-                        radius: Theme.radiusSmall
-                        color: Theme.bgCard
-                        border.color: Theme.borderDim
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
 
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 12
-                            anchors.rightMargin: 12
+                        Text {
+                            Layout.fillWidth: true
+                            text: modelData
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontSizeNormal
+                            elide: Text.ElideMiddle
+                        }
 
-                            Text {
-                                Layout.fillWidth: true
-                                text: modelData
-                                color: Theme.textPrimary
-                                font.pixelSize: Theme.fontSizeNormal
-                                elide: Text.ElideMiddle
-                            }
-
-                            Button {
-                                text: "Restore"
-                                onClicked: {
-                                    backend.restoreSidebarItem(modelData)
-                                    root.hiddenItemsList = backend.getHiddenSidebarItems()
-                                }
+                        Button {
+                            text: "Restore"
+                            onClicked: {
+                                backend.restoreSidebarItem(modelData)
+                                root.hiddenItemsList = backend.getHiddenSidebarItems()
                             }
                         }
                     }

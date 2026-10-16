@@ -18,6 +18,13 @@ class ConfigManager:
         "swap_mouse_buttons": False,
         "auto_play_hdr": True,
         "daemon_autostart": True,
+        "restore_last_session": True,
+        "startup_path": str(Path.home()),
+        "last_session": {
+            "tabs": [],
+            "active_index": 0
+        },
+        "custom_icons_dir": "",
         "media_libraries": [],
         "movie_folders": [],
         "mpv_both_config": (
@@ -80,6 +87,9 @@ class ConfigManager:
         ),
         "hidden_sidebar_paths": [],
         "folder_views": {},
+        "favorites": [],
+        "saved_desktop_apps": [],
+        "fonts_install_dir": str(Path.home() / ".local" / "share" / "fonts"),
         "custom_quick_access": [
             {"name": "Home", "path": str(Path.home()), "icon": "🏠"},
             {"name": "Desktop", "path": str(Path.home() / "Desktop"), "icon": "🖥️"},

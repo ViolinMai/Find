@@ -9,7 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal, QRunnable, QThreadPool
 from PIL import Image, ImageDraw
 
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".ico"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".ico", ".svg"}
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".m4v"}
 TEXT_EXTS = {
     ".txt", ".md", ".py", ".rs", ".json", ".toml", ".yaml", ".yml",
@@ -86,6 +86,9 @@ def generate_single_thumbnail_sync(file_path: str, cache_dir: Path, save_to_cach
                 return str(cand)
 
         thumb_path = target_dir / f"{hash_base}.png"
+
+        if ext == ".svg":
+            return str(p)
 
         if ext in IMAGE_EXTS:
             with Image.open(p) as img:

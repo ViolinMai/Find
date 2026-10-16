@@ -187,7 +187,48 @@ Rectangle {
                 DetailRow { label: "Bitrate"; val: root.hasSelection ? root.safeVal(root.item.bitrate) : "" }
                 DetailRow { label: "Audio Codec"; val: root.hasSelection ? root.safeVal(root.item.audio_codec) : "" }
 
-                DetailRow { label: "Path"; val: root.hasSelection ? root.safeVal(root.item.path) : (backend ? backend.currentPath : "") }
+                // Clickable Path Row -> Copies plaintext path directly on click!
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: pathRowLayout.implicitHeight + 10
+                    radius: Theme.radiusSmall
+                    color: pathCopyMouse.containsMouse ? Theme.bgHover : Theme.bgSurface
+                    border.color: pathCopyMouse.containsMouse ? Theme.accent : Theme.borderDim
+                    border.width: 1
+
+                    RowLayout {
+                        id: pathRowLayout
+                        anchors.fill: parent
+                        anchors.margins: 6
+                        spacing: 6
+
+                        Text {
+                            text: "📋 Path"
+                            color: pathCopyMouse.containsMouse ? Theme.accent : Theme.textTertiary
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.bold: true
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: root.hasSelection ? root.safeVal(root.item.path) : (backend ? backend.currentPath : "")
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontSizeSmall
+                            elide: Text.ElideMiddle
+                        }
+                    }
+
+                    MouseArea {
+                        id: pathCopyMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            if (!backend) return
+                            var p = root.hasSelection ? root.safeVal(root.item.path) : backend.currentPath
+                            if (p !== "") backend.copyToClipboard(p)
+                        }
+                    }
+                }
             }
         }
     }

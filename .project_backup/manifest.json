@@ -1,12 +1,14 @@
 {
   "modified": [
+    "core/thumbnails.py",
     "core/config.py",
     "core/backend.py",
-    "ui/main.qml",
-    "ui/components/FileView.qml",
-    "ui/components/SettingsDialog.qml"
+    "ui/components/DolphinContextMenu.qml",
+    "ui/components/DesktopMakerDialog.qml",
+    "ui/components/SettingsDialog.qml",
+    "ui/main.qml"
   ],
   "created": [
-    "core/media_daemon.py"
+    "ui/components/IconBrowserDialog.qml"
   ]
 }

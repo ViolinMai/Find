@@ -22,6 +22,9 @@ SUBTITLE_EXTS = {".srt", ".ass", ".ssa", ".sub", ".vtt", ".idx", ".sup", ".smi"}
 FONT_EXTS = {".ttf", ".otf", ".woff", ".woff2", ".ttc"}
 from core.search import SearchManager
 from core.picker_context import PickerContext
+from core.portal_service import SystemIntegrationBridge, install_desktop_and_set_default, is_default_file_manager
+
+EXECUTABLE_EXTS = {".appimage", ".sh", ".bin", ".run", ".out", ".py"}
 
 
 def _run_toggle_hdr_script(arg: str):
@@ -127,6 +130,7 @@ class AsyncWorkerSignals(QObject):
     mpvExternalSubDetected = Signal(str, str)
     mpvHdrSessionEnded = Signal(int)
     hdrStatusDetected = Signal(str, bool)
+    externalPickerFinished = Signal(list)
 
 
 class MpvSessionMonitorTask(QRunnable):
@@ -572,6 +576,7 @@ class FileManagerBackend(QObject):
     showHiddenChanged = Signal()
     swapMouseButtonsChanged = Signal()
     autoPlayHdrChanged = Signal()
+    daemonStateChanged = Signal()
     mediaLibraryStateChanged = Signal()
     showSubtitlesChanged = Signal()
     tabsChanged = Signal()
@@ -579,7 +584,13 @@ class FileManagerBackend(QObject):
     maxCacheMbChanged = Signal()
     transparentBlurChanged = Signal()
     sidebarUpdated = Signal()
+    favoritesUpdated = Signal()
+    desktopAppsUpdated = Signal()
+    fontsDirChanged = Signal()
+    defaultFmStateChanged = Signal()
+    toastMessage = Signal(str)
     searchResultsChanged = Signal()
+    searchScopeChanged = Signal()
     folderSizeReady = Signal(str, str)
     pickerCompleted = Signal(list)
 
@@ -615,13 +626,17 @@ class FileManagerBackend(QObject):
         self._selected_paths = []
         self._last_selected_row = -1
         self._search_results = []
+        self._search_scope = "here"
+        self._last_search_query = ""
         self._clipboard_cut = False
         self._clipboard_path = ""
         self._clipboard_paths = []
+        self._pending_highlight_paths = []
         self._folder_size_cache = {}
         self._calculating_folders = set()
 
         self.file_model = FileListModel(self)
+        self.sys_bridge = SystemIntegrationBridge(self, self)
         self.thread_pool = QThreadPool()
         self.thread_pool.setMaxThreadCount(4)
 
@@ -633,9 +648,21 @@ class FileManagerBackend(QObject):
         self.signals.mpvExternalSubDetected.connect(self._on_mpv_external_sub_detected)
         self.signals.mpvHdrSessionEnded.connect(self._on_mpv_hdr_session_ended)
         self.signals.hdrStatusDetected.connect(self._on_hdr_status_detected)
+        self.signals.externalPickerFinished.connect(self._on_external_picker_finished)
 
         self.watcher = QFileSystemWatcher(self)
         self.watcher.directoryChanged.connect(self._on_dir_changed_externally)
+
+        self.progress_watcher = QFileSystemWatcher(self)
+        if not self.config_mgr.progress_file.exists():
+            self.config_mgr.save_progress()
+        self.progress_watcher.addPath(str(self.config_mgr.progress_file))
+        self.progress_watcher.addPath(str(self.config_mgr.config_dir))
+        self.progress_watcher.fileChanged.connect(self._on_progress_file_changed_externally)
+        self.progress_watcher.directoryChanged.connect(self._on_progress_dir_changed_externally)
+
+        if bool(self.config_mgr.get("daemon_autostart", True)):
+            self._ensure_media_daemon_running()
 
         self.thumb_mgr = ThumbnailManager(self.config_mgr.cache_dir, self)
         self.thumb_mgr.thumbnailReady.connect(self._on_thumbnail_ready)
@@ -709,6 +736,207 @@ class FileManagerBackend(QObject):
     def setAutoPlayHdr(self, val: bool):
         self.autoPlayHdr = val
 
+    # ==========================================================================
+    # Media Library Background Daemon Manager (systemd --user + fallback process)
+    # ==========================================================================
+
+    def _get_daemon_service_path(self) -> Path:
+        xdg_config = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+        return Path(xdg_config) / "systemd" / "user" / "find-media-daemon.service"
+
+    def _get_daemon_script_path(self) -> Path:
+        return Path(__file__).resolve().parent / "media_daemon.py"
+
+    def _get_daemon_pid_file(self) -> Path:
+        return Path("/tmp") / f"find_media_daemon_{os.getuid()}.pid"
+
+    def _is_daemon_process_alive(self) -> bool:
+        pid_file = self._get_daemon_pid_file()
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
+                os.kill(pid, 0)
+                return True
+            except Exception:
+                pass
+        try:
+            res = subprocess.run(
+                ["systemctl", "--user", "is-active", "find-media-daemon.service"],
+                capture_output=True, text=True, timeout=1.5
+            )
+            if res.returncode == 0 and res.stdout.strip() == "active":
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _ensure_media_daemon_running(self):
+        if self._is_daemon_process_alive():
+            return
+        srv_file = self._get_daemon_service_path()
+        if srv_file.exists() and shutil.which("systemctl"):
+            try:
+                subprocess.run(["systemctl", "--user", "start", "find-media-daemon.service"], timeout=2.0)
+                if self._is_daemon_process_alive():
+                    self.daemonStateChanged.emit()
+                    return
+            except Exception:
+                pass
+        script = self._get_daemon_script_path()
+        if script.exists():
+            try:
+                subprocess.Popen(
+                    [sys.executable, str(script)],
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                time.sleep(0.15)
+                self.daemonStateChanged.emit()
+            except Exception:
+                pass
+
+    @Property(bool, notify=daemonStateChanged)
+    def isDaemonRunning(self) -> bool:
+        return self._is_daemon_process_alive()
+
+    @Property(bool, notify=daemonStateChanged)
+    def isDaemonInstalled(self) -> bool:
+        return self._get_daemon_service_path().exists()
+
+    @Property(bool, notify=daemonStateChanged)
+    def daemonAutostart(self) -> bool:
+        return bool(self.config_mgr.get("daemon_autostart", True))
+
+    @Slot(bool)
+    def setDaemonAutostart(self, enabled: bool):
+        self.config_mgr.set("daemon_autostart", bool(enabled))
+        if self._get_daemon_service_path().exists() and shutil.which("systemctl"):
+            try:
+                action = "enable" if enabled else "disable"
+                subprocess.run(["systemctl", "--user", action, "find-media-daemon.service"], timeout=2.5)
+            except Exception:
+                pass
+        if enabled:
+            self._ensure_media_daemon_running()
+        self.daemonStateChanged.emit()
+
+    @Slot(result=str)
+    def getDaemonServiceContent(self) -> str:
+        srv = self._get_daemon_service_path()
+        if srv.exists():
+            try:
+                return srv.read_text(encoding="utf-8")
+            except Exception:
+                pass
+        script = self._get_daemon_script_path()
+        return (
+            "[Unit]\n"
+            "Description=Find Media Library MPV Tracker & HDR Daemon\n"
+            "After=graphical-session.target\n\n"
+            "[Service]\n"
+            "Type=simple\n"
+            f"ExecStart={sys.executable} {script}\n"
+            "Restart=on-failure\n"
+            "RestartSec=2\n\n"
+            "[Install]\n"
+            "WantedBy=default.target\n"
+        )
+
+    @Slot(str)
+    def installOrSaveDaemonService(self, custom_unit_content: str = ""):
+        srv = self._get_daemon_service_path()
+        srv.parent.mkdir(parents=True, exist_ok=True)
+        content = custom_unit_content.strip() if custom_unit_content.strip() else self.getDaemonServiceContent()
+        try:
+            srv.write_text(content + "\n", encoding="utf-8")
+            if shutil.which("systemctl"):
+                subprocess.run(["systemctl", "--user", "daemon-reload"], timeout=2.5)
+                if self.daemonAutostart:
+                    subprocess.run(["systemctl", "--user", "enable", "--now", "find-media-daemon.service"], timeout=3.0)
+                else:
+                    subprocess.run(["systemctl", "--user", "restart", "find-media-daemon.service"], timeout=3.0)
+            else:
+                self.restartMediaDaemon()
+        except Exception:
+            pass
+        self.daemonStateChanged.emit()
+
+    @Slot()
+    def startMediaDaemon(self):
+        self._ensure_media_daemon_running()
+        self.daemonStateChanged.emit()
+
+    @Slot()
+    def stopMediaDaemon(self):
+        if self._get_daemon_service_path().exists() and shutil.which("systemctl"):
+            try:
+                subprocess.run(["systemctl", "--user", "stop", "find-media-daemon.service"], timeout=2.5)
+            except Exception:
+                pass
+        pid_file = self._get_daemon_pid_file()
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
+                os.kill(pid, 15)
+            except Exception:
+                pass
+            try:
+                pid_file.unlink()
+            except OSError:
+                pass
+        self.daemonStateChanged.emit()
+
+    @Slot()
+    def restartMediaDaemon(self):
+        self.stopMediaDaemon()
+        time.sleep(0.15)
+        self._ensure_media_daemon_running()
+        self.daemonStateChanged.emit()
+
+    @Slot()
+    def removeDaemonService(self):
+        self.stopMediaDaemon()
+        srv = self._get_daemon_service_path()
+        if srv.exists():
+            if shutil.which("systemctl"):
+                try:
+                    subprocess.run(["systemctl", "--user", "disable", "find-media-daemon.service"], timeout=2.5)
+                except Exception:
+                    pass
+            try:
+                srv.unlink()
+            except OSError:
+                pass
+            if shutil.which("systemctl"):
+                try:
+                    subprocess.run(["systemctl", "--user", "daemon-reload"], timeout=2.5)
+                except Exception:
+                    pass
+        self.daemonStateChanged.emit()
+
+    def _on_progress_dir_changed_externally(self, _dir_path: str):
+        p_str = str(self.config_mgr.progress_file)
+        if os.path.exists(p_str) and p_str not in self.progress_watcher.files():
+            self.progress_watcher.addPath(p_str)
+            self._on_progress_file_changed_externally(p_str)
+
+    def _on_progress_file_changed_externally(self, path_str: str):
+        if os.path.exists(path_str) and path_str not in self.progress_watcher.files():
+            self.progress_watcher.addPath(path_str)
+        self.config_mgr.reload_progress_from_disk()
+        if self.isMediaLibraryView:
+            total = self.file_model.rowCount()
+            for r in range(total):
+                ent = self.file_model.get_entry_at(r)
+                if ent and not ent.get("is_dir", False):
+                    p_info = self.config_mgr.get_media_progress(ent["path"])
+                    self.file_model.update_media_progress(
+                        ent["path"],
+                        float(p_info.get("progress", 0.0)),
+                        bool(p_info.get("watched", False))
+                    )
+
     def _on_hdr_status_detected(self, file_path_str: str, is_hdr: bool):
         self.file_model.update_hdr_status(file_path_str, is_hdr)
         if self._selected_item.get("path") == file_path_str:
@@ -723,7 +951,7 @@ class FileManagerBackend(QObject):
 
     def _check_path_in_media_library(self, path_str: str):
         """Returns (is_in_library: bool, is_movie_folder: bool)."""
-        if not path_str or path_str in ("recent://", "trash://"):
+        if not path_str or path_str in ("recent://", "trash://", "favorites://"):
             return False, False
         try:
             norm_p = os.path.abspath(path_str)
@@ -955,7 +1183,9 @@ class FileManagerBackend(QObject):
         if hdr_mode:
             _run_toggle_hdr_script("--on")
 
-        sock_path = os.path.join(tempfile.gettempdir(), f"find_mpv_{os.getpid()}_{int(time.time() * 1000)}.sock")
+        base_id = f"find_mpv_{os.getpid()}_{int(time.time() * 1000)}"
+        sock_path = os.path.join("/tmp", f"{base_id}.sock")
+        meta_path = os.path.join("/tmp", f"{base_id}.json")
         self._write_system_mpv_conf(hdr_mode=hdr_mode)
         saved = self.config_mgr.get_media_progress(file_path_str)
 
@@ -986,27 +1216,45 @@ class FileManagerBackend(QObject):
 
         cmd.append(file_path_str)
 
+        # Ensure the background daemon is running so it can track MPV and turn off HDR even if Find is closed
+        self._ensure_media_daemon_running()
+
+        if self._is_daemon_process_alive():
+            try:
+                with open(meta_path, "w", encoding="utf-8") as mf:
+                    json.dump({
+                        "file_path": os.path.abspath(file_path_str),
+                        "hdr_mode": bool(hdr_mode),
+                        "initial_pos": initial_pos
+                    }, mf)
+            except Exception:
+                pass
+
         proc = subprocess.Popen(
             cmd,
             start_new_session=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
-        if hdr_mode:
-            self._active_hdr_pids.add(int(proc.pid))
 
-        monitor = MpvSessionMonitorTask(
-            file_path_str,
-            sock_path,
-            proc,
-            hdr_mode,
-            initial_pos,
-            self.config_mgr.get_media_progress,
-            self.signals
-        )
-        QThreadPool.globalInstance().start(monitor)
+        # Fallback to in-process monitor ONLY if the daemon is not running
+        if not self._is_daemon_process_alive():
+            if hdr_mode:
+                self._active_hdr_pids.add(int(proc.pid))
+            monitor = MpvSessionMonitorTask(
+                file_path_str,
+                sock_path,
+                proc,
+                hdr_mode,
+                initial_pos,
+                self.config_mgr.get_media_progress,
+                self.signals
+            )
+            QThreadPool.globalInstance().start(monitor)
 
     def _tab_title_for_path(self, path_str: str) -> str:
+        if path_str == "favorites://":
+            return "Favorites"
         if path_str == "recent://":
             return "Recently Added"
         if path_str == "trash://":
@@ -1047,7 +1295,7 @@ class FileManagerBackend(QObject):
     @Slot(str)
     def addTab(self, path_str: str = ""):
         target = path_str if path_str else str(self._current_path)
-        if target not in ("recent://", "trash://"):
+        if target not in ("recent://", "trash://", "favorites://"):
             target = os.path.expanduser(os.path.expandvars(target))
             if target.startswith("file://"):
                 target = QUrl(target).toLocalFile() or target[7:]
@@ -1107,6 +1355,43 @@ class FileManagerBackend(QObject):
     def nextTab(self):
         if len(self._tabs) > 1:
             self.switchTab((self._active_tab_index + 1) % len(self._tabs))
+
+    @Slot(int, int)
+    def moveTab(self, from_idx: int, to_idx: int):
+        if not (0 <= from_idx < len(self._tabs)) or not (0 <= to_idx < len(self._tabs)):
+            return
+        if from_idx == to_idx:
+            return
+        self._sync_current_tab_state()
+        item = self._tabs.pop(from_idx)
+        self._tabs.insert(to_idx, item)
+        if self._active_tab_index == from_idx:
+            self._active_tab_index = to_idx
+        elif from_idx < self._active_tab_index <= to_idx:
+            self._active_tab_index -= 1
+        elif to_idx <= self._active_tab_index < from_idx:
+            self._active_tab_index += 1
+        self.tabsChanged.emit()
+
+    @Slot(int)
+    def detachTabToNewWindow(self, index: int):
+        if not (0 <= index < len(self._tabs)):
+            return
+        target_path = self._tabs[index].get("path", str(Path.home()))
+        if target_path in ("recent://", "trash://"):
+            target_path = str(Path.home())
+        main_script = Path(__file__).resolve().parent.parent / "main.py"
+        try:
+            subprocess.Popen(
+                [sys.executable, str(main_script), target_path],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            if len(self._tabs) > 1:
+                self.closeTab(index)
+        except Exception:
+            pass
 
     @Slot(str, str, str)
     def startSystemDrag(self, file_path_str: str, display_name: str = "", icon_glyph: str = "📄"):
@@ -1195,6 +1480,8 @@ class FileManagerBackend(QObject):
 
     @Property(list, notify=breadcrumbsChanged)
     def breadcrumbs(self):
+        if str(self._current_path) == "favorites://":
+            return [{"name": "⭐ Favorites", "path": "favorites://"}]
         if str(self._current_path) == "recent://":
             return [{"name": "Recently Added", "path": "recent://"}]
         if str(self._current_path) == "trash://":
@@ -1447,7 +1734,81 @@ class FileManagerBackend(QObject):
         self.selectedItemChanged.emit()
         self.file_model.set_entries(entries)
 
+    def _load_favorites_directory(self):
+        self._current_path = "favorites://"
+        self.currentPathChanged.emit()
+        self.breadcrumbsChanged.emit()
+        self.mediaLibraryStateChanged.emit()
+
+        fav_items = self.getFavorites()
+        entries = []
+        for item in fav_items:
+            p_str = item.get("path", "")
+            if not p_str or not os.path.exists(p_str):
+                continue
+            p_obj = Path(p_str)
+            is_dir = p_obj.is_dir()
+            raw_size = 0
+            raw_mod = 0
+            raw_created = 0
+            size_str = "-"
+            mod_str = "-"
+            created_str = "-"
+            try:
+                st = p_obj.stat()
+                raw_mod = st.st_mtime
+                mod_str = datetime.fromtimestamp(raw_mod).strftime("%Y-%m-%d %H:%M")
+                raw_created = getattr(st, "st_birthtime", st.st_ctime)
+                created_str = datetime.fromtimestamp(raw_created).strftime("%Y-%m-%d %H:%M")
+                if not is_dir:
+                    raw_size = max(0, int(st.st_size))
+                    size_str = self._format_size(raw_size)
+                else:
+                    cached_sz = self._folder_size_cache.get(p_str)
+                    if cached_sz is not None:
+                        raw_size = cached_sz
+                        size_str = self._format_size(cached_sz)
+            except OSError:
+                pass
+
+            icon, file_type = self._determine_icon_and_type(p_obj, is_dir)
+            existing_thumb = self.thumb_mgr.get_existing_thumbnail(p_str) if not is_dir else ""
+            folder_previews = self.thumb_mgr.get_cached_folder_preview(p_str) if is_dir else []
+
+            entries.append({
+                "name": item.get("name", p_obj.name or p_str),
+                "path": p_str,
+                "is_dir": is_dir,
+                "size": size_str,
+                "modified": mod_str,
+                "created": created_str,
+                "icon": icon,
+                "type": file_type,
+                "raw_size": raw_size,
+                "raw_mod": raw_mod,
+                "raw_created": raw_created,
+                "thumb": existing_thumb,
+                "folder_previews": folder_previews,
+                "episode_num": "",
+                "progress": 0.0,
+                "is_watched": False,
+                "is_new": False,
+                "is_movie_item": False,
+                "is_hdr": False
+            })
+
+        # Keep exact user drag-to-order sequence in favorites://
+        self._selected_item = {}
+        self._selected_paths = []
+        self._last_selected_row = -1
+        self.selectedItemChanged.emit()
+        self.selectedPathsChanged.emit()
+        self.file_model.set_entries(entries)
+
     def load_directory(self, target_path_str: str):
+        if target_path_str == "favorites://":
+            self._load_favorites_directory()
+            return
         if target_path_str == "recent://":
             self._load_recent_directory()
             return
@@ -1636,17 +1997,19 @@ class FileManagerBackend(QObject):
         return (video_count / relevant_total) >= 0.90
 
     def _on_directory_loaded(self, path_loaded, entries):
-        if str(self._current_path) in ("recent://", "trash://") or path_loaded != str(self._current_path):
+        if str(self._current_path) in ("recent://", "trash://", "favorites://") or path_loaded != str(self._current_path):
             return
 
         in_lib, is_movie = self._check_path_in_media_library(path_loaded)
         is_episode_folder = (in_lib and not is_movie and self._is_predominantly_video_folder(entries))
 
-        # Only force ascending episode order when the current folder itself is >= 90% videos,
-        # unless the user explicitly saved a custom sort for this exact episode folder!
+        # When the current directory is an episode folder (>= 90% videos),
+        # ignore inherited parent folder sort (like Date Modified on the root Anime folder)
+        # and sort episodes strictly by their episode number in ascending order!
         if is_episode_folder:
             exact_fv = self.config_mgr.get_folder_view(path_loaded)
-            if not exact_fv:
+            # Only use a custom sort if the user explicitly clicked Sort inside THIS exact episode folder (not cascaded from parent)
+            if not exact_fv or exact_fv.get("cascade", False):
                 if self._sort_by != "name":
                     self._sort_by = "name"
                     self.sortByChanged.emit()
@@ -1690,9 +2053,20 @@ class FileManagerBackend(QObject):
         self._selected_item = {}
         self._selected_paths = []
         self._last_selected_row = -1
+        self.file_model.set_entries(entries)
+
+        if self._pending_highlight_paths:
+            to_sel = [p for p in self._pending_highlight_paths if self.file_model.get_row_for_path(p) >= 0]
+            self._pending_highlight_paths = []
+            if to_sel:
+                self._selected_paths = to_sel
+                first_r = self.file_model.get_row_for_path(to_sel[0])
+                ent = self.file_model.get_entry_at(first_r)
+                if ent:
+                    self._last_selected_row = first_r
+                    self._selected_item = dict(ent)
         self.selectedItemChanged.emit()
         self.selectedPathsChanged.emit()
-        self.file_model.set_entries(entries)
 
     def _load_recent_directory(self):
         self._current_path = "recent://"
@@ -1805,26 +2179,34 @@ class FileManagerBackend(QObject):
         def natural_keys(text):
             return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', text.lower())]
 
-        if is_series_lib and self._sort_by == "name":
-            key_func = lambda x: (
+        if self._sort_by == "size":
+            base_key = lambda x: x["raw_size"]
+        elif self._sort_by == "modified":
+            base_key = lambda x: x["raw_mod"]
+        elif self._sort_by == "created":
+            base_key = lambda x: x["raw_created"]
+        else:
+            base_key = lambda x: natural_keys(x["name"])
+
+        dirs = sorted([e for e in entries if e["is_dir"]], key=base_key, reverse=rev)
+
+        if is_series_lib:
+            # In a >=90% video episode folder, sort video files strictly by their extracted episode number!
+            ep_key = lambda x: (
                 0 if x.get("_ep_sort") is not None else 1,
                 float(x["_ep_sort"]) if x.get("_ep_sort") is not None else float("inf"),
                 natural_keys(x["name"])
             )
-        elif self._sort_by == "name":
-            key_func = lambda x: natural_keys(x["name"])
-        elif self._sort_by == "size":
-            key_func = lambda x: x["raw_size"]
-        elif self._sort_by == "modified":
-            key_func = lambda x: x["raw_mod"]
-        elif self._sort_by == "created":
-            key_func = lambda x: x["raw_created"]
+            exact_fv = self.config_mgr.get_folder_view(str(self._current_path))
+            has_manual_override = bool(exact_fv and not exact_fv.get("cascade", False) and self._sort_by != "name")
+            if has_manual_override:
+                files = sorted([e for e in entries if not e["is_dir"]], key=base_key, reverse=rev)
+            else:
+                ep_rev = (not self._sort_ascending) if (exact_fv and not exact_fv.get("cascade", False)) else False
+                files = sorted([e for e in entries if not e["is_dir"]], key=ep_key, reverse=ep_rev)
         else:
-            key_func = lambda x: natural_keys(x["name"])
+            files = sorted([e for e in entries if not e["is_dir"]], key=base_key, reverse=rev)
 
-        dir_key = lambda x: natural_keys(x["name"]) if self._sort_by == "name" else key_func(x)
-        dirs = sorted([e for e in entries if e["is_dir"]], key=dir_key, reverse=rev)
-        files = sorted([e for e in entries if not e["is_dir"]], key=key_func, reverse=rev)
         entries[:] = dirs + files
 
     def _format_size(self, size):
@@ -1850,7 +2232,7 @@ class FileManagerBackend(QObject):
 
     @Slot(str)
     def openEntry(self, file_path_str: str):
-        if file_path_str in ("recent://", "trash://"):
+        if file_path_str in ("recent://", "trash://", "favorites://"):
             self.navigateTo(file_path_str)
             return
 
@@ -2180,7 +2562,7 @@ class FileManagerBackend(QObject):
 
     @Slot()
     def goUp(self):
-        if str(self._current_path) in ("recent://", "trash://"):
+        if str(self._current_path) in ("recent://", "trash://", "favorites://"):
             self.openEntry(str(Path.home()))
             return
         parent = Path(self._current_path).parent
@@ -2211,7 +2593,7 @@ class FileManagerBackend(QObject):
     def navigateTo(self, path_str: str):
         if not path_str:
             return
-        if path_str in ("recent://", "trash://"):
+        if path_str in ("recent://", "trash://", "favorites://"):
             target = path_str
         else:
             target = os.path.expanduser(os.path.expandvars(path_str))
@@ -2232,7 +2614,7 @@ class FileManagerBackend(QObject):
         self.load_directory(target)
         self._update_history_state()
         self._sync_current_tab_state()
-        if self.picker_ctx.isActive and self.picker_ctx.mode == "folder" and target not in ("recent://", "trash://"):
+        if self.picker_ctx.isActive and self.picker_ctx.mode == "folder" and target not in ("recent://", "trash://", "favorites://"):
             self.picker_ctx.setSelectedPath(target)
 
     @Slot(str)
@@ -2474,12 +2856,21 @@ class FileManagerBackend(QObject):
 
     @Slot()
     def confirmPickerSelection(self):
-        chosen = self.picker_ctx.selectedPaths
-        if not chosen:
-            if self.picker_ctx.mode == "folder":
-                chosen = [str(self._current_path)]
-            else:
+        if self.picker_ctx.mode == "save":
+            fname = self.picker_ctx.saveFilename.strip()
+            if not fname:
                 return
+            cur_dir = str(self._current_path)
+            if cur_dir in ("recent://", "trash://"):
+                cur_dir = str(Path.home())
+            chosen = [os.path.join(cur_dir, fname)]
+        else:
+            chosen = self.picker_ctx.selectedPaths
+            if not chosen:
+                if self.picker_ctx.mode == "folder":
+                    chosen = [str(self._current_path)]
+                else:
+                    return
 
         for item_path in chosen:
             print(item_path)
@@ -2491,15 +2882,74 @@ class FileManagerBackend(QObject):
 
     @Slot()
     def cancelPicker(self):
-        self.picker_ctx.deactivate()
-        self.load_directory(str(self._current_path))
         if getattr(self, "_launched_as_picker", False):
             QGuiApplication.exit(1)
+            sys.exit(1)
+        self.picker_ctx.deactivate()
+
+    def _on_external_picker_finished(self, chosen_paths: list):
+        if chosen_paths:
+            self.pickerCompleted.emit(chosen_paths)
 
     @Slot(str, str, str)
-    def openInternalPicker(self, mode: str, filter_str: str, title: str):
-        self.picker_ctx.activate(mode, filter_str, title)
-        self.load_directory(str(self._current_path))
+    @Slot(str, str, str, str)
+    def openInternalPicker(self, mode: str, filter_str: str, title: str, save_filename: str = ""):
+        """
+        If called when launching with --picker CLI flag, activates the picker UI in this window.
+        If called from inside a normal Find window (e.g. Settings Browse...), spawns an independent
+        standalone Picker window process so the main window is never hijacked!
+        """
+        if getattr(self, "_launched_as_picker", False):
+            self.picker_ctx.activate(mode, filter_str, title, save_filename)
+            self.load_directory(str(self._current_path))
+            return
+
+        main_script = str(Path(__file__).resolve().parent.parent / "main.py")
+        cmd = [sys.executable, main_script, "--picker"]
+        if mode == "folder":
+            cmd.append("--folder")
+        elif mode == "multi_file":
+            cmd.append("--multiple")
+        elif mode == "save":
+            cmd.append("--save")
+            if save_filename:
+                cmd.extend(["--save-name", save_filename])
+        if filter_str:
+            cmd.extend(["--filter", filter_str])
+        if title:
+            cmd.extend(["--title", title])
+        start_dir = str(self._current_path)
+        if start_dir in ("recent://", "trash://", "favorites://"):
+            start_dir = str(Path.home())
+        cmd.append(start_dir)
+
+        def _run_picker_proc():
+            try:
+                res = subprocess.run(cmd, capture_output=True, text=True)
+                if res.returncode == 0 and res.stdout.strip():
+                    lines = [ln.strip() for ln in res.stdout.strip().splitlines() if ln.strip()]
+                    if lines:
+                        self.signals.externalPickerFinished.emit(lines)
+            except Exception:
+                pass
+
+        QThreadPool.globalInstance().start(_run_picker_proc)
+
+    def selectMultiplePaths(self, paths_list: list):
+        norm_list = [os.path.abspath(p) for p in paths_list if p]
+        self._pending_highlight_paths = norm_list
+        if norm_list:
+            matched = [p for p in norm_list if self.file_model.get_row_for_path(p) >= 0]
+            if matched:
+                self._pending_highlight_paths = []
+                self._selected_paths = matched
+                r = self.file_model.get_row_for_path(matched[0])
+                ent = self.file_model.get_entry_at(r)
+                if ent:
+                    self._last_selected_row = r
+                    self._selected_item = dict(ent)
+                self.selectedItemChanged.emit()
+                self.selectedPathsChanged.emit()
 
     def _get_unique_path(self, parent_dir: Path, base_name: str, ext: str = "") -> Path:
         target = parent_dir / f"{base_name}{ext}"
@@ -2540,17 +2990,19 @@ class FileManagerBackend(QObject):
 
     @Slot(str)
     def copyToClipboard(self, path_or_text: str):
+        """
+        Copies plain text path(s) to the system clipboard.
+        If multiple items are selected and path_or_text is one of them,
+        copies every selected item's path on its own line as pure plaintext!
+        """
         clipboard = QGuiApplication.clipboard()
-        p = Path(path_or_text)
-        if p.exists():
-            mime = QMimeData()
-            urls = [QUrl.fromLocalFile(str(p.resolve()))]
-            mime.setUrls(urls)
-            mime.setText(str(p))
-            mime.setData("x-special/gnome-copied-files", f"copy\n{urls[0].toString()}".encode("utf-8"))
-            clipboard.setMimeData(mime)
+        if path_or_text in self._selected_paths and len(self._selected_paths) > 1:
+            plain_lines = "\n".join(str(p) for p in self._selected_paths if p)
+            clipboard.setText(plain_lines)
+            self.toastMessage.emit(f"📋 Copied {len(self._selected_paths)} paths to clipboard")
         else:
-            clipboard.setText(path_or_text)
+            clipboard.setText(str(path_or_text))
+            self.toastMessage.emit("📋 Copied path to clipboard")
 
     @Slot(str)
     def openInTerminal(self, dir_path_str: str):
@@ -2618,9 +3070,29 @@ class FileManagerBackend(QObject):
         self.thumb_mgr.requested_folders.clear()
         self.cacheSizeChanged.emit()
 
+    @Property(str, notify=searchScopeChanged)
+    def searchScope(self) -> str:
+        return self._search_scope
+
+    @Slot(str)
+    def setSearchScope(self, scope: str):
+        if scope in ("here", "everywhere") and self._search_scope != scope:
+            self._search_scope = scope
+            self.searchScopeChanged.emit()
+            if self._last_search_query:
+                self.searchFast(self._last_search_query)
+
     @Slot(str)
     def searchFast(self, query: str):
-        self.search_mgr.query(query)
+        self._last_search_query = query
+        self.search_mgr.query(
+            query,
+            scope=self._search_scope,
+            current_dir=str(self._current_path),
+            icon_resolver=self._determine_icon_and_type,
+            thumb_resolver=self.thumb_mgr.get_existing_thumbnail,
+            size_formatter=self._format_size
+        )
 
     @Slot(result=dict)
     def getDefaultTypeIcons(self):
@@ -2667,6 +3139,465 @@ class FileManagerBackend(QObject):
     def saveCustomQuickAccess(self, items: list):
         self.config_mgr.set("custom_quick_access", items)
         self.sidebarUpdated.emit()
+
+    @Slot(int, int)
+    def moveQuickAccessItem(self, from_idx: int, to_idx: int):
+        items = list(self.config_mgr.get("custom_quick_access", []))
+        if not (0 <= from_idx < len(items)) or not (0 <= to_idx < len(items)) or from_idx == to_idx:
+            return
+        entry = items.pop(from_idx)
+        items.insert(to_idx, entry)
+        self.config_mgr.set("custom_quick_access", items)
+        self.sidebarUpdated.emit()
+
+    # ==========================================================================
+    # 1. Favorites Manager (Files & Folders + Custom Ordering)
+    # ==========================================================================
+
+    @Slot(result=list)
+    def getFavorites(self) -> list:
+        raw = self.config_mgr.get("favorites", [])
+        valid = []
+        for item in raw:
+            if isinstance(item, dict) and item.get("path") and os.path.exists(item["path"]):
+                p = Path(item["path"])
+                is_dir = p.is_dir()
+                icon = item.get("icon") or ("⭐" if is_dir else "📄")
+                valid.append({
+                    "name": item.get("name", p.name or item["path"]),
+                    "path": str(p),
+                    "is_dir": is_dir,
+                    "icon": icon
+                })
+        return valid
+
+    @Slot(str, result=bool)
+    def isPathFavorited(self, path_str: str) -> bool:
+        if not path_str:
+            return False
+        norm = os.path.abspath(path_str)
+        return any(os.path.abspath(x.get("path", "")) == norm for x in self.config_mgr.get("favorites", []))
+
+    @Slot(str)
+    def addToFavorites(self, path_str: str):
+        targets = list(self._selected_paths) if (path_str in self._selected_paths and len(self._selected_paths) > 1) else [path_str]
+        favs = list(self.config_mgr.get("favorites", []))
+        existing_paths = {os.path.abspath(x.get("path", "")) for x in favs if isinstance(x, dict)}
+        changed = False
+        for tp in targets:
+            if not tp or not os.path.exists(tp):
+                continue
+            norm = os.path.abspath(tp)
+            if norm in existing_paths:
+                continue
+            p_obj = Path(norm)
+            is_dir = p_obj.is_dir()
+            icon, _ = self._determine_icon_and_type(p_obj, is_dir)
+            favs.append({
+                "name": p_obj.name or norm,
+                "path": norm,
+                "is_dir": is_dir,
+                "icon": icon
+            })
+            existing_paths.add(norm)
+            changed = True
+        if changed:
+            self.config_mgr.set("favorites", favs)
+            self.favoritesUpdated.emit()
+            self.sidebarUpdated.emit()
+
+    @Slot(str)
+    def removeFromFavorites(self, path_str: str):
+        if not path_str:
+            return
+        norm = os.path.abspath(path_str)
+        favs = [x for x in self.config_mgr.get("favorites", []) if os.path.abspath(x.get("path", "")) != norm]
+        self.config_mgr.set("favorites", favs)
+        self.favoritesUpdated.emit()
+        self.sidebarUpdated.emit()
+
+    @Slot(int, int)
+    def moveFavoriteItem(self, from_idx: int, to_idx: int):
+        favs = list(self.config_mgr.get("favorites", []))
+        if not (0 <= from_idx < len(favs)) or not (0 <= to_idx < len(favs)) or from_idx == to_idx:
+            return
+        item = favs.pop(from_idx)
+        favs.insert(to_idx, item)
+        self.config_mgr.set("favorites", favs)
+        self.favoritesUpdated.emit()
+        self.sidebarUpdated.emit()
+        if str(self._current_path) == "favorites://":
+            self._load_favorites_directory()
+
+    @Slot(list)
+    def saveFavoritesList(self, items: list):
+        self.config_mgr.set("favorites", items)
+        self.favoritesUpdated.emit()
+        self.sidebarUpdated.emit()
+
+    # ==========================================================================
+    # 2. Direct Anime / Series Folder Resume Engine
+    # ==========================================================================
+
+    def _find_resume_episode_in_folder(self, folder_path_str: str) -> str:
+        """
+        Finds the exact episode to resume inside an anime/series folder (or its Season subfolders).
+        - If an episode is partially watched (position > 5s and not watched), resumes it immediately.
+        - Otherwise, picks the first unwatched episode right after the highest watched episode.
+        - If none are watched yet, picks Episode 1.
+        """
+        if not folder_path_str or not os.path.isdir(folder_path_str):
+            return ""
+
+        video_entries = []
+        queue = [(os.path.abspath(folder_path_str), 0)]
+        visited = 0
+        while queue and visited < 15:
+            curr_d, depth = queue.pop(0)
+            visited += 1
+            try:
+                with os.scandir(curr_d) as it:
+                    sub_dirs = []
+                    for entry in it:
+                        if entry.name.startswith("."):
+                            continue
+                        if entry.is_dir(follow_symlinks=True) and depth < 2:
+                            sub_dirs.append((entry.path, depth + 1))
+                        elif entry.is_file(follow_symlinks=True):
+                            ext = Path(entry.name).suffix.lower()
+                            if ext in VIDEO_EXTS:
+                                _, ep_num = self._parse_episode_info(entry.name)
+                                video_entries.append((entry.path, entry.name, ep_num))
+                    if not video_entries and sub_dirs:
+                        sub_dirs.sort(key=lambda x: x[0].lower())
+                        queue.extend(sub_dirs)
+            except OSError:
+                pass
+            if video_entries:
+                break
+
+        if not video_entries:
+            return ""
+
+        def _nat_key(text: str):
+            return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', text.lower())]
+
+        video_entries.sort(key=lambda item: (
+            0 if item[2] is not None else 1,
+            float(item[2]) if item[2] is not None else float("inf"),
+            _nat_key(item[1])
+        ))
+
+        in_progress_candidates = []
+        last_watched_idx = -1
+
+        for idx, (fpath, fname, _) in enumerate(video_entries):
+            p_info = self.config_mgr.get_media_progress(fpath)
+            watched = bool(p_info.get("watched", False))
+            pos = float(p_info.get("position", 0.0) or 0.0)
+            prog = float(p_info.get("progress", 0.0) or 0.0)
+            if watched:
+                last_watched_idx = idx
+            elif pos > 5.0 or prog > 0.01:
+                in_progress_candidates.append((idx, pos, fpath))
+
+        # Priority 1: Most recently/furthest in-progress unwatched episode
+        if in_progress_candidates:
+            in_progress_candidates.sort(key=lambda x: x[0], reverse=True)
+            return in_progress_candidates[0][2]
+
+        # Priority 2: Next unwatched episode immediately following the last watched episode
+        if last_watched_idx >= 0:
+            next_idx = last_watched_idx + 1
+            if next_idx < len(video_entries):
+                return video_entries[next_idx][0]
+            return video_entries[last_watched_idx][0]
+
+        # Priority 3: First episode in folder
+        return video_entries[0][0]
+
+    @Slot(str, result=bool)
+    def canResumeFolder(self, folder_path_str: str) -> bool:
+        if not folder_path_str or folder_path_str in ("recent://", "trash://") or not os.path.isdir(folder_path_str):
+            return False
+        in_lib, is_movie = self._check_path_in_media_library(folder_path_str)
+        if in_lib and not is_movie:
+            return bool(self._find_resume_episode_in_folder(folder_path_str))
+        # Also allow resume on any folder that directly contains video episodes
+        try:
+            with os.scandir(folder_path_str) as it:
+                for entry in it:
+                    if entry.is_file() and Path(entry.name).suffix.lower() in VIDEO_EXTS:
+                        return True
+        except OSError:
+            pass
+        return False
+
+    @Slot(str, result=dict)
+    def getResumeFolderInfo(self, folder_path_str: str) -> dict:
+        ep_path = self._find_resume_episode_in_folder(folder_path_str)
+        if not ep_path:
+            return {"has_resume": False, "episode_name": "", "episode_path": "", "ep_num": "", "time_str": ""}
+        name = Path(ep_path).name
+        badge, ep_val = self._parse_episode_info(name)
+        if ep_val is not None:
+            ep_clean = str(int(ep_val)) if float(ep_val).is_integer() else str(ep_val)
+        elif badge:
+            ep_clean = badge.lstrip("0") or "1"
+        else:
+            ep_clean = "1"
+
+        p_info = self.config_mgr.get_media_progress(ep_path)
+        pos = float(p_info.get("position", 0.0) or 0.0)
+        mins, secs = divmod(int(pos), 60)
+        time_str = f"{mins:02d}:{secs:02d}" if pos > 5.0 else ""
+        return {
+            "has_resume": True,
+            "episode_name": name,
+            "episode_path": ep_path,
+            "ep_num": ep_clean,
+            "badge": f"EP {ep_clean}",
+            "time_str": time_str
+        }
+
+    @Slot(str)
+    def resumeMediaFolder(self, folder_path_str: str):
+        target_dir = folder_path_str if folder_path_str else str(self._current_path)
+        ep_path = self._find_resume_episode_in_folder(target_dir)
+        if ep_path and os.path.exists(ep_path):
+            self.openEntry(ep_path)
+
+    # ==========================================================================
+    # 3. Automated .desktop Application Creator & History Registry
+    # ==========================================================================
+
+    @Slot(str, result=bool)
+    def isExecutableFile(self, file_path_str: str) -> bool:
+        if not file_path_str or not os.path.isfile(file_path_str):
+            return False
+        p = Path(file_path_str)
+        if p.suffix.lower() in EXECUTABLE_EXTS:
+            return True
+        try:
+            return os.access(file_path_str, os.X_OK)
+        except OSError:
+            return False
+
+    @Slot(result=list)
+    def getSavedDesktopApps(self) -> list:
+        return list(self.config_mgr.get("saved_desktop_apps", []))
+
+    @Slot(str, result=dict)
+    def getDesktopPresetForExec(self, file_path_str: str) -> dict:
+        if not file_path_str:
+            return {}
+        norm = os.path.abspath(file_path_str)
+        stem = Path(norm).stem
+        for item in self.config_mgr.get("saved_desktop_apps", []):
+            if item.get("exec_target") == norm or item.get("name", "").lower() == stem.lower():
+                return dict(item)
+        clean_title = re.sub(r'[-_\.]+', ' ', stem).strip().title()
+        return {
+            "name": clean_title or stem,
+            "exec_cmd": f"\"{norm}\"",
+            "exec_target": norm,
+            "icon": "application-x-executable",
+            "categories": "Utility;Application;",
+            "terminal": False,
+            "comment": f"Created by Find File Manager for {Path(norm).name}"
+        }
+
+    @Slot(str, str, str, str, bool, str, result=bool)
+    def createAndSaveDesktopApp(
+        self,
+        source_file_path: str,
+        app_name: str,
+        exec_cmd: str,
+        icon_path: str,
+        terminal: bool = False,
+        categories: str = "Utility;Application;"
+    ) -> bool:
+        if not app_name.strip() or not exec_cmd.strip():
+            return False
+        try:
+            if source_file_path and os.path.isfile(source_file_path):
+                try:
+                    st = os.stat(source_file_path)
+                    os.chmod(source_file_path, st.st_mode | stat_mod.S_IXUSR | stat_mod.S_IXGRP | stat_mod.S_IXOTH)
+                except OSError:
+                    pass
+
+            xdg_data = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+            apps_dir = Path(xdg_data) / "applications"
+            apps_dir.mkdir(parents=True, exist_ok=True)
+
+            # Also keep a backup archive of generated .desktop files inside ~/.config/find/desktop_files/
+            backup_dir = self.config_mgr.config_dir / "desktop_files"
+            backup_dir.mkdir(parents=True, exist_ok=True)
+
+            slug = re.sub(r'[^a-z0-9]+', '-', app_name.strip().lower()).strip('-') or "custom-app"
+            desktop_filename = f"find-app-{slug}.desktop"
+            desktop_path = apps_dir / desktop_filename
+            backup_path = backup_dir / desktop_filename
+
+            icon_val = icon_path.strip() if icon_path.strip() else "application-x-executable"
+            cats_val = categories.strip() if categories.strip() else "Utility;Application;"
+            if not cats_val.endswith(";"):
+                cats_val += ";"
+
+            desktop_content = (
+                "[Desktop Entry]\n"
+                "Version=1.0\n"
+                "Type=Application\n"
+                f"Name={app_name.strip()}\n"
+                f"Comment=Launched via Find Desktop Automation\n"
+                f"Exec={exec_cmd.strip()}\n"
+                f"Icon={icon_val}\n"
+                f"Terminal={'true' if terminal else 'false'}\n"
+                "StartupNotify=true\n"
+                f"Categories={cats_val}\n"
+            )
+
+            desktop_path.write_text(desktop_content, encoding="utf-8")
+            backup_path.write_text(desktop_content, encoding="utf-8")
+            try:
+                os.chmod(desktop_path, 0o755)
+            except OSError:
+                pass
+
+            if shutil.which("update-desktop-database"):
+                subprocess.Popen(
+                    ["update-desktop-database", str(apps_dir)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+
+            saved_list = list(self.config_mgr.get("saved_desktop_apps", []))
+            record = {
+                "name": app_name.strip(),
+                "exec_cmd": exec_cmd.strip(),
+                "exec_target": os.path.abspath(source_file_path) if source_file_path else "",
+                "icon": icon_val,
+                "terminal": bool(terminal),
+                "categories": cats_val,
+                "desktop_file": str(desktop_path),
+                "backup_file": str(backup_path),
+                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M")
+            }
+            replaced = False
+            for idx, existing in enumerate(saved_list):
+                if existing.get("desktop_file") == str(desktop_path) or existing.get("name", "").lower() == app_name.strip().lower():
+                    saved_list[idx] = record
+                    replaced = True
+                    break
+            if not replaced:
+                saved_list.insert(0, record)
+
+            self.config_mgr.set("saved_desktop_apps", saved_list)
+            self.desktopAppsUpdated.emit()
+            self.toastMessage.emit(f"✔ Added '{app_name.strip()}' to Applications (.desktop)")
+            return True
+        except Exception:
+            return False
+
+    @Slot(str)
+    def removeSavedDesktopApp(self, desktop_file_path: str):
+        saved_list = [x for x in self.config_mgr.get("saved_desktop_apps", []) if x.get("desktop_file") != desktop_file_path]
+        self.config_mgr.set("saved_desktop_apps", saved_list)
+        if desktop_file_path and os.path.exists(desktop_file_path):
+            try:
+                os.unlink(desktop_file_path)
+            except OSError:
+                pass
+        self.desktopAppsUpdated.emit()
+
+    # ==========================================================================
+    # 4. Font Installer / Downloader to Default or Custom Fonts Path
+    # ==========================================================================
+
+    @Property(str, notify=fontsDirChanged)
+    def fontsInstallDir(self) -> str:
+        return str(self.config_mgr.get("fonts_install_dir", str(Path.home() / ".local" / "share" / "fonts")))
+
+    @Slot(str)
+    def setFontsInstallDir(self, path_str: str):
+        if not path_str or not path_str.strip():
+            return
+        norm = os.path.abspath(os.path.expanduser(path_str.strip()))
+        self.config_mgr.set("fonts_install_dir", norm)
+        self.fontsDirChanged.emit()
+
+    @Slot(str, result=bool)
+    def canInstallFontsFrom(self, target_path_str: str) -> bool:
+        if not target_path_str or not os.path.exists(target_path_str):
+            return False
+        p = Path(target_path_str)
+        if p.is_file():
+            return p.suffix.lower() in FONT_EXTS
+        if p.is_dir():
+            try:
+                with os.scandir(target_path_str) as it:
+                    for entry in it:
+                        if entry.is_file() and Path(entry.name).suffix.lower() in FONT_EXTS:
+                            return True
+            except OSError:
+                pass
+        return False
+
+    @Slot(str, str, result=int)
+    def installFontsToSystem(self, target_path_str: str, custom_dest_dir: str = "") -> int:
+        dest_dir = Path(os.path.expanduser(custom_dest_dir.strip())) if custom_dest_dir.strip() else Path(self.fontsInstallDir)
+        dest_dir.mkdir(parents=True, exist_ok=True)
+
+        targets = list(self._selected_paths) if (target_path_str in self._selected_paths and len(self._selected_paths) > 1) else [target_path_str]
+        font_files = []
+        for tp in targets:
+            if not tp or not os.path.exists(tp):
+                continue
+            p = Path(tp)
+            if p.is_file() and p.suffix.lower() in FONT_EXTS:
+                font_files.append(p)
+            elif p.is_dir():
+                for root_d, _, files in os.walk(str(p)):
+                    for fn in files:
+                        if Path(fn).suffix.lower() in FONT_EXTS:
+                            font_files.append(Path(root_d) / fn)
+
+        installed_count = 0
+        for fp in font_files:
+            try:
+                target_dest = dest_dir / fp.name
+                if os.path.abspath(str(fp)) != os.path.abspath(str(target_dest)):
+                    shutil.copy2(str(fp), str(target_dest))
+                installed_count += 1
+            except Exception:
+                pass
+
+        if installed_count > 0 and shutil.which("fc-cache"):
+            subprocess.Popen(
+                ["fc-cache", "-f", str(dest_dir)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            self.toastMessage.emit(f"🔤 Installed {installed_count} font(s) to {dest_dir}")
+        return installed_count
+
+    # ==========================================================================
+    # 5. Default System File Manager Registration
+    # ==========================================================================
+
+    @Property(bool, notify=defaultFmStateChanged)
+    def isDefaultFileManager(self) -> bool:
+        return is_default_file_manager()
+
+    @Slot(result=bool)
+    def setAsDefaultFileManager(self) -> bool:
+        main_script = str(Path(__file__).resolve().parent.parent / "main.py")
+        ok = install_desktop_and_set_default(main_script)
+        self.defaultFmStateChanged.emit()
+        if ok:
+            self.toastMessage.emit("✔ Find is now registered as the Default File Manager")
+        return ok
 
     @Slot(result=list)
     def getDrives(self):

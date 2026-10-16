@@ -274,6 +274,61 @@ RowLayout {
                 }
             }
 
+            // Search Scope Selector Pills ("Here" vs "Everywhere")
+            RowLayout {
+                visible: root.isSearchActive
+                spacing: 4
+                Layout.alignment: Qt.AlignVCenter
+
+                Rectangle {
+                    readonly property bool isHere: backend ? (backend.searchScope === "here") : true
+                    implicitWidth: hereTxt.implicitWidth + 12
+                    implicitHeight: Math.round(22 * Theme.scaleFactor)
+                    radius: Theme.radiusSmall
+                    color: isHere ? Theme.accent : Theme.bgCard
+                    border.color: isHere ? Theme.accentHover : Theme.borderDim
+                    border.width: 1
+
+                    Text {
+                        id: hereTxt
+                        anchors.centerIn: parent
+                        text: "📁 Here"
+                        color: parent.isHere ? "#ffffff" : Theme.textSecondary
+                        font.pixelSize: Math.round(9.5 * Theme.scaleFactor)
+                        font.bold: parent.isHere
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: if (backend) backend.setSearchScope("here")
+                    }
+                }
+
+                Rectangle {
+                    readonly property bool isEverywhere: backend ? (backend.searchScope === "everywhere") : false
+                    implicitWidth: everyTxt.implicitWidth + 12
+                    implicitHeight: Math.round(22 * Theme.scaleFactor)
+                    radius: Theme.radiusSmall
+                    color: isEverywhere ? Theme.accent : Theme.bgCard
+                    border.color: isEverywhere ? Theme.accentHover : Theme.borderDim
+                    border.width: 1
+
+                    Text {
+                        id: everyTxt
+                        anchors.centerIn: parent
+                        text: "🌐 Everywhere"
+                        color: parent.isEverywhere ? "#ffffff" : Theme.textSecondary
+                        font.pixelSize: Math.round(9.5 * Theme.scaleFactor)
+                        font.bold: parent.isEverywhere
+                    }
+                    MouseArea {
+                        anchors.fill: parent
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: if (backend) backend.setSearchScope("everywhere")
+                    }
+                }
+            }
+
             ToolBtn {
                 visible: !root.isNarrowBar
                 Layout.alignment: Qt.AlignVCenter
@@ -505,6 +560,47 @@ RowLayout {
                 if (root.appWindow) {
                     root.appWindow.userShowPreview = !root.appWindow.userShowPreview
                 }
+            }
+        }
+
+        // Direct Resume Button inside Series/Anime Folder (Shows Episode Number + Time when space permits!)
+        Rectangle {
+            id: resumeBarBtn
+            readonly property var resInfo: (backend && backend.currentPath && backend.isMediaLibraryView && !backend.isMovieFolderView)
+                                           ? backend.getResumeFolderInfo(backend.currentPath)
+                                           : ({ "has_resume": false, "ep_num": "", "time_str": "" })
+            visible: resInfo && resInfo.has_resume === true
+            implicitHeight: Math.round(28 * Theme.scaleFactor)
+            implicitWidth: resumeRow.implicitWidth + 14
+            radius: Theme.radiusMedium
+            color: resumeMouse.containsMouse ? Theme.accentHover : Theme.accent
+            Layout.alignment: Qt.AlignVCenter
+
+            RowLayout {
+                id: resumeRow
+                anchors.centerIn: parent
+                spacing: 5
+                Text {
+                    text: {
+                        if (!resumeBarBtn.resInfo || !resumeBarBtn.resInfo.has_resume) return "▶ Resume"
+                        var base = "▶ Resume " + resumeBarBtn.resInfo.ep_num
+                        if (!root.isCompactBar && resumeBarBtn.resInfo.time_str !== "") {
+                            return base + " (" + resumeBarBtn.resInfo.time_str + ")"
+                        }
+                        return base
+                    }
+                    color: "#ffffff"
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.bold: true
+                }
+            }
+
+            MouseArea {
+                id: resumeMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onClicked: if (backend) backend.resumeMediaFolder(backend.currentPath)
             }
         }
 

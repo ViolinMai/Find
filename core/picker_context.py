@@ -16,6 +16,17 @@ class PickerContext(QObject):
         self._title = "Select File"
         self._selected_paths = []
         self._filter_display = "All Supported Files"
+        self._save_filename = ""
+
+    @Property(str, notify=selectedChanged)
+    def saveFilename(self):
+        return self._save_filename
+
+    @Slot(str)
+    def setSaveFilename(self, name: str):
+        if self._save_filename != name:
+            self._save_filename = name.strip()
+            self.selectedChanged.emit()
 
     @Property(bool, notify=activeChanged)
     def isActive(self):
@@ -38,15 +49,25 @@ class PickerContext(QObject):
         return self._selected_paths
 
     @Slot(str, str, str)
-    def activate(self, mode: str, filter_str: str, title: str):
+    @Slot(str, str, str, str)
+    def activate(self, mode: str, filter_str: str, title: str, save_filename: str = ""):
         self._is_active = True
         self._mode = mode
-        self._title = title if title else ("Select Folder" if mode == "folder" else "Select File")
+        self._title = title if title else ("Save File" if mode == "save" else ("Select Folder" if mode == "folder" else "Select File"))
         self._filter_display = filter_str if filter_str else "All Files (*.*)"
+        self._save_filename = save_filename.strip() if save_filename else ""
 
         if filter_str and "*.*" not in filter_str:
             raw_pats = filter_str.replace(";", " ").replace(",", " ").split()
-            self._filter_patterns = [p.strip().lower() for p in raw_pats if p.strip()]
+            cleaned = []
+            for p in raw_pats:
+                p_clean = p.strip().lower()
+                if not p_clean:
+                    continue
+                if not p_clean.startswith("*") and "." in p_clean:
+                    p_clean = f"*{p_clean}" if p_clean.startswith(".") else f"*.{p_clean}"
+                cleaned.append(p_clean)
+            self._filter_patterns = cleaned
         else:
             self._filter_patterns = []
 
@@ -83,6 +104,12 @@ class PickerContext(QObject):
             return
 
         if is_dir:
+            return
+
+        if self._mode == "save":
+            self._selected_paths = [path]
+            self._save_filename = Path(path).name
+            self.selectedChanged.emit()
             return
 
         if self._mode == "multi_file":

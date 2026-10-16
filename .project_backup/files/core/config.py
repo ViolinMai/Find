@@ -17,6 +17,7 @@ class ConfigManager:
         "show_hidden": False,
         "swap_mouse_buttons": False,
         "auto_play_hdr": True,
+        "daemon_autostart": True,
         "media_libraries": [],
         "movie_folders": [],
         "mpv_both_config": (
@@ -79,6 +80,9 @@ class ConfigManager:
         ),
         "hidden_sidebar_paths": [],
         "folder_views": {},
+        "favorites": [],
+        "saved_desktop_apps": [],
+        "fonts_install_dir": str(Path.home() / ".local" / "share" / "fonts"),
         "custom_quick_access": [
             {"name": "Home", "path": str(Path.home()), "icon": "🏠"},
             {"name": "Desktop", "path": str(Path.home() / "Desktop"), "icon": "🖥️"},
@@ -201,6 +205,9 @@ class ConfigManager:
     def set_cached_hdr(self, file_path: str, mtime: float, is_hdr: bool):
         self._hdr_cache[file_path] = {"mtime": mtime, "is_hdr": bool(is_hdr)}
         self.save_hdr_cache()
+
+    def reload_progress_from_disk(self):
+        self._progress = self._load_progress()
 
     def get_media_progress(self, file_path: str) -> dict:
         default_entry = {"position": 0.0, "duration": 0.0, "progress": 0.0, "watched": False, "ext_sub": ""}

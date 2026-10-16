@@ -61,16 +61,34 @@ ApplicationWindow {
     property string conflictSourcePath: ""
     property string conflictFileName: ""
 
+    property var topFavoritesModel: backend ? backend.getFavorites() : []
     property var topQuickAccessModel: backend ? backend.getQuickAccessLocations() : []
     property var topDrivesModel: backend ? backend.getDrives() : []
+    property string activeToastText: ""
 
     Connections {
         target: backend
         function onSidebarUpdated() {
             if (!backend) return
+            root.topFavoritesModel = backend.getFavorites()
             root.topQuickAccessModel = backend.getQuickAccessLocations()
             root.topDrivesModel = backend.getDrives()
         }
+        function onFavoritesUpdated() {
+            if (!backend) return
+            root.topFavoritesModel = backend.getFavorites()
+        }
+        function onToastMessage(msg) {
+            root.activeToastText = msg
+            toastTimer.restart()
+        }
+    }
+
+    Timer {
+        id: toastTimer
+        interval: 3200
+        repeat: false
+        onTriggered: root.activeToastText = ""
     }
 
     function beginRightDrag(path, name, icon, globalPt) {
@@ -665,6 +683,37 @@ ApplicationWindow {
                         height: parent.height
                         spacing: 6
 
+                        Rectangle {
+                            readonly property bool isFavCurr: (backend ? backend.currentPath : "") === "favorites://"
+                            implicitHeight: Math.round(26 * Theme.scaleFactor)
+                            implicitWidth: favTopRow.implicitWidth + 14
+                            radius: Theme.radiusMedium
+                            color: isFavCurr ? Theme.accent : (favTopMouse.containsMouse ? Theme.bgHover : Theme.bgSurface)
+                            border.color: isFavCurr ? Theme.accentHover : "#66fbbf24"
+                            border.width: 1
+
+                            RowLayout {
+                                id: favTopRow
+                                anchors.centerIn: parent
+                                spacing: 5
+                                Text { text: "⭐"; font.pixelSize: Theme.fontSizeSmall }
+                                Text {
+                                    text: "Favorites"
+                                    color: parent.parent.isFavCurr ? "#ffffff" : Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.bold: true
+                                }
+                            }
+
+                            MouseArea {
+                                id: favTopMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: if (backend) backend.navigateTo("favorites://")
+                            }
+                        }
+
                         Repeater {
                             model: root.topQuickAccessModel
                             delegate: Rectangle {
@@ -680,8 +729,18 @@ ApplicationWindow {
                                     id: pRow
                                     anchors.centerIn: parent
                                     spacing: 5
+                                    Image {
+                                        width: Math.round(15 * Theme.scaleFactor)
+                                        height: Math.round(15 * Theme.scaleFactor)
+                                        visible: modelData.icon.indexOf("/") !== -1 || modelData.icon.indexOf(".") !== -1
+                                        source: visible ? ("file://" + modelData.icon) : ""
+                                        fillMode: Image.PreserveAspectFit
+                                        sourceSize.width: 36
+                                        sourceSize.height: 36
+                                    }
                                     Text {
-                                        text: (modelData.icon.indexOf("/") === -1 && modelData.icon.indexOf(".") === -1) ? modelData.icon : "📁"
+                                        visible: modelData.icon.indexOf("/") === -1 && modelData.icon.indexOf(".") === -1
+                                        text: modelData.icon
                                         font.pixelSize: Theme.fontSizeSmall
                                     }
                                     Text {
@@ -872,6 +931,30 @@ ApplicationWindow {
             PickerBottomBar {
                 Layout.fillWidth: true
                 visible: backend && backend.picker ? backend.picker.isActive : false
+            }
+        }
+
+        // Floating Status Toast Banner
+        Rectangle {
+            visible: root.activeToastText !== ""
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: Math.round(64 * Theme.scaleFactor)
+            anchors.horizontalCenter: parent.horizontalCenter
+            z: 99998
+            implicitWidth: toastLabel.implicitWidth + 28
+            implicitHeight: Math.round(36 * Theme.scaleFactor)
+            radius: Theme.radiusLarge
+            color: "#f018181f"
+            border.color: Theme.accent
+            border.width: 1
+
+            Text {
+                id: toastLabel
+                anchors.centerIn: parent
+                text: root.activeToastText
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontSizeNormal
+                font.bold: true
             }
         }
 

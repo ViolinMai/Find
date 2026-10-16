@@ -51,8 +51,15 @@ Rectangle {
         }
     }
 
+    DesktopMakerDialog {
+        id: desktopMakerModal
+    }
+
     DolphinContextMenu {
         id: dolphinMenu
+        onRequestDesktopMaker: function(execPath) {
+            desktopMakerModal.openForExecutable(execPath)
+        }
     }
 
     StyledMenu {
@@ -84,6 +91,25 @@ Rectangle {
                     backend.pasteToFolder(backend.currentPath)
                 }
             }
+        }
+        StyledMenuItem {
+            visible: backend ? backend.canResumeFolder(backend.currentPath) : false
+            iconGlyph: "▶"
+            text: "Resume Last Episode Here"
+            font.bold: true
+            onTriggered: if (backend) backend.resumeMediaFolder(backend.currentPath)
+        }
+        StyledMenuItem {
+            visible: backend ? backend.canInstallFontsFrom(backend.currentPath) : false
+            iconGlyph: "🔤"
+            text: "Install All Fonts in Folder"
+            font.bold: true
+            onTriggered: if (backend) backend.installFontsToSystem(backend.currentPath, "")
+        }
+        StyledMenuItem {
+            iconGlyph: "⭐"
+            text: "Pin Current Folder to Favorites"
+            onTriggered: if (backend) backend.addToFavorites(backend.currentPath)
         }
         StyledMenuItem {
             iconGlyph: "💻"
@@ -169,10 +195,18 @@ Rectangle {
         }
 
         onEntered: function(drag) {
+            if (backend && backend.currentPath === "favorites://") {
+                canAcceptCurrentDrag = true
+                return
+            }
             updateDragTargetState(drag)
         }
 
         onPositionChanged: function(drag) {
+            if (backend && backend.currentPath === "favorites://") {
+                canAcceptCurrentDrag = true
+                return
+            }
             updateDragTargetState(drag)
         }
 
@@ -187,10 +221,19 @@ Rectangle {
             canAcceptCurrentDrag = false
             if (!backend) return
 
+            var urls = root.extractDropUrls(drop)
+            if (backend.currentPath === "favorites://") {
+                for (var i = 0; i < urls.length; i++) {
+                    var cleanU = urls[i].replace("file://", "")
+                    backend.addToFavorites(cleanU)
+                }
+                drop.acceptProposedAction()
+                return
+            }
+
             var targetFolder = subPath !== "" ? subPath : backend.currentPath
             if (targetFolder === "recent://" || targetFolder === "trash://") return
 
-            var urls = root.extractDropUrls(drop)
             var valid = backend.filterValidDropSources(urls, targetFolder)
             if (valid && valid.length > 0 && root.appWindow) {
                 var winPt = root.mapToItem(root.appWindow.contentItem, drop.x, drop.y)
@@ -222,7 +265,7 @@ Rectangle {
         anchors.fill: parent
         spacing: 0
 
-        // Search Results Overlay
+        // Search Results Overlay (Shows folders + files, real file icons/thumbnails, and full context menu)
         Rectangle {
             Layout.fillWidth: true
             Layout.fillHeight: true
@@ -230,36 +273,102 @@ Rectangle {
             color: Theme.bgBase
 
             ListView {
+                id: searchListView
                 anchors.fill: parent
                 model: backend ? backend.searchResults : []
                 clip: true
+                spacing: 2
+
+                WheelHandler {
+                    target: null
+                    orientation: Qt.Vertical
+                    onWheel: function(event) {
+                        var step = (event.angleDelta.y / 120.0) * Math.round(240 * Theme.scaleFactor)
+                        var maxY = Math.max(0, searchListView.contentHeight - searchListView.height)
+                        searchListView.contentY = Math.max(0, Math.min(maxY, searchListView.contentY - step))
+                        event.accepted = true
+                    }
+                }
 
                 delegate: Rectangle {
-                    width: ListView.view.width
-                    height: Math.round(36 * Theme.scaleFactor)
-                    color: sHover.containsMouse ? Theme.bgHover : "transparent"
+                    id: sRow
+                    width: ListView.view.width - 12
+                    x: 6
+                    height: Math.round(40 * Theme.scaleFactor)
+                    radius: Theme.radiusMedium
+                    readonly property bool isSel: (backend && backend.selectedItem && backend.selectedItem.path === modelData.path) ? true : false
+                    color: isSel ? Theme.bgSelected : (sHover.containsMouse ? Theme.bgHover : "transparent")
+                    border.color: isSel ? Theme.accent : "transparent"
+                    border.width: isSel ? 1 : 0
 
                     RowLayout {
                         anchors.fill: parent
-                        anchors.leftMargin: 14
-                        anchors.rightMargin: 14
-                        spacing: 10
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: 12
 
-                        Text { text: "🔍"; font.pixelSize: Theme.fontSizeNormal }
-                        Text {
-                            text: modelData.name
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeNormal
-                            font.bold: true
-                            Layout.preferredWidth: Math.min(200, root.width * 0.35)
-                            elide: Text.ElideRight
+                        Item {
+                            implicitWidth: Math.round(26 * Theme.scaleFactor)
+                            implicitHeight: Math.round(26 * Theme.scaleFactor)
+
+                            Image {
+                                id: sThumbImg
+                                anchors.fill: parent
+                                visible: !modelData.is_dir && ((modelData.thumb && modelData.thumb !== "") || (modelData.icon && (modelData.icon.indexOf("/") !== -1 || modelData.icon.indexOf(".") !== -1)))
+                                source: visible ? ((modelData.thumb && modelData.thumb !== "") ? ("file://" + modelData.thumb) : ("file://" + modelData.icon)) : ""
+                                fillMode: Image.PreserveAspectFit
+                            }
+
+                            Text {
+                                anchors.centerIn: parent
+                                visible: !sThumbImg.visible
+                                text: modelData.icon ? modelData.icon : (modelData.is_dir ? "📁" : "📄")
+                                font.pixelSize: Theme.fontSizeIcon
+                            }
                         }
-                        Text {
-                            text: modelData.path
-                            color: Theme.textTertiary
-                            font.pixelSize: Theme.fontSizeSmall
+
+                        ColumnLayout {
                             Layout.fillWidth: true
-                            elide: Text.ElideMiddle
+                            spacing: 1
+                            Text {
+                                text: modelData.name
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeNormal
+                                font.bold: true
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                            Text {
+                                text: modelData.path
+                                color: Theme.textTertiary
+                                font.pixelSize: Theme.fontSizeSmall
+                                elide: Text.ElideMiddle
+                                Layout.fillWidth: true
+                            }
+                        }
+
+                        Rectangle {
+                            visible: modelData.is_dir
+                            implicitWidth: dirBadge.implicitWidth + 10
+                            implicitHeight: Math.round(18 * Theme.scaleFactor)
+                            radius: Theme.radiusSmall
+                            color: Theme.bgCard
+                            border.color: Theme.borderDim
+                            Text {
+                                id: dirBadge
+                                anchors.centerIn: parent
+                                text: "Folder"
+                                color: Theme.textSecondary
+                                font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
+                                font.bold: true
+                            }
+                        }
+
+                        Text {
+                            visible: !modelData.is_dir && modelData.size !== undefined && modelData.size !== ""
+                            text: modelData.size || ""
+                            color: Theme.textSecondary
+                            font.pixelSize: Theme.fontSizeSmall
                         }
                     }
 
@@ -267,17 +376,23 @@ Rectangle {
                         id: sHover
                         anchors.fill: parent
                         hoverEnabled: true
-                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
                         onClicked: function(mouse) {
+                            if (!backend) return
+                            if (mouse.button === Qt.MiddleButton && modelData.is_dir) {
+                                backend.addTab(modelData.path)
+                                return
+                            }
+                            backend.selectItem(modelData.path, modelData.name, modelData.is_dir, modelData.size || "", "", modelData.type || "")
                             if (mouse.button === Qt.RightButton) {
                                 dolphinMenu.targetPath = modelData.path
                                 dolphinMenu.targetName = modelData.name
                                 dolphinMenu.isDir = modelData.is_dir
-                                dolphinMenu.popup()
+                                dolphinMenu.popupSafe(sRow, mouse.x, mouse.y)
                             }
                         }
                         onDoubleClicked: function(mouse) {
-                            if (mouse.button === Qt.LeftButton) {
+                            if (mouse.button === Qt.LeftButton && backend) {
                                 backend.openEntry(modelData.path)
                             }
                         }
@@ -393,7 +508,7 @@ Rectangle {
                         target: null
                         orientation: Qt.Vertical
                         onWheel: function(event) {
-                            var step = (event.angleDelta.y / 120.0) * Math.round(135 * Theme.scaleFactor)
+                            var step = (event.angleDelta.y / 120.0) * Math.round(240 * Theme.scaleFactor)
                             var maxY = Math.max(0, fileListView.contentHeight - fileListView.height)
                             fileListView.contentY = Math.max(0, Math.min(maxY, fileListView.contentY - step))
                             event.accepted = true
@@ -684,16 +799,30 @@ Rectangle {
                                     var dragBtn = swapped ? Qt.LeftButton : Qt.RightButton
 
                                     if (mouse.buttons & panBtn) {
-                                        if (!isPanning && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
-                                            isPanning = true
-                                        }
-                                        if (isPanning) {
-                                            var stepX = gPos.x - lastGlobalPos.x
-                                            var stepY = gPos.y - lastGlobalPos.y
-                                            var maxY = Math.max(0, fileListView.contentHeight - fileListView.height)
-                                            var maxX = Math.max(0, fileListView.contentWidth - fileListView.width)
-                                            fileListView.contentY = Math.max(0, Math.min(maxY, fileListView.contentY - stepY))
-                                            fileListView.contentX = Math.max(0, Math.min(maxX, fileListView.contentX - stepX))
+                                        if (backend.currentPath === "favorites://") {
+                                            // Drag-to-Order inside Favorites Virtual Folder!
+                                            if (!isPanning && Math.abs(dy) > 6) {
+                                                isPanning = true
+                                            }
+                                            if (isPanning) {
+                                                var listPt = fileListView.mapFromGlobal(gPos.x, gPos.y)
+                                                var targetIdx = fileListView.indexAt(listPt.x + fileListView.contentX, listPt.y + fileListView.contentY)
+                                                if (targetIdx >= 0 && targetIdx !== index) {
+                                                    backend.moveFavoriteItem(index, targetIdx)
+                                                }
+                                            }
+                                        } else {
+                                            if (!isPanning && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
+                                                isPanning = true
+                                            }
+                                            if (isPanning) {
+                                                var stepX = gPos.x - lastGlobalPos.x
+                                                var stepY = gPos.y - lastGlobalPos.y
+                                                var maxY = Math.max(0, fileListView.contentHeight - fileListView.height)
+                                                var maxX = Math.max(0, fileListView.contentWidth - fileListView.width)
+                                                fileListView.contentY = Math.max(0, Math.min(maxY, fileListView.contentY - stepY))
+                                                fileListView.contentX = Math.max(0, Math.min(maxX, fileListView.contentX - stepX))
+                                            }
                                         }
                                     } else if (mouse.buttons & dragBtn) {
                                         if (!isHoldingDrag && (Math.abs(dx) > 7 || Math.abs(dy) > 7)) {
@@ -732,7 +861,7 @@ Rectangle {
                                             dolphinMenu.targetPath = model.path
                                             dolphinMenu.targetName = model.name
                                             dolphinMenu.isDir = model.is_dir
-                                            dolphinMenu.popup()
+                                            dolphinMenu.popupSafe(itemArea, mouse.x, mouse.y)
                                         }
                                         isHoldingDrag = false
                                     }
@@ -776,7 +905,7 @@ Rectangle {
                         target: null
                         orientation: Qt.Vertical
                         onWheel: function(event) {
-                            var step = (event.angleDelta.y / 120.0) * Math.round(155 * Theme.scaleFactor)
+                            var step = (event.angleDelta.y / 120.0) * Math.round(270 * Theme.scaleFactor)
                             var maxY = Math.max(0, fileGridView.contentHeight - fileGridView.height)
                             fileGridView.contentY = Math.max(0, Math.min(maxY, fileGridView.contentY - step))
                             event.accepted = true
@@ -1009,16 +1138,30 @@ Rectangle {
                                     var dragBtn = swapped ? Qt.LeftButton : Qt.RightButton
 
                                     if (mouse.buttons & panBtn) {
-                                        if (!isPanning && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
-                                            isPanning = true
-                                        }
-                                        if (isPanning) {
-                                            var stepX = gPos.x - lastGlobalPos.x
-                                            var stepY = gPos.y - lastGlobalPos.y
-                                            var maxY = Math.max(0, fileGridView.contentHeight - fileGridView.height)
-                                            var maxX = Math.max(0, fileGridView.contentWidth - fileGridView.width)
-                                            fileGridView.contentY = Math.max(0, Math.min(maxY, fileGridView.contentY - stepY))
-                                            fileGridView.contentX = Math.max(0, Math.min(maxX, fileGridView.contentX - stepX))
+                                        if (backend.currentPath === "favorites://") {
+                                            // Drag-to-Order inside Favorites Grid View!
+                                            if (!isPanning && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
+                                                isPanning = true
+                                            }
+                                            if (isPanning) {
+                                                var gridPt = fileGridView.mapFromGlobal(gPos.x, gPos.y)
+                                                var targetGridIdx = fileGridView.indexAt(gridPt.x + fileGridView.contentX, gridPt.y + fileGridView.contentY)
+                                                if (targetGridIdx >= 0 && targetGridIdx !== index) {
+                                                    backend.moveFavoriteItem(index, targetGridIdx)
+                                                }
+                                            }
+                                        } else {
+                                            if (!isPanning && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
+                                                isPanning = true
+                                            }
+                                            if (isPanning) {
+                                                var stepX = gPos.x - lastGlobalPos.x
+                                                var stepY = gPos.y - lastGlobalPos.y
+                                                var maxY = Math.max(0, fileGridView.contentHeight - fileGridView.height)
+                                                var maxX = Math.max(0, fileGridView.contentWidth - fileGridView.width)
+                                                fileGridView.contentY = Math.max(0, Math.min(maxY, fileGridView.contentY - stepY))
+                                                fileGridView.contentX = Math.max(0, Math.min(maxX, fileGridView.contentX - stepX))
+                                            }
                                         }
                                     } else if (mouse.buttons & dragBtn) {
                                         if (!isHoldingDrag && (Math.abs(dx) > 7 || Math.abs(dy) > 7)) {
@@ -1057,7 +1200,7 @@ Rectangle {
                                             dolphinMenu.targetPath = model.path
                                             dolphinMenu.targetName = model.name
                                             dolphinMenu.isDir = model.is_dir
-                                            dolphinMenu.popup()
+                                            dolphinMenu.popupSafe(gridMouseArea, mouse.x, mouse.y)
                                         }
                                         isHoldingDrag = false
                                     }

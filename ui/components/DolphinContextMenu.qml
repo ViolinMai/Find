@@ -12,6 +12,20 @@ StyledMenu {
     property var availableApps: (backend && targetPath !== "") ? backend.getAvailableApps(targetPath) : []
     property string defaultApp: (backend && targetPath !== "") ? backend.getDefaultApp(targetPath) : "Default App"
     readonly property bool isVideoTarget: (backend && !root.isDir && targetPath !== "") ? backend.isVideoFile(targetPath) : false
+    readonly property bool isExecTarget: (backend && !root.isDir && targetPath !== "") ? backend.isExecutableFile(targetPath) : false
+    readonly property bool canInstallFontsTarget: (backend && targetPath !== "") ? backend.canInstallFontsFrom(targetPath) : false
+    readonly property bool canResumeTargetFolder: (backend && root.isDir && targetPath !== "") ? backend.canResumeFolder(targetPath) : false
+    readonly property bool isFavoritedTarget: (backend && targetPath !== "") ? backend.isPathFavorited(targetPath) : false
+
+    signal requestDesktopMaker(string execPath)
+
+    function popupSafe(anchorItem, mouseX, mouseY) {
+        if (anchorItem && mouseX !== undefined && mouseY !== undefined) {
+            root.popup(anchorItem, mouseX + 3, mouseY + 3)
+        } else {
+            root.popup()
+        }
+    }
 
     function openRenameModal() {
         newNameField.text = root.targetName
@@ -27,10 +41,55 @@ StyledMenu {
     }
 
     StyledMenuItem {
+        iconGlyph: "▶"
+        text: {
+            if (!root.canResumeTargetFolder || !backend) return "Resume"
+            var info = backend.getResumeFolderInfo(root.targetPath)
+            if (!info.has_resume) return "Resume"
+            return info.time_str !== ""
+                   ? ("Resume " + info.ep_num + "  •  " + info.time_str)
+                   : ("Resume " + info.ep_num)
+        }
+        visible: root.canResumeTargetFolder
+        font.bold: true
+        onTriggered: if (backend) backend.resumeMediaFolder(root.targetPath)
+    }
+
+    StyledMenuItem {
         iconGlyph: "➕"
         text: "Open in New Tab"
         visible: root.isDir
         onTriggered: if (backend) backend.addTab(root.targetPath)
+    }
+
+    StyledMenuItem {
+        iconGlyph: root.isFavoritedTarget ? "★" : "☆"
+        text: root.isFavoritedTarget ? "Remove from Favorites" : "Add to Favorites"
+        font.bold: true
+        onTriggered: {
+            if (!backend) return
+            if (root.isFavoritedTarget) {
+                backend.removeFromFavorites(root.targetPath)
+            } else {
+                backend.addToFavorites(root.targetPath)
+            }
+        }
+    }
+
+    StyledMenuItem {
+        iconGlyph: "🚀"
+        text: "Add to Applications (.desktop)..."
+        visible: root.isExecTarget
+        font.bold: true
+        onTriggered: root.requestDesktopMaker(root.targetPath)
+    }
+
+    StyledMenuItem {
+        iconGlyph: "🔤"
+        text: "Install / Download Font(s) to System"
+        visible: root.canInstallFontsTarget
+        font.bold: true
+        onTriggered: if (backend) backend.installFontsToSystem(root.targetPath, "")
     }
 
     StyledMenuItem {
@@ -127,13 +186,7 @@ StyledMenu {
         contentItem: Rectangle { implicitHeight: 1; color: Theme.borderDim }
     }
 
-    // 4. Organization & Archive
-    StyledMenuItem {
-        iconGlyph: "📁"
-        text: "Move to New Folder"
-        onTriggered: backend.moveToNewFolder(root.targetPath)
-    }
-
+    // 4. Archive & Share
     StyledMenu {
         title: "Compress"
         iconGlyph: "📦"
@@ -206,16 +259,7 @@ StyledMenu {
         contentItem: Rectangle { implicitHeight: 1; color: Theme.borderDim }
     }
 
-    // 5. Properties & Trash
-    StyledMenuItem {
-        iconGlyph: "ℹ️"
-        text: "Properties & Inspect"
-        shortcutText: "Alt+Enter"
-        onTriggered: {
-            backend.selectItem(root.targetPath, root.targetName, root.isDir, "", "", "")
-        }
-    }
-
+    // 5. Trash
     StyledMenuItem {
         iconGlyph: "🗑️"
         text: "Move to Trash"

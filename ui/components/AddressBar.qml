@@ -508,6 +508,54 @@ RowLayout {
             }
         }
 
+        // Media Library Active Pill & Subtitle ('C') Toggle Indicator
+        Rectangle {
+            visible: backend ? backend.isMediaLibraryView : false
+            implicitHeight: Math.round(28 * Theme.scaleFactor)
+            implicitWidth: mediaBadgeRow.implicitWidth + 14
+            radius: Theme.radiusMedium
+            color: (backend && backend.showSubtitlesInMedia) ? "#280078d4" : Theme.bgCard
+            border.color: (backend && backend.showSubtitlesInMedia) ? Theme.accent : Theme.borderDim
+            border.width: 1
+            Layout.alignment: Qt.AlignVCenter
+
+            RowLayout {
+                id: mediaBadgeRow
+                anchors.centerIn: parent
+                spacing: 5
+
+                Text {
+                    text: (backend && backend.isMovieFolderView) ? "🎬 Movies" : "📺 Media"
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.bold: true
+                }
+
+                Rectangle {
+                    visible: !root.isUltraCompactBar
+                    implicitWidth: subStateText.implicitWidth + 8
+                    implicitHeight: Math.round(18 * Theme.scaleFactor)
+                    radius: Theme.radiusSmall
+                    color: (backend && backend.showSubtitlesInMedia) ? Theme.accent : Theme.bgSurface
+
+                    Text {
+                        id: subStateText
+                        anchors.centerIn: parent
+                        text: (backend && backend.showSubtitlesInMedia) ? "SUB: ON (C)" : "SUB: HIDDEN (C)"
+                        color: (backend && backend.showSubtitlesInMedia) ? "#ffffff" : Theme.textTertiary
+                        font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
+                        font.bold: true
+                    }
+                }
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: if (backend) backend.toggleSubtitlesInMedia()
+            }
+        }
+
         ToolBtn {
             visible: !root.isNarrowBar
             iconText: "⚙️"

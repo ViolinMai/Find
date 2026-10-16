@@ -11,6 +11,36 @@ Rectangle {
 
     readonly property bool showModifiedCol: width >= Math.round(420 * Theme.scaleFactor)
     readonly property bool showSizeCol: width >= Math.round(290 * Theme.scaleFactor)
+    property string hoveredSubfolderPath: ""
+
+    function extractDropUrls(drop) {
+        var urls = []
+        if (drop.hasUrls) {
+            for (var i = 0; i < drop.urls.length; i++) {
+                urls.push(drop.urls[i].toString())
+            }
+        } else if (drop.text && drop.text.trim() !== "") {
+            urls = drop.text.trim().split(/\r?\n/)
+        }
+        return urls
+    }
+
+    function currentGridColumns() {
+        return fileGridView.targetCols > 0 ? fileGridView.targetCols : 1
+    }
+
+    function syncViewScrollToSelection() {
+        if (!backend) return
+        var rowIdx = backend.getSelectedRowIndex()
+        if (rowIdx < 0) return
+        if (backend.viewMode === "details") {
+            fileListView.currentIndex = rowIdx
+            fileListView.positionViewAtIndex(rowIdx, ListView.Contain)
+        } else {
+            fileGridView.currentIndex = rowIdx
+            fileGridView.positionViewAtIndex(rowIdx, GridView.Contain)
+        }
+    }
 
     function openRenameForSelected() {
         if (backend && backend.selectedItem && backend.selectedItem.path) {
@@ -71,6 +101,14 @@ Rectangle {
             onTriggered: if (backend) backend.toggleShowHidden()
         }
         StyledMenuItem {
+            visible: backend ? backend.isMediaLibraryView : false
+            text: "Show Subtitle Files in Media Library"
+            shortcutText: "C"
+            checkable: true
+            checked: backend ? backend.showSubtitlesInMedia : false
+            onTriggered: if (backend) backend.toggleSubtitlesInMedia()
+        }
+        StyledMenuItem {
             iconGlyph: "⟳"
             text: "Refresh"
             shortcutText: "F5"
@@ -78,11 +116,12 @@ Rectangle {
         }
     }
 
-    // Main DropArea for external and internal drops onto the current folder
+    // Main DropArea for external and internal drops (Strictly ignores same-folder drops unless hovering a subfolder!)
     DropArea {
         id: viewDropArea
         anchors.fill: parent
         z: 5
+        property bool canAcceptCurrentDrag: false
 
         Rectangle {
             anchors.fill: parent
@@ -91,42 +130,71 @@ Rectangle {
             color: "#180078d4"
             border.color: Theme.accent
             border.width: 2
-            visible: viewDropArea.containsDrag
+            visible: viewDropArea.containsDrag && viewDropArea.canAcceptCurrentDrag && root.hoveredSubfolderPath === ""
+        }
+
+        function updateDragTargetState(drag) {
+            if (!backend) {
+                root.hoveredSubfolderPath = ""
+                canAcceptCurrentDrag = false
+                return
+            }
+            var curDir = backend.currentPath
+            if (curDir === "recent://" || curDir === "trash://") {
+                root.hoveredSubfolderPath = ""
+                canAcceptCurrentDrag = false
+                return
+            }
+
+            var activeView = backend.viewMode === "details" ? fileListView : fileGridView
+            var viewPt = root.mapToItem(activeView, drag.x, drag.y)
+            var hoveredItem = activeView.itemAt(viewPt.x + activeView.contentX, viewPt.y + activeView.contentY)
+
+            var subTarget = ""
+            if (hoveredItem && hoveredItem.itemIsDir && hoveredItem.itemPath !== "") {
+                subTarget = hoveredItem.itemPath
+            }
+
+            var urls = root.extractDropUrls(drag)
+            var destToCheck = subTarget !== "" ? subTarget : curDir
+            var validSources = backend.filterValidDropSources(urls, destToCheck)
+
+            if (validSources && validSources.length > 0) {
+                root.hoveredSubfolderPath = subTarget
+                canAcceptCurrentDrag = true
+            } else {
+                root.hoveredSubfolderPath = ""
+                canAcceptCurrentDrag = false
+            }
+        }
+
+        onEntered: function(drag) {
+            updateDragTargetState(drag)
         }
 
         onPositionChanged: function(drag) {
-            if (root.appWindow && root.appWindow.isRightDragging) {
-                var gp = viewDropArea.mapToGlobal(drag.x, drag.y)
-                root.appWindow.updateRightDragPos(gp)
-            }
+            updateDragTargetState(drag)
+        }
+
+        onExited: {
+            root.hoveredSubfolderPath = ""
+            canAcceptCurrentDrag = false
         }
 
         onDropped: function(drop) {
-            if (root.appWindow) {
-                root.appWindow.endRightDrag()
-            }
-            var targetFolder = backend.currentPath
-            if (targetFolder === "recent://") return
+            var subPath = root.hoveredSubfolderPath
+            root.hoveredSubfolderPath = ""
+            canAcceptCurrentDrag = false
+            if (!backend) return
 
-            var activeView = backend.viewMode === "details" ? fileListView : fileGridView
-            var viewPt = root.mapToItem(activeView, drop.x, drop.y)
-            var hoveredItem = activeView.itemAt(viewPt.x + activeView.contentX, viewPt.y + activeView.contentY)
-            if (hoveredItem && hoveredItem.itemIsDir && hoveredItem.itemPath !== "") {
-                targetFolder = hoveredItem.itemPath
-            }
+            var targetFolder = subPath !== "" ? subPath : backend.currentPath
+            if (targetFolder === "recent://" || targetFolder === "trash://") return
 
-            var urls = []
-            if (drop.hasUrls) {
-                for (var i = 0; i < drop.urls.length; i++) {
-                    urls.push(drop.urls[i].toString())
-                }
-            } else if (drop.text && drop.text.trim() !== "") {
-                urls = drop.text.trim().split(/\r?\n/)
-            }
-
-            if (urls.length > 0 && root.appWindow) {
+            var urls = root.extractDropUrls(drop)
+            var valid = backend.filterValidDropSources(urls, targetFolder)
+            if (valid && valid.length > 0 && root.appWindow) {
                 var winPt = root.mapToItem(root.appWindow.contentItem, drop.x, drop.y)
-                root.appWindow.requestSmartDrop(urls, targetFolder, winPt.x, winPt.y)
+                root.appWindow.requestSmartDrop(valid, targetFolder, winPt.x, winPt.y)
                 drop.acceptProposedAction()
             }
         }
@@ -137,9 +205,14 @@ Rectangle {
         anchors.fill: parent
         acceptedButtons: Qt.LeftButton | Qt.RightButton
         onClicked: function(mouse) {
-            if (mouse.button === Qt.LeftButton) {
+            if (!backend) return
+            var swapped = backend.swapMouseButtons
+            var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
+            var isSecondary = swapped ? (mouse.button === Qt.LeftButton) : (mouse.button === Qt.RightButton)
+
+            if (isPrimary) {
                 backend.clearSelection()
-            } else if (mouse.button === Qt.RightButton) {
+            } else if (isSecondary) {
                 backgroundMenu.popup()
             }
         }
@@ -306,9 +379,21 @@ Rectangle {
                     contentWidth: Math.max(width, Math.round(260 * Theme.scaleFactor))
                     boundsBehavior: Flickable.DragOverBounds
                     pixelAligned: true
-                    flickDeceleration: 2200
-                    maximumFlickVelocity: 4800
+                    flickDeceleration: 3200
+                    maximumFlickVelocity: 9500
                     focus: true
+
+                    WheelHandler {
+                        id: listFastWheel
+                        target: null
+                        orientation: Qt.Vertical
+                        onWheel: function(event) {
+                            var step = (event.angleDelta.y / 120.0) * Math.round(135 * Theme.scaleFactor)
+                            var maxY = Math.max(0, fileListView.contentHeight - fileListView.height)
+                            fileListView.contentY = Math.max(0, Math.min(maxY, fileListView.contentY - step))
+                            event.accepted = true
+                        }
+                    }
 
                     ScrollBar.vertical: ScrollBar {
                         active: true
@@ -322,7 +407,9 @@ Rectangle {
                     delegate: Item {
                         id: rowContainer
                         width: Math.max(fileListView.width, fileListView.contentWidth)
-                        height: Math.round(38 * Theme.scaleFactor)
+                        readonly property bool isMediaVideoRow: (backend ? backend.isMediaLibraryView : false) && !model.is_dir && model.type === "Video"
+                        readonly property bool showMovieSeparator: isMediaVideoRow && model.is_movie_item
+                        height: Math.round((isMediaVideoRow ? (showMovieSeparator ? 84 : 72) : 38) * Theme.scaleFactor)
 
                         readonly property string itemPath: model.path
                         readonly property bool itemIsDir: model.is_dir
@@ -336,21 +423,16 @@ Rectangle {
                             }
                         }
 
-                        Item {
-                            id: dragProxy
-                            width: 1
+                        // Movie Separator Line (Placed cleanly between movie items when folder is marked as Movie Mode)
+                        Rectangle {
+                            visible: rowContainer.showMovieSeparator && index > 0
+                            anchors.top: parent.top
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.leftMargin: 18
+                            anchors.rightMargin: 18
                             height: 1
-                            Drag.active: itemArea.isRightHoldingDrag
-                            Drag.source: rowContainer
-                            Drag.hotSpot.x: 0
-                            Drag.hotSpot.y: 0
-                            Drag.mimeData: { "text/uri-list": "file://" + model.path + "\r\n" }
-                            Drag.dragType: Drag.Automatic
-                            Drag.onActiveChanged: {
-                                if (!Drag.active && root.appWindow) {
-                                    root.appWindow.endRightDrag()
-                                }
-                            }
+                            color: "#38ffffff"
                         }
 
                         Rectangle {
@@ -358,14 +440,20 @@ Rectangle {
                             anchors.fill: parent
                             anchors.leftMargin: 6
                             anchors.rightMargin: 6
-                            anchors.topMargin: 1
-                            anchors.bottomMargin: 1
-                            radius: Theme.radiusSmall
+                            anchors.topMargin: rowContainer.showMovieSeparator ? 9 : 1
+                            anchors.bottomMargin: rowContainer.showMovieSeparator ? 9 : 1
+                            radius: Theme.radiusMedium
 
-                            readonly property bool isSelected: (backend && backend.selectedItem) ? (backend.selectedItem.path === model.path) : false
-                            color: isSelected ? Theme.bgSelected : (itemArea.containsMouse ? Theme.bgHover : "transparent")
-                            border.color: isSelected ? Theme.accent : "transparent"
-                            border.width: isSelected ? 1 : 0
+                            readonly property bool isSelected: {
+                                if (!backend) return false
+                                var sList = backend.selectedPaths
+                                if (sList && sList.indexOf(model.path) !== -1) return true
+                                return (backend.selectedItem && backend.selectedItem.path === model.path) ? true : false
+                            }
+                            readonly property bool isDropHovered: model.is_dir && root.hoveredSubfolderPath === model.path
+                            color: isDropHovered ? "#350078d4" : (isSelected ? Theme.bgSelected : (itemArea.containsMouse ? Theme.bgHover : "transparent"))
+                            border.color: isDropHovered || isSelected ? Theme.accent : "transparent"
+                            border.width: isDropHovered ? 2 : (isSelected ? 1 : 0)
 
                             RowLayout {
                                 anchors.fill: parent
@@ -374,8 +462,8 @@ Rectangle {
                                 spacing: 12
 
                                 Item {
-                                    implicitWidth: Math.round(24 * Theme.scaleFactor)
-                                    implicitHeight: Math.round(24 * Theme.scaleFactor)
+                                    implicitWidth: Math.round((rowContainer.isMediaVideoRow ? 92 : 24) * Theme.scaleFactor)
+                                    implicitHeight: Math.round((rowContainer.isMediaVideoRow ? 54 : 24) * Theme.scaleFactor)
 
                                     FolderPreviewIcon {
                                         anchors.fill: parent
@@ -383,29 +471,162 @@ Rectangle {
                                         previews: model.folder_previews
                                     }
 
-                                    Image {
+                                    Rectangle {
+                                        id: listThumbFrame
                                         anchors.fill: parent
+                                        radius: rowContainer.isMediaVideoRow ? Math.round(6 * Theme.scaleFactor) : 0
+                                        color: rowContainer.isMediaVideoRow ? "#141418" : "transparent"
+                                        border.color: rowContainer.isMediaVideoRow ? "#30ffffff" : "transparent"
+                                        border.width: rowContainer.isMediaVideoRow ? 1 : 0
+                                        clip: true
                                         visible: !model.is_dir && (model.thumb !== "" || (model.icon && (model.icon.indexOf("/") !== -1 || model.icon.indexOf(".") !== -1)))
-                                        source: visible ? (model.thumb !== "" ? ("file://" + model.thumb) : ("file://" + model.icon)) : ""
-                                        fillMode: Image.PreserveAspectFit
-                                        mipmap: true
+
+                                        Image {
+                                            anchors.fill: parent
+                                            anchors.margins: rowContainer.isMediaVideoRow ? 1 : 0
+                                            source: parent.visible ? (model.thumb !== "" ? ("file://" + model.thumb) : ("file://" + model.icon)) : ""
+                                            fillMode: rowContainer.isMediaVideoRow ? Image.PreserveAspectCrop : Image.PreserveAspectFit
+                                            mipmap: true
+                                        }
                                     }
 
                                     Text {
                                         anchors.centerIn: parent
-                                        visible: !model.is_dir && !parent.children[1].visible
+                                        visible: !model.is_dir && !listThumbFrame.visible
                                         text: model.icon
                                         font.pixelSize: Theme.fontSizeIcon
                                     }
                                 }
 
-                                Text {
+                                // Episode Number Badge (Shown before title in Series/Anime Media Library, hidden for Movies)
+                                Rectangle {
+                                    visible: rowContainer.isMediaVideoRow && !model.is_movie_item && model.episode_num !== ""
+                                    implicitWidth: Math.max(Math.round(32 * Theme.scaleFactor), epNumTxt.implicitWidth + 12)
+                                    implicitHeight: Math.round(22 * Theme.scaleFactor)
+                                    radius: Theme.radiusSmall
+                                    color: model.is_watched ? "#1f10b981" : "#260078d4"
+                                    border.color: model.is_watched ? "#4010b981" : "#550078d4"
+                                    border.width: 1
+                                    Layout.alignment: Qt.AlignVCenter
+
+                                    Text {
+                                        id: epNumTxt
+                                        anchors.centerIn: parent
+                                        text: model.episode_num
+                                        color: model.is_watched ? "#34d399" : "#38bdf8"
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        font.bold: true
+                                    }
+                                }
+
+                                // Title + Sleek Thin Progress Bar Column
+                                ColumnLayout {
                                     Layout.fillWidth: true
-                                    text: model.name
-                                    color: Theme.textPrimary
-                                    font.pixelSize: Theme.fontSizeNormal
-                                    font.bold: rowDelegate.isSelected
-                                    elide: Text.ElideRight
+                                    Layout.alignment: Qt.AlignVCenter
+                                    spacing: rowContainer.isMediaVideoRow ? 5 : 0
+
+                                    RowLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 8
+
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: model.name
+                                            color: (rowContainer.isMediaVideoRow && model.is_watched) ? Theme.textSecondary : Theme.textPrimary
+                                            font.pixelSize: Theme.fontSizeNormal
+                                            font.bold: rowDelegate.isSelected || rowContainer.isMediaVideoRow
+                                            elide: Text.ElideRight
+                                        }
+
+                                        // "NEW" Badge (Added within last 7 days and not yet finished)
+                                        Rectangle {
+                                            visible: rowContainer.isMediaVideoRow && model.is_new && !model.is_watched
+                                            implicitWidth: newLabel.implicitWidth + 10
+                                            implicitHeight: Math.round(17 * Theme.scaleFactor)
+                                            radius: Theme.radiusSmall
+                                            color: "#22f59e0b"
+                                            border.color: "#f59e0b"
+                                            border.width: 1
+
+                                            Text {
+                                                id: newLabel
+                                                anchors.centerIn: parent
+                                                text: "NEW"
+                                                color: "#fbbf24"
+                                                font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
+                                                font.bold: true
+                                            }
+                                        }
+
+                                        // Sleek Thin Silver Rectangle "HDR" Badge on the right side
+                                        Rectangle {
+                                            visible: rowContainer.isMediaVideoRow && model.is_hdr
+                                            implicitWidth: hdrLabel.implicitWidth + Math.round(10 * Theme.scaleFactor)
+                                            implicitHeight: Math.round(16 * Theme.scaleFactor)
+                                            radius: Math.round(3 * Theme.scaleFactor)
+                                            gradient: Gradient {
+                                                GradientStop { position: 0.0; color: "#28e2e8f0" }
+                                                GradientStop { position: 1.0; color: "#1294a3b8" }
+                                            }
+                                            border.color: "#e2e8f0"
+                                            border.width: 1
+
+                                            Text {
+                                                id: hdrLabel
+                                                anchors.centerIn: parent
+                                                text: "HDR"
+                                                color: "#f1f5f9"
+                                                font.pixelSize: Math.round(8 * Theme.scaleFactor)
+                                                font.bold: true
+                                                font.letterSpacing: 0.8
+                                            }
+                                        }
+
+                                        // Elegant Custom Vector Checkmark Badge (Not an emoji!)
+                                        Rectangle {
+                                            visible: rowContainer.isMediaVideoRow && model.is_watched
+                                            width: Math.round(18 * Theme.scaleFactor)
+                                            height: Math.round(18 * Theme.scaleFactor)
+                                            radius: width / 2
+                                            color: "#10b981"
+                                            border.color: "#34d399"
+                                            border.width: 1
+
+                                            Canvas {
+                                                anchors.fill: parent
+                                                onPaint: {
+                                                    var ctx = getContext("2d")
+                                                    ctx.reset()
+                                                    ctx.strokeStyle = "#ffffff"
+                                                    ctx.lineWidth = Math.max(1.8, width * 0.12)
+                                                    ctx.lineCap = "round"
+                                                    ctx.lineJoin = "round"
+                                                    ctx.beginPath()
+                                                    ctx.moveTo(width * 0.27, height * 0.52)
+                                                    ctx.lineTo(width * 0.44, height * 0.70)
+                                                    ctx.lineTo(width * 0.75, height * 0.32)
+                                                    ctx.stroke()
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    // Sleek Thin Progress Bar right under the episode/movie name
+                                    Rectangle {
+                                        visible: rowContainer.isMediaVideoRow
+                                        Layout.fillWidth: true
+                                        height: Math.max(3, Math.round(3.5 * Theme.scaleFactor))
+                                        radius: height / 2
+                                        color: "#28ffffff"
+                                        clip: true
+
+                                        Rectangle {
+                                            width: parent.width * Math.min(1.0, Math.max(0.0, model.progress))
+                                            height: parent.height
+                                            radius: parent.radius
+                                            color: model.is_watched ? "#10b981" : Theme.accent
+                                        }
+                                    }
                                 }
 
                                 Text {
@@ -432,31 +653,36 @@ Rectangle {
                                 id: itemArea
                                 anchors.fill: parent
                                 hoverEnabled: true
-                                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                preventStealing: isRightHoldingDrag || isLeftPanning
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+                                preventStealing: isHoldingDrag || isPanning
 
                                 property point pressPos: Qt.point(0, 0)
                                 property point lastGlobalPos: Qt.point(0, 0)
-                                property bool isRightHoldingDrag: false
-                                property bool isLeftPanning: false
+                                property bool isHoldingDrag: false
+                                property bool isPanning: false
 
                                 onPressed: function(mouse) {
                                     pressPos = Qt.point(mouse.x, mouse.y)
                                     lastGlobalPos = itemArea.mapToGlobal(mouse.x, mouse.y)
-                                    isRightHoldingDrag = false
-                                    isLeftPanning = false
+                                    isHoldingDrag = false
+                                    isPanning = false
                                 }
 
                                 onPositionChanged: function(mouse) {
+                                    if (!backend) return
                                     var gPos = itemArea.mapToGlobal(mouse.x, mouse.y)
                                     var dx = mouse.x - pressPos.x
                                     var dy = mouse.y - pressPos.y
 
-                                    if (mouse.buttons & Qt.LeftButton) {
-                                        if (!isLeftPanning && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
-                                            isLeftPanning = true
+                                    var swapped = backend.swapMouseButtons
+                                    var panBtn = swapped ? Qt.RightButton : Qt.LeftButton
+                                    var dragBtn = swapped ? Qt.LeftButton : Qt.RightButton
+
+                                    if (mouse.buttons & panBtn) {
+                                        if (!isPanning && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
+                                            isPanning = true
                                         }
-                                        if (isLeftPanning) {
+                                        if (isPanning) {
                                             var stepX = gPos.x - lastGlobalPos.x
                                             var stepY = gPos.y - lastGlobalPos.y
                                             var maxY = Math.max(0, fileListView.contentHeight - fileListView.height)
@@ -464,50 +690,59 @@ Rectangle {
                                             fileListView.contentY = Math.max(0, Math.min(maxY, fileListView.contentY - stepY))
                                             fileListView.contentX = Math.max(0, Math.min(maxX, fileListView.contentX - stepX))
                                         }
-                                    } else if (mouse.buttons & Qt.RightButton) {
-                                        if (!isRightHoldingDrag && (Math.abs(dx) > 7 || Math.abs(dy) > 7)) {
-                                            backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type)
-                                            isRightHoldingDrag = true
-                                            if (root.appWindow) {
-                                                root.appWindow.beginRightDrag(model.path, model.name, model.icon, gPos)
+                                    } else if (mouse.buttons & dragBtn) {
+                                        if (!isHoldingDrag && (Math.abs(dx) > 7 || Math.abs(dy) > 7)) {
+                                            isHoldingDrag = true
+                                            if (!rowDelegate.isSelected) {
+                                                backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type, mouse.modifiers)
                                             }
-                                        } else if (isRightHoldingDrag && root.appWindow) {
-                                            root.appWindow.updateRightDragPos(gPos)
+                                            backend.startSystemDrag(model.path, model.name, model.icon)
+                                            isHoldingDrag = false
                                         }
                                     }
                                     lastGlobalPos = gPos
                                 }
 
                                 onReleased: function(mouse) {
-                                    if (mouse.button === Qt.LeftButton) {
-                                        if (!isLeftPanning) {
-                                            backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type)
+                                    if (!backend) return
+                                    if (mouse.button === Qt.MiddleButton && model.is_dir) {
+                                        backend.addTab(model.path)
+                                        return
+                                    }
+
+                                    var swapped = backend.swapMouseButtons
+                                    var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
+                                    var isSecondary = swapped ? (mouse.button === Qt.LeftButton) : (mouse.button === Qt.RightButton)
+
+                                    if (isPrimary) {
+                                        if (!isPanning) {
+                                            backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type, mouse.modifiers)
                                         }
-                                        isLeftPanning = false
-                                    } else if (mouse.button === Qt.RightButton) {
-                                        if (!isRightHoldingDrag) {
-                                            backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type)
+                                        isPanning = false
+                                    } else if (isSecondary) {
+                                        if (!isHoldingDrag) {
+                                            if (!rowDelegate.isSelected) {
+                                                backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type, 0)
+                                            }
                                             dolphinMenu.targetPath = model.path
                                             dolphinMenu.targetName = model.name
                                             dolphinMenu.isDir = model.is_dir
                                             dolphinMenu.popup()
-                                        } else if (root.appWindow) {
-                                            root.appWindow.endRightDrag()
                                         }
-                                        isRightHoldingDrag = false
+                                        isHoldingDrag = false
                                     }
                                 }
 
                                 onCanceled: {
-                                    isLeftPanning = false
-                                    isRightHoldingDrag = false
-                                    if (root.appWindow) {
-                                        root.appWindow.endRightDrag()
-                                    }
+                                    isPanning = false
+                                    isHoldingDrag = false
                                 }
 
                                 onDoubleClicked: function(mouse) {
-                                    if (mouse.button === Qt.LeftButton && !isLeftPanning) {
+                                    if (!backend) return
+                                    var swapped = backend.swapMouseButtons
+                                    var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
+                                    if (isPrimary && !isPanning) {
                                         backend.openEntry(model.path)
                                     }
                                 }
@@ -528,9 +763,21 @@ Rectangle {
                     flickableDirection: Flickable.HorizontalAndVerticalFlick
                     boundsBehavior: Flickable.DragOverBounds
                     pixelAligned: true
-                    flickDeceleration: 2200
-                    maximumFlickVelocity: 4800
+                    flickDeceleration: 3200
+                    maximumFlickVelocity: 9500
                     focus: true
+
+                    WheelHandler {
+                        id: gridFastWheel
+                        target: null
+                        orientation: Qt.Vertical
+                        onWheel: function(event) {
+                            var step = (event.angleDelta.y / 120.0) * Math.round(155 * Theme.scaleFactor)
+                            var maxY = Math.max(0, fileGridView.contentHeight - fileGridView.height)
+                            fileGridView.contentY = Math.max(0, Math.min(maxY, fileGridView.contentY - step))
+                            event.accepted = true
+                        }
+                    }
 
                     readonly property int minCardSize: Math.round(145 * Theme.scaleFactor)
                     readonly property int targetCols: (backend && backend.gridColumns > 0) ? backend.gridColumns : Math.max(1, Math.floor(fileGridView.width / minCardSize))
@@ -553,7 +800,12 @@ Rectangle {
 
                         readonly property string itemPath: model.path
                         readonly property bool itemIsDir: model.is_dir
-                        readonly property bool isSelected: (backend && backend.selectedItem) ? (backend.selectedItem.path === model.path) : false
+                        readonly property bool isSelected: {
+                            if (!backend) return false
+                            var sList = backend.selectedPaths
+                            if (sList && sList.indexOf(model.path) !== -1) return true
+                            return (backend.selectedItem && backend.selectedItem.path === model.path) ? true : false
+                        }
                         readonly property bool isFloatingStyle: backend ? (backend.gridStyle === "floating") : true
                         readonly property bool hasMediaThumb: !model.is_dir && (model.thumb !== "" || (model.icon && (model.icon.indexOf("/") !== -1 || model.icon.indexOf(".") !== -1)))
 
@@ -566,23 +818,6 @@ Rectangle {
                             }
                         }
 
-                        Item {
-                            id: gridDragProxy
-                            width: 1
-                            height: 1
-                            Drag.active: gridMouseArea.isRightHoldingDrag
-                            Drag.source: gridContainer
-                            Drag.hotSpot.x: 0
-                            Drag.hotSpot.y: 0
-                            Drag.mimeData: { "text/uri-list": "file://" + model.path + "\r\n" }
-                            Drag.dragType: Drag.Automatic
-                            Drag.onActiveChanged: {
-                                if (!Drag.active && root.appWindow) {
-                                    root.appWindow.endRightDrag()
-                                }
-                            }
-                        }
-
                         // Card Frame (In "floating" mode, background is transparent and hugs the actual preview!)
                         Rectangle {
                             id: gridDelegate
@@ -591,13 +826,17 @@ Rectangle {
                             anchors.centerIn: parent
                             radius: Theme.radiusLarge
 
-                            color: gridContainer.isFloatingStyle
-                                   ? (gridContainer.isSelected ? "#280078d4" : (gridMouseArea.containsMouse ? "#1affffff" : "transparent"))
-                                   : (gridContainer.isSelected ? Theme.bgSelected : (gridMouseArea.containsMouse ? Theme.bgHover : Theme.bgCard))
-                            border.color: gridContainer.isSelected
+                            readonly property bool isDropHovered: model.is_dir && root.hoveredSubfolderPath === model.path
+
+                            color: isDropHovered
+                                   ? "#380078d4"
+                                   : (gridContainer.isFloatingStyle
+                                      ? (gridContainer.isSelected ? "#280078d4" : (gridMouseArea.containsMouse ? "#1affffff" : "transparent"))
+                                      : (gridContainer.isSelected ? Theme.bgSelected : (gridMouseArea.containsMouse ? Theme.bgHover : Theme.bgCard)))
+                            border.color: isDropHovered || gridContainer.isSelected
                                           ? Theme.accent
                                           : (gridContainer.isFloatingStyle ? (gridMouseArea.containsMouse ? "#35ffffff" : "transparent") : Theme.borderDim)
-                            border.width: gridContainer.isSelected ? 2 : 1
+                            border.width: isDropHovered || gridContainer.isSelected ? 2 : 1
 
                             ColumnLayout {
                                 anchors.fill: parent
@@ -646,6 +885,30 @@ Rectangle {
                                             border.color: gridContainer.isSelected ? Theme.accent : "#40ffffff"
                                             border.width: gridContainer.isSelected ? 2 : 1
                                             visible: thumbImg.status === Image.Ready
+
+                                            // Sleek Thin Silver HDR Badge on Grid Thumbnail
+                                            Rectangle {
+                                                visible: model.type === "Video" && model.is_hdr
+                                                anchors.right: parent.right
+                                                anchors.top: parent.top
+                                                anchors.margins: 5
+                                                implicitWidth: gridHdrTxt.implicitWidth + Math.round(8 * Theme.scaleFactor)
+                                                implicitHeight: Math.round(15 * Theme.scaleFactor)
+                                                radius: Math.round(3 * Theme.scaleFactor)
+                                                color: "#cc1e293b"
+                                                border.color: "#e2e8f0"
+                                                border.width: 1
+
+                                                Text {
+                                                    id: gridHdrTxt
+                                                    anchors.centerIn: parent
+                                                    text: "HDR"
+                                                    color: "#f8fafc"
+                                                    font.pixelSize: Math.round(7.5 * Theme.scaleFactor)
+                                                    font.bold: true
+                                                    font.letterSpacing: 0.7
+                                                }
+                                            }
 
                                             // Video Indicator Pill on Thumbnail
                                             Rectangle {
@@ -716,31 +979,36 @@ Rectangle {
                                 id: gridMouseArea
                                 anchors.fill: parent
                                 hoverEnabled: true
-                                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                preventStealing: isRightHoldingDrag || isLeftPanning
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+                                preventStealing: isHoldingDrag || isPanning
 
                                 property point pressPos: Qt.point(0, 0)
                                 property point lastGlobalPos: Qt.point(0, 0)
-                                property bool isRightHoldingDrag: false
-                                property bool isLeftPanning: false
+                                property bool isHoldingDrag: false
+                                property bool isPanning: false
 
                                 onPressed: function(mouse) {
                                     pressPos = Qt.point(mouse.x, mouse.y)
                                     lastGlobalPos = gridMouseArea.mapToGlobal(mouse.x, mouse.y)
-                                    isRightHoldingDrag = false
-                                    isLeftPanning = false
+                                    isHoldingDrag = false
+                                    isPanning = false
                                 }
 
                                 onPositionChanged: function(mouse) {
+                                    if (!backend) return
                                     var gPos = gridMouseArea.mapToGlobal(mouse.x, mouse.y)
                                     var dx = mouse.x - pressPos.x
                                     var dy = mouse.y - pressPos.y
 
-                                    if (mouse.buttons & Qt.LeftButton) {
-                                        if (!isLeftPanning && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
-                                            isLeftPanning = true
+                                    var swapped = backend.swapMouseButtons
+                                    var panBtn = swapped ? Qt.RightButton : Qt.LeftButton
+                                    var dragBtn = swapped ? Qt.LeftButton : Qt.RightButton
+
+                                    if (mouse.buttons & panBtn) {
+                                        if (!isPanning && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
+                                            isPanning = true
                                         }
-                                        if (isLeftPanning) {
+                                        if (isPanning) {
                                             var stepX = gPos.x - lastGlobalPos.x
                                             var stepY = gPos.y - lastGlobalPos.y
                                             var maxY = Math.max(0, fileGridView.contentHeight - fileGridView.height)
@@ -748,50 +1016,59 @@ Rectangle {
                                             fileGridView.contentY = Math.max(0, Math.min(maxY, fileGridView.contentY - stepY))
                                             fileGridView.contentX = Math.max(0, Math.min(maxX, fileGridView.contentX - stepX))
                                         }
-                                    } else if (mouse.buttons & Qt.RightButton) {
-                                        if (!isRightHoldingDrag && (Math.abs(dx) > 7 || Math.abs(dy) > 7)) {
-                                            backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type)
-                                            isRightHoldingDrag = true
-                                            if (root.appWindow) {
-                                                root.appWindow.beginRightDrag(model.path, model.name, model.icon, gPos)
+                                    } else if (mouse.buttons & dragBtn) {
+                                        if (!isHoldingDrag && (Math.abs(dx) > 7 || Math.abs(dy) > 7)) {
+                                            isHoldingDrag = true
+                                            if (!gridContainer.isSelected) {
+                                                backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type, mouse.modifiers)
                                             }
-                                        } else if (isRightHoldingDrag && root.appWindow) {
-                                            root.appWindow.updateRightDragPos(gPos)
+                                            backend.startSystemDrag(model.path, model.name, model.icon)
+                                            isHoldingDrag = false
                                         }
                                     }
                                     lastGlobalPos = gPos
                                 }
 
                                 onReleased: function(mouse) {
-                                    if (mouse.button === Qt.LeftButton) {
-                                        if (!isLeftPanning) {
-                                            backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type)
+                                    if (!backend) return
+                                    if (mouse.button === Qt.MiddleButton && model.is_dir) {
+                                        backend.addTab(model.path)
+                                        return
+                                    }
+
+                                    var swapped = backend.swapMouseButtons
+                                    var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
+                                    var isSecondary = swapped ? (mouse.button === Qt.LeftButton) : (mouse.button === Qt.RightButton)
+
+                                    if (isPrimary) {
+                                        if (!isPanning) {
+                                            backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type, mouse.modifiers)
                                         }
-                                        isLeftPanning = false
-                                    } else if (mouse.button === Qt.RightButton) {
-                                        if (!isRightHoldingDrag) {
-                                            backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type)
+                                        isPanning = false
+                                    } else if (isSecondary) {
+                                        if (!isHoldingDrag) {
+                                            if (!gridContainer.isSelected) {
+                                                backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type, 0)
+                                            }
                                             dolphinMenu.targetPath = model.path
                                             dolphinMenu.targetName = model.name
                                             dolphinMenu.isDir = model.is_dir
                                             dolphinMenu.popup()
-                                        } else if (root.appWindow) {
-                                            root.appWindow.endRightDrag()
                                         }
-                                        isRightHoldingDrag = false
+                                        isHoldingDrag = false
                                     }
                                 }
 
                                 onCanceled: {
-                                    isLeftPanning = false
-                                    isRightHoldingDrag = false
-                                    if (root.appWindow) {
-                                        root.appWindow.endRightDrag()
-                                    }
+                                    isPanning = false
+                                    isHoldingDrag = false
                                 }
 
                                 onDoubleClicked: function(mouse) {
-                                    if (mouse.button === Qt.LeftButton && !isLeftPanning) {
+                                    if (!backend) return
+                                    var swapped = backend.swapMouseButtons
+                                    var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
+                                    if (isPrimary && !isPanning) {
                                         backend.openEntry(model.path)
                                     }
                                 }

@@ -94,19 +94,9 @@ ApplicationWindow {
     }
 
     function requestSmartDrop(urlsList, destDir, dropPointX, dropPointY) {
-        if (!destDir || destDir === "recent://" || destDir === "trash://") return
-        var cleanPaths = []
-        for (var i = 0; i < urlsList.length; i++) {
-            var u = String(urlsList[i]).trim()
-            if (u === "") continue
-            if (u.startsWith("file://")) {
-                u = decodeURIComponent(u.substring(7))
-            }
-            if (u !== "" && u !== destDir) {
-                cleanPaths.push(u)
-            }
-        }
-        if (cleanPaths.length === 0) return
+        if (!backend || !destDir || destDir === "recent://" || destDir === "trash://") return
+        var cleanPaths = backend.filterValidDropSources(urlsList, destDir)
+        if (!cleanPaths || cleanPaths.length === 0) return
 
         pendingDropUrls = cleanPaths
         pendingDropDestDir = destDir
@@ -162,10 +152,10 @@ ApplicationWindow {
         if (!backend) return
         var cur = backend.currentPath
         if (!cur || cur === "recent://" || cur === "trash://") return
-        var clipPath = backend.getClipboardPath()
-        if (clipPath !== "") {
+        var clipPaths = backend.getClipboardPaths()
+        if (clipPaths && clipPaths.length > 0) {
             var op = backend.isClipboardCut() ? "move" : "copy"
-            root.pendingDropUrls = [clipPath]
+            root.pendingDropUrls = clipPaths
             root.pendingDropDestDir = cur
             root.startBatchTransfer(op)
             if (op === "move") {
@@ -200,6 +190,12 @@ ApplicationWindow {
         sequence: "Ctrl+F"
         context: Qt.WindowShortcut
         onActivated: addressBar.toggleSearch()
+    }
+    Shortcut {
+        sequence: "Ctrl+A"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        onActivated: if (backend) backend.selectAll()
     }
     Shortcut {
         sequence: "Ctrl+C"
@@ -266,6 +262,81 @@ ApplicationWindow {
         context: Qt.WindowShortcut
         onActivated: if (backend) backend.goUp()
     }
+    Shortcut {
+        sequence: "Ctrl+T"
+        context: Qt.WindowShortcut
+        onActivated: if (backend) backend.addTab("")
+    }
+    Shortcut {
+        sequence: "Ctrl+W"
+        context: Qt.WindowShortcut
+        onActivated: if (backend) backend.closeTab(backend.activeTabIndex)
+    }
+    Shortcut {
+        sequence: "Ctrl+Tab"
+        context: Qt.WindowShortcut
+        onActivated: if (backend) backend.nextTab()
+    }
+    Shortcut {
+        sequence: "C"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive
+        onActivated: if (backend && backend.isMediaLibraryView) backend.toggleSubtitlesInMedia()
+    }
+    Shortcut {
+        sequences: ["Return", "Enter", "Space"]
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        onActivated: {
+            if (backend && backend.selectedItem && backend.selectedItem.path) {
+                backend.openEntry(backend.selectedItem.path)
+            } else if (backend) {
+                backend.selectByIndex(0)
+            }
+        }
+    }
+    Shortcut {
+        sequence: "Up"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        onActivated: {
+            if (!backend) return
+            var step = backend.viewMode === "grid" ? -centralFileView.currentGridColumns() : -1
+            backend.moveSelectionRelative(step, centralFileView.currentGridColumns())
+            centralFileView.syncViewScrollToSelection()
+        }
+    }
+    Shortcut {
+        sequence: "Down"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        onActivated: {
+            if (!backend) return
+            var step = backend.viewMode === "grid" ? centralFileView.currentGridColumns() : 1
+            backend.moveSelectionRelative(step, centralFileView.currentGridColumns())
+            centralFileView.syncViewScrollToSelection()
+        }
+    }
+    Shortcut {
+        sequence: "Left"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        onActivated: {
+            if (!backend) return
+            backend.moveSelectionRelative(-1, centralFileView.currentGridColumns())
+            centralFileView.syncViewScrollToSelection()
+        }
+    }
+    Shortcut {
+        sequence: "Right"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        onActivated: {
+            if (!backend) return
+            backend.moveSelectionRelative(1, centralFileView.currentGridColumns())
+            centralFileView.syncViewScrollToSelection()
+        }
+    }
 
     MouseArea {
         anchors.fill: parent
@@ -295,6 +366,183 @@ ApplicationWindow {
         ColumnLayout {
             anchors.fill: parent
             spacing: 0
+
+            // File Explorer Style Multi-Tab Bar
+            Rectangle {
+                id: tabBarContainer
+                Layout.fillWidth: true
+                height: Math.round(36 * Theme.scaleFactor)
+                color: Theme.bgSidebar
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 6
+                    anchors.rightMargin: 6
+                    spacing: 4
+
+                    ListView {
+                        id: tabsListView
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        orientation: ListView.Horizontal
+                        spacing: 4
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        model: backend ? backend.tabs : []
+
+                        delegate: Rectangle {
+                            id: tabPill
+                            readonly property bool isCurrTab: modelData.active
+                            width: Math.min(Math.round(195 * Theme.scaleFactor), Math.max(Math.round(92 * Theme.scaleFactor), tabRow.implicitWidth + 20))
+                            height: Math.round(28 * Theme.scaleFactor)
+                            anchors.verticalCenter: parent ? parent.verticalCenter : undefined
+                            radius: Theme.radiusMedium
+                            color: tabDropArea.containsDrag
+                                   ? "#380078d4"
+                                   : (isCurrTab ? Theme.bgSurface : (tabMouse.containsMouse ? Theme.bgHover : "transparent"))
+                            border.color: tabDropArea.containsDrag
+                                          ? Theme.accent
+                                          : (isCurrTab ? Theme.borderFocus : Theme.borderDim)
+                            border.width: isCurrTab || tabDropArea.containsDrag ? 1 : 0
+
+                            RowLayout {
+                                id: tabRow
+                                anchors.fill: parent
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 6
+                                spacing: 6
+
+                                Text {
+                                    text: modelData.path === "recent://" ? "🕒" : (modelData.path === "trash://" ? "🗑️" : "📁")
+                                    font.pixelSize: Theme.fontSizeSmall
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.title
+                                    color: tabPill.isCurrTab ? Theme.textPrimary : Theme.textSecondary
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.bold: tabPill.isCurrTab
+                                    elide: Text.ElideRight
+                                }
+
+                                Rectangle {
+                                    width: Math.round(18 * Theme.scaleFactor)
+                                    height: Math.round(18 * Theme.scaleFactor)
+                                    radius: Theme.radiusSmall
+                                    color: closeTabMouse.containsMouse ? Theme.bgHover : "transparent"
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "✕"
+                                        color: closeTabMouse.containsMouse ? Theme.textDanger : Theme.textTertiary
+                                        font.pixelSize: Math.round(9 * Theme.scaleFactor)
+                                        font.bold: true
+                                    }
+
+                                    MouseArea {
+                                        id: closeTabMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: if (backend) backend.closeTab(modelData.index)
+                                    }
+                                }
+                            }
+
+                            MouseArea {
+                                id: tabMouse
+                                anchors.fill: parent
+                                anchors.rightMargin: Math.round(22 * Theme.scaleFactor)
+                                hoverEnabled: true
+                                acceptedButtons: Qt.LeftButton | Qt.MiddleButton
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: function(mouse) {
+                                    if (!backend) return
+                                    if (mouse.button === Qt.MiddleButton) {
+                                        backend.closeTab(modelData.index)
+                                    } else {
+                                        backend.switchTab(modelData.index)
+                                    }
+                                }
+                            }
+
+                            DropArea {
+                                id: tabDropArea
+                                anchors.fill: parent
+                                onEntered: function(drag) {
+                                    tabHoverSwitchTimer.targetIdx = modelData.index
+                                    tabHoverSwitchTimer.restart()
+                                }
+                                onExited: {
+                                    tabHoverSwitchTimer.stop()
+                                }
+                                onDropped: function(drop) {
+                                    tabHoverSwitchTimer.stop()
+                                    if (root.isRightDragging) root.endRightDrag()
+                                    if (!modelData.path || modelData.path === "recent://" || modelData.path === "trash://") return
+                                    var urls = []
+                                    if (drop.hasUrls) {
+                                        for (var i = 0; i < drop.urls.length; i++) urls.push(drop.urls[i].toString())
+                                    } else if (drop.text && drop.text.trim() !== "") {
+                                        urls = drop.text.trim().split(/\r?\n/)
+                                    }
+                                    if (urls.length > 0) {
+                                        var winPt = tabPill.mapToItem(root.contentItem, drop.x, drop.y)
+                                        root.requestSmartDrop(urls, modelData.path, winPt.x, winPt.y)
+                                        drop.acceptProposedAction()
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Timer {
+                        id: tabHoverSwitchTimer
+                        interval: 550
+                        repeat: false
+                        property int targetIdx: -1
+                        onTriggered: {
+                            if (backend && targetIdx >= 0) {
+                                backend.switchTab(targetIdx)
+                            }
+                        }
+                    }
+
+                    // Add Tab '+' Button
+                    Rectangle {
+                        implicitWidth: Math.round(28 * Theme.scaleFactor)
+                        implicitHeight: Math.round(28 * Theme.scaleFactor)
+                        radius: Theme.radiusMedium
+                        color: addTabMouse.containsMouse ? Theme.bgHover : Theme.bgSurface
+                        border.color: Theme.borderDim
+                        border.width: 1
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "＋"
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontSizeMedium
+                            font.bold: true
+                        }
+
+                        MouseArea {
+                            id: addTabMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: if (backend) backend.addTab("")
+                        }
+                    }
+                }
+
+                Rectangle {
+                    anchors.bottom: parent.bottom
+                    width: parent.width
+                    height: 1
+                    color: Theme.borderDim
+                }
+            }
 
             // Top Address & Action Bar
             Rectangle {
@@ -369,8 +617,36 @@ ApplicationWindow {
                                     id: pMouse
                                     anchors.fill: parent
                                     hoverEnabled: true
+                                    acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: backend.navigateTo(modelData.path)
+                                    onClicked: function(mouse) {
+                                        if (!backend) return
+                                        if (mouse.button === Qt.MiddleButton) {
+                                            backend.addTab(modelData.path)
+                                        } else if (mouse.button === Qt.RightButton) {
+                                            topStripMenu.targetPath = modelData.path
+                                            topStripMenu.popup()
+                                        } else {
+                                            backend.navigateTo(modelData.path)
+                                        }
+                                    }
+                                }
+
+                                DropArea {
+                                    anchors.fill: parent
+                                    onDropped: function(drop) {
+                                        var urls = []
+                                        if (drop.hasUrls) {
+                                            for (var i = 0; i < drop.urls.length; i++) urls.push(drop.urls[i].toString())
+                                        } else if (drop.text && drop.text.trim() !== "") {
+                                            urls = drop.text.trim().split(/\r?\n/)
+                                        }
+                                        if (urls.length > 0) {
+                                            var winPt = parent.mapToItem(root.contentItem, drop.x, drop.y)
+                                            root.requestSmartDrop(urls, modelData.path, winPt.x, winPt.y)
+                                            drop.acceptProposedAction()
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -405,8 +681,36 @@ ApplicationWindow {
                                     id: dMouse
                                     anchors.fill: parent
                                     hoverEnabled: true
+                                    acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: backend.navigateTo(modelData.path)
+                                    onClicked: function(mouse) {
+                                        if (!backend) return
+                                        if (mouse.button === Qt.MiddleButton) {
+                                            backend.addTab(modelData.path)
+                                        } else if (mouse.button === Qt.RightButton) {
+                                            topStripMenu.targetPath = modelData.path
+                                            topStripMenu.popup()
+                                        } else {
+                                            backend.navigateTo(modelData.path)
+                                        }
+                                    }
+                                }
+
+                                DropArea {
+                                    anchors.fill: parent
+                                    onDropped: function(drop) {
+                                        var urls = []
+                                        if (drop.hasUrls) {
+                                            for (var i = 0; i < drop.urls.length; i++) urls.push(drop.urls[i].toString())
+                                        } else if (drop.text && drop.text.trim() !== "") {
+                                            urls = drop.text.trim().split(/\r?\n/)
+                                        }
+                                        if (urls.length > 0) {
+                                            var winPt = parent.mapToItem(root.contentItem, drop.x, drop.y)
+                                            root.requestSmartDrop(urls, modelData.path, winPt.x, winPt.y)
+                                            drop.acceptProposedAction()
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -536,6 +840,27 @@ ApplicationWindow {
                     }
                 }
             }
+        }
+    }
+
+    StyledMenu {
+        id: topStripMenu
+        property string targetPath: ""
+        StyledMenuItem {
+            iconGlyph: "📂"
+            text: "Open"
+            font.bold: true
+            onTriggered: if (backend) backend.navigateTo(topStripMenu.targetPath)
+        }
+        StyledMenuItem {
+            iconGlyph: "➕"
+            text: "Open in New Tab"
+            onTriggered: if (backend) backend.addTab(topStripMenu.targetPath)
+        }
+        StyledMenuItem {
+            iconGlyph: "💻"
+            text: "Open in Terminal"
+            onTriggered: if (backend) backend.openInTerminal(topStripMenu.targetPath)
         }
     }
 

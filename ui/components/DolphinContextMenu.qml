@@ -11,6 +11,7 @@ StyledMenu {
     property bool isDir: false
     property var availableApps: (backend && targetPath !== "") ? backend.getAvailableApps(targetPath) : []
     property string defaultApp: (backend && targetPath !== "") ? backend.getDefaultApp(targetPath) : "Default App"
+    readonly property bool isVideoTarget: (backend && !root.isDir && targetPath !== "") ? backend.isVideoFile(targetPath) : false
 
     function openRenameModal() {
         newNameField.text = root.targetName
@@ -30,6 +31,14 @@ StyledMenu {
         text: "Open in New Tab"
         visible: root.isDir
         onTriggered: if (backend) backend.addTab(root.targetPath)
+    }
+
+    StyledMenuItem {
+        iconGlyph: "🔆"
+        text: "Open MPV with HDR"
+        visible: root.isVideoTarget
+        font.bold: true
+        onTriggered: if (backend) backend.openInMpvCustom(root.targetPath, true)
     }
 
     // 2. Open With Submenu
@@ -156,7 +165,41 @@ StyledMenu {
         iconGlyph: "💻"
         text: "Open Terminal Here"
         visible: root.isDir
-        onTriggered: backend.openInTerminal(root.targetPath)
+        onTriggered: if (backend) backend.openInTerminal(root.targetPath)
+    }
+
+    // Media Library & Episode Watch Controls
+    StyledMenu {
+        title: "Media Library Options"
+        iconGlyph: "🎬"
+        visible: root.isDir || (backend ? backend.isMediaLibraryView : false)
+
+        StyledMenuItem {
+            visible: root.isDir
+            iconGlyph: "📺"
+            text: "Set Folder as Series/Anime Library"
+            onTriggered: if (backend) backend.addMediaLibrary(root.targetPath, "series")
+        }
+        StyledMenuItem {
+            visible: root.isDir
+            iconGlyph: "🎞️"
+            text: (backend && backend.isFolderMarkedAsMovie(root.targetPath))
+                  ? "Unmark Movie Folder Mode"
+                  : "Mark Folder as Movies (No Numbering + Separator)"
+            onTriggered: if (backend) backend.toggleMovieFolderStatus(root.targetPath)
+        }
+        StyledMenuItem {
+            visible: !root.isDir && (backend ? backend.isMediaLibraryView : false)
+            iconGlyph: "✓"
+            text: "Mark Episode/Movie as Watched"
+            onTriggered: if (backend) backend.markMediaWatched(root.targetPath, true)
+        }
+        StyledMenuItem {
+            visible: !root.isDir && (backend ? backend.isMediaLibraryView : false)
+            iconGlyph: "↺"
+            text: "Reset Watch Progress"
+            onTriggered: if (backend) backend.markMediaWatched(root.targetPath, false)
+        }
     }
 
     MenuSeparator {

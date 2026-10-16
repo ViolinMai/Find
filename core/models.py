@@ -15,6 +15,12 @@ class FileListModel(QAbstractListModel):
     RawCreatedRole = Qt.ItemDataRole.UserRole + 11
     ThumbRole = Qt.ItemDataRole.UserRole + 12
     FolderPreviewsRole = Qt.ItemDataRole.UserRole + 13
+    EpisodeNumRole = Qt.ItemDataRole.UserRole + 14
+    ProgressRole = Qt.ItemDataRole.UserRole + 15
+    IsWatchedRole = Qt.ItemDataRole.UserRole + 16
+    IsNewRole = Qt.ItemDataRole.UserRole + 17
+    IsMovieItemRole = Qt.ItemDataRole.UserRole + 18
+    IsHdrRole = Qt.ItemDataRole.UserRole + 19
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -55,6 +61,18 @@ class FileListModel(QAbstractListModel):
             return entry.get("thumb", "")
         elif role == self.FolderPreviewsRole:
             return entry.get("folder_previews", [])
+        elif role == self.EpisodeNumRole:
+            return entry.get("episode_num", "")
+        elif role == self.ProgressRole:
+            return float(entry.get("progress", 0.0))
+        elif role == self.IsWatchedRole:
+            return bool(entry.get("is_watched", False))
+        elif role == self.IsNewRole:
+            return bool(entry.get("is_new", False))
+        elif role == self.IsMovieItemRole:
+            return bool(entry.get("is_movie_item", False))
+        elif role == self.IsHdrRole:
+            return bool(entry.get("is_hdr", False))
         return None
 
     def roleNames(self):
@@ -72,6 +90,12 @@ class FileListModel(QAbstractListModel):
             self.RawCreatedRole: b"raw_created",
             self.ThumbRole: b"thumb",
             self.FolderPreviewsRole: b"folder_previews",
+            self.EpisodeNumRole: b"episode_num",
+            self.ProgressRole: b"progress",
+            self.IsWatchedRole: b"is_watched",
+            self.IsNewRole: b"is_new",
+            self.IsMovieItemRole: b"is_movie_item",
+            self.IsHdrRole: b"is_hdr",
         }
 
     def set_entries(self, entries):
@@ -87,12 +111,44 @@ class FileListModel(QAbstractListModel):
             model_idx = self.index(idx, 0)
             self.dataChanged.emit(model_idx, model_idx, [self.ThumbRole])
 
+    def update_hdr_status(self, file_path: str, is_hdr: bool):
+        idx = self._path_to_row.get(file_path)
+        if idx is not None and 0 <= idx < len(self._entries):
+            if self._entries[idx].get("is_hdr") != bool(is_hdr):
+                self._entries[idx]["is_hdr"] = bool(is_hdr)
+                model_idx = self.index(idx, 0)
+                self.dataChanged.emit(model_idx, model_idx, [self.IsHdrRole])
+
     def update_folder_previews(self, folder_path, previews):
         idx = self._path_to_row.get(folder_path)
         if idx is not None and 0 <= idx < len(self._entries):
             self._entries[idx]["folder_previews"] = previews
             model_idx = self.index(idx, 0)
             self.dataChanged.emit(model_idx, model_idx, [self.FolderPreviewsRole])
+
+    def update_media_progress(self, file_path, progress_val, is_watched_val, is_new_val=None):
+        idx = self._path_to_row.get(file_path)
+        if idx is not None and 0 <= idx < len(self._entries):
+            self._entries[idx]["progress"] = float(progress_val)
+            self._entries[idx]["is_watched"] = bool(is_watched_val)
+            if is_watched_val:
+                self._entries[idx]["is_new"] = False
+            elif is_new_val is not None:
+                self._entries[idx]["is_new"] = bool(is_new_val)
+            model_idx = self.index(idx, 0)
+            self.dataChanged.emit(
+                model_idx,
+                model_idx,
+                [self.ProgressRole, self.IsWatchedRole, self.IsNewRole]
+            )
+
+    def get_row_for_path(self, item_path: str) -> int:
+        return self._path_to_row.get(item_path, -1)
+
+    def get_entry_at(self, row: int):
+        if 0 <= row < len(self._entries):
+            return self._entries[row]
+        return None
 
     def update_entry_size(self, item_path, size_str, raw_size=0):
         idx = self._path_to_row.get(item_path)

@@ -3,11 +3,10 @@
     "core/config.py",
     "core/backend.py",
     "ui/main.qml",
-    "ui/components/AddressBar.qml",
-    "ui/components/DolphinContextMenu.qml",
-    "ui/components/Sidebar.qml",
     "ui/components/FileView.qml",
     "ui/components/SettingsDialog.qml"
   ],
-  "created": []
+  "created": [
+    "core/media_daemon.py"
+  ]
 }

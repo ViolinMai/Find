@@ -1,6 +1,10 @@
 import os
 import sys
 import re
+import time
+import socket
+import hashlib
+import tempfile
 import stat as stat_mod
 import json
 import subprocess
@@ -13,8 +17,105 @@ from PySide6.QtCore import QMimeData
 from core.models import FileListModel
 from core.config import ConfigManager
 from core.thumbnails import ThumbnailManager, IMAGE_EXTS, VIDEO_EXTS
+
+SUBTITLE_EXTS = {".srt", ".ass", ".ssa", ".sub", ".vtt", ".idx", ".sup", ".smi"}
+FONT_EXTS = {".ttf", ".otf", ".woff", ".woff2", ".ttc"}
 from core.search import SearchManager
 from core.picker_context import PickerContext
+
+
+def _run_toggle_hdr_script(arg: str):
+    """Executes toggle-hdr.sh with the given argument (--on, --off, --status)."""
+    candidates = [
+        shutil.which("toggle-hdr.sh"),
+        str(Path.home() / ".local" / "bin" / "toggle-hdr.sh"),
+    ]
+    script_path = next((c for c in candidates if c and os.path.exists(c)), None)
+    if not script_path:
+        return
+    try:
+        subprocess.run(
+            [script_path, arg],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=4
+        )
+    except Exception:
+        pass
+
+
+def detect_video_hdr_sync(file_path_str: str) -> bool:
+    """
+    Detects whether a video file contains HDR metadata (HDR10, HDR10+, Dolby Vision, PQ, HLG)
+    primarily using `mediainfo --Output=JSON`, with fallback to `ffprobe`.
+    """
+    if shutil.which("mediainfo"):
+        try:
+            res = subprocess.run(
+                ["mediainfo", "--Output=JSON", file_path_str],
+                capture_output=True,
+                text=True,
+                timeout=2.5
+            )
+            if res.returncode == 0 and res.stdout:
+                data = json.loads(res.stdout)
+                tracks = data.get("media", {}).get("track", [])
+                for t in tracks:
+                    if t.get("@type") == "Video":
+                        hdr_fmt = str(t.get("HDR_Format", "") or t.get("HDR_Format_Commercial", "") or "").upper()
+                        transfer = str(t.get("transfer_characteristics", "") or t.get("transfer_characteristics_Original", "") or "").upper()
+                        primaries = str(t.get("colour_primaries", "") or t.get("colour_primaries_Original", "") or "").upper()
+                        if any(k in hdr_fmt for k in ("HDR", "DOLBY VISION", "SMPTE ST 2086", "SMPTE ST 2094", "SL-HDR")):
+                            return True
+                        if any(k in transfer for k in ("PQ", "SMPTE ST 2084", "HLG", "ARIB STD-B67")):
+                            return True
+                        if "BT.2020" in primaries and ("10" in str(t.get("BitDepth", "")) or "12" in str(t.get("BitDepth", ""))):
+                            return True
+                return False
+        except Exception:
+            pass
+
+    if shutil.which("ffprobe"):
+        try:
+            res = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", "-select_streams", "v:0", file_path_str],
+                capture_output=True,
+                text=True,
+                timeout=2.0
+            )
+            if res.returncode == 0 and res.stdout:
+                data = json.loads(res.stdout)
+                for s in data.get("streams", []):
+                    tr = str(s.get("color_transfer", "")).lower()
+                    prim = str(s.get("color_primaries", "")).lower()
+                    if tr in ("smpte2084", "arib-std-b67"):
+                        return True
+                    for sd in s.get("side_data_list", []):
+                        sd_type = str(sd.get("side_data_type", "")).lower()
+                        if "mastering display" in sd_type or "content light" in sd_type or "dovi" in sd_type or "dolby" in sd_type:
+                            return True
+                    if "bt2020" in prim and tr not in ("", "bt709", "unknown"):
+                        return True
+        except Exception:
+            pass
+    return False
+
+
+class HdrBatchDetectorTask(QRunnable):
+    def __init__(self, items_to_probe: list, config_mgr, signals):
+        super().__init__()
+        self.items_to_probe = items_to_probe
+        self.config_mgr = config_mgr
+        self.signals = signals
+
+    def run(self):
+        for fpath, mtime in self.items_to_probe:
+            try:
+                is_hdr = detect_video_hdr_sync(fpath)
+                self.config_mgr.set_cached_hdr(fpath, mtime, is_hdr)
+                self.signals.hdrStatusDetected.emit(fpath, is_hdr)
+            except Exception:
+                pass
 
 
 class AsyncWorkerSignals(QObject):
@@ -22,22 +123,240 @@ class AsyncWorkerSignals(QObject):
     # Use object instead of 32-bit C++ int so folders > 2GB never overflow into negative bytes!
     folderSizeReady = Signal(str, object)
     mediaInfoReady = Signal(str, dict)
+    mpvProgressUpdated = Signal(str, float, float, bool)
+    mpvExternalSubDetected = Signal(str, str)
+    mpvHdrSessionEnded = Signal(int)
+    hdrStatusDetected = Signal(str, bool)
+
+
+class MpvSessionMonitorTask(QRunnable):
+    """
+    Connects to mpv's JSON IPC socket while playing a video from a Media Library
+    and streams live playback progress, episode changes, and drag-and-dropped subtitles back to Find.
+    Also automatically turns off HDR via toggle-hdr.sh --off when an HDR mpv session exits.
+    """
+    def __init__(self, file_path_str: str, ipc_sock_path: str, proc, hdr_mode: bool, initial_start_pos: float, get_progress_func, signals):
+        super().__init__()
+        self.file_path_str = file_path_str
+        self.ipc_sock_path = ipc_sock_path
+        self.proc = proc
+        self.hdr_mode = hdr_mode
+        self.initial_start_pos = float(initial_start_pos or 0.0)
+        self.get_progress_func = get_progress_func
+        self.signals = signals
+
+    def _send_ipc_command(self, sock, cmd_list: list, req_id: int = 99):
+        try:
+            payload = json.dumps({"command": cmd_list, "request_id": req_id}) + "\n"
+            sock.sendall(payload.encode("utf-8"))
+        except Exception:
+            pass
+
+    def _query_ipc_property(self, sock, prop_name: str, req_id: int):
+        cmd = json.dumps({"command": ["get_property", prop_name], "request_id": req_id}) + "\n"
+        sock.sendall(cmd.encode("utf-8"))
+        buf = b""
+        while b"\n" not in buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+        for line in buf.decode("utf-8", errors="ignore").splitlines():
+            try:
+                msg = json.loads(line)
+                if msg.get("request_id") == req_id and msg.get("error") == "success":
+                    return msg.get("data")
+            except Exception:
+                pass
+        return None
+
+    def _read_mpv_watch_later_pos(self, target_path: str) -> float:
+        try:
+            md5_hex = hashlib.md5(target_path.encode("utf-8")).hexdigest().upper()
+            candidates = [
+                Path.home() / ".local" / "state" / "mpv" / "watch_later" / md5_hex,
+                Path.home() / ".config" / "mpv" / "watch_later" / md5_hex,
+            ]
+            for wl_file in candidates:
+                if wl_file.exists():
+                    with open(wl_file, "r", encoding="utf-8", errors="ignore") as f:
+                        for ln in f:
+                            if ln.startswith("start="):
+                                return float(ln.split("=", 1)[1].strip())
+        except Exception:
+            pass
+        return -1.0
+
+    def _resolve_active_path(self, raw_path_prop: str, fallback_dir: str) -> str:
+        if not raw_path_prop:
+            return ""
+        p = str(raw_path_prop).strip()
+        if p.startswith("file://"):
+            p = QUrl(p).toLocalFile() or p[7:]
+        if not os.path.isabs(p):
+            p = os.path.abspath(os.path.join(fallback_dir, p))
+        else:
+            p = os.path.abspath(p)
+        return p
+
+    def _detect_active_external_sub(self, sock, fallback_dir: str) -> str:
+        tracks = self._query_ipc_property(sock, "track-list", 5)
+        if not isinstance(tracks, list):
+            return ""
+        for tr in tracks:
+            if isinstance(tr, dict) and tr.get("type") == "sub" and tr.get("selected") is True and tr.get("external") is True:
+                ext_fn = tr.get("external-filename", "")
+                if ext_fn:
+                    resolved = self._resolve_active_path(ext_fn, fallback_dir)
+                    if resolved and os.path.exists(resolved):
+                        return resolved
+        return ""
+
+    def run(self):
+        active_file = os.path.abspath(self.file_path_str)
+        base_dir = os.path.dirname(active_file)
+        last_pos = 0.0
+        duration = 0.0
+        eof_reached = False
+        initial_seek_done = False
+        last_recorded_sub = ""
+        file_switch_ts = 0.0
+        prev_file_final_pos = -1.0
+
+        # Wait up to 3s for mpv to create the UNIX socket
+        for _ in range(15):
+            if os.path.exists(self.ipc_sock_path) or self.proc.poll() is not None:
+                break
+            time.sleep(0.2)
+
+        while self.proc.poll() is None:
+            if os.path.exists(self.ipc_sock_path):
+                try:
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+                        s.settimeout(0.8)
+                        s.connect(self.ipc_sock_path)
+                        cur_mpv_path = self._query_ipc_property(s, "path", 4)
+                        resolved_mpv_path = self._resolve_active_path(cur_mpv_path, base_dir)
+
+                        # Detect when the user switches to the next/previous episode inside MPV!
+                        if resolved_mpv_path and os.path.exists(resolved_mpv_path) and resolved_mpv_path != active_file:
+                            if duration > 0 and last_pos > 0:
+                                prev_done = eof_reached or (last_pos / duration >= 0.88)
+                                self.signals.mpvProgressUpdated.emit(active_file, last_pos, duration, prev_done)
+                            prev_file_final_pos = last_pos
+                            active_file = resolved_mpv_path
+                            base_dir = os.path.dirname(active_file)
+                            last_pos = 0.0
+                            duration = 0.0
+                            eof_reached = False
+                            last_recorded_sub = ""
+                            file_switch_ts = time.time()
+
+                            # Load saved subtitle or saved position for the newly switched episode (or start at 0.0)
+                            saved_next = self.get_progress_func(active_file) if callable(self.get_progress_func) else {}
+                            next_sub = saved_next.get("ext_sub", "")
+                            if next_sub and os.path.exists(next_sub):
+                                self._send_ipc_command(s, ["sub-add", next_sub, "select"], 10)
+                                last_recorded_sub = next_sub
+                            if not saved_next.get("watched", False) and saved_next.get("position", 0.0) > 5.0:
+                                self._send_ipc_command(s, ["set_property", "time-pos", float(saved_next["position"])], 11)
+                            else:
+                                self._send_ipc_command(s, ["set_property", "time-pos", 0.0], 11)
+                            time.sleep(0.35)
+                            continue
+
+                        dur_val = self._query_ipc_property(s, "duration", 2)
+                        pos_val = self._query_ipc_property(s, "time-pos", 1)
+                        eof_val = self._query_ipc_property(s, "eof-reached", 3)
+
+                        if isinstance(dur_val, (int, float)) and dur_val > 0:
+                            duration = float(dur_val)
+                            # Perform initial resume seek ONLY for the first launched file via IPC (never global --start!)
+                            if not initial_seek_done:
+                                initial_seek_done = True
+                                if self.initial_start_pos > 5.0 and self.initial_start_pos < duration * 0.95:
+                                    self._send_ipc_command(s, ["set_property", "time-pos", self.initial_start_pos], 12)
+                                    pos_val = self.initial_start_pos
+
+                        if isinstance(pos_val, (int, float)) and pos_val >= 0:
+                            # Guard against stale time-pos right after switching files in MPV
+                            if file_switch_ts > 0 and (time.time() - file_switch_ts) < 2.0:
+                                if prev_file_final_pos > 30.0 and abs(float(pos_val) - prev_file_final_pos) < 5.0:
+                                    continue
+                            last_pos = float(pos_val)
+
+                        if eof_val is True:
+                            eof_reached = True
+
+                        # Track external subtitle drag-and-dropped into MPV
+                        ext_sub = self._detect_active_external_sub(s, base_dir)
+                        if ext_sub and ext_sub != last_recorded_sub:
+                            last_recorded_sub = ext_sub
+                            self.signals.mpvExternalSubDetected.emit(active_file, ext_sub)
+
+                        if duration > 0 and last_pos > 0:
+                            is_done = eof_reached or (last_pos / duration >= 0.90)
+                            self.signals.mpvProgressUpdated.emit(active_file, last_pos, duration, is_done)
+                except Exception:
+                    pass
+            time.sleep(0.8)
+
+        # Clean up socket file
+        try:
+            if os.path.exists(self.ipc_sock_path):
+                os.unlink(self.ipc_sock_path)
+        except OSError:
+            pass
+
+        # Final check on exit for whichever episode was playing last
+        wl_pos = self._read_mpv_watch_later_pos(active_file)
+        if wl_pos >= 0 and (file_switch_ts == 0.0 or abs(wl_pos - prev_file_final_pos) > 5.0):
+            last_pos = wl_pos
+        if duration > 0 and last_pos > 0:
+            is_done = eof_reached or (last_pos / duration >= 0.90)
+            self.signals.mpvProgressUpdated.emit(active_file, last_pos, duration, is_done)
+
+        if self.hdr_mode:
+            self.signals.mpvHdrSessionEnded.emit(int(self.proc.pid))
 
 
 class DirectoryLoaderTask(QRunnable):
-    def __init__(self, target_path_str: str, show_hidden: bool, picker_ctx, format_size_func, determine_icon_func, thumb_mgr, folder_size_cache, signals):
+    def __init__(
+        self,
+        target_path_str: str,
+        show_hidden: bool,
+        is_media_lib: bool,
+        is_movie_mode: bool,
+        show_subtitles: bool,
+        picker_ctx,
+        format_size_func,
+        determine_icon_func,
+        get_progress_func,
+        get_cached_hdr_func,
+        thumb_mgr,
+        folder_size_cache,
+        signals
+    ):
         super().__init__()
         self.target_path_str = target_path_str
         self.show_hidden = show_hidden
+        self.is_media_lib = is_media_lib
+        self.is_movie_mode = is_movie_mode
+        self.show_subtitles = show_subtitles
         self.picker_ctx = picker_ctx
         self.format_size_func = format_size_func
         self.determine_icon_func = determine_icon_func
+        self.get_progress_func = get_progress_func
+        self.get_cached_hdr_func = get_cached_hdr_func
         self.thumb_mgr = thumb_mgr
         self.folder_size_cache = folder_size_cache
         self.signals = signals
 
     def run(self):
         entries = []
+        now_ts = time.time()
+        seven_days_sec = 7 * 86400
+
         try:
             target_path = Path(self.target_path_str)
             if target_path.exists() and target_path.is_dir():
@@ -50,6 +369,12 @@ class DirectoryLoaderTask(QRunnable):
                             is_dir = entry.is_dir(follow_symlinks=True)
                         except OSError:
                             is_dir = False
+
+                        ext_lower = Path(entry.name).suffix.lower() if not is_dir else ""
+
+                        # Hide subtitle files automatically inside Media Library unless toggled with 'C'
+                        if self.is_media_lib and not is_dir and not self.show_subtitles and ext_lower in SUBTITLE_EXTS:
+                            continue
 
                         if self.picker_ctx.isActive:
                             if self.picker_ctx.mode == "folder" and not is_dir:
@@ -88,6 +413,25 @@ class DirectoryLoaderTask(QRunnable):
                         existing_thumb = self.thumb_mgr.get_existing_thumbnail(entry.path) if not is_dir else ""
                         folder_previews = self.thumb_mgr.get_cached_folder_preview(entry.path) if is_dir else []
 
+                        progress_val = 0.0
+                        is_watched = False
+                        is_new = False
+                        is_movie_item = False
+                        is_hdr = False
+
+                        if self.is_media_lib and not is_dir and ext_lower in VIDEO_EXTS:
+                            p_info = self.get_progress_func(entry.path)
+                            progress_val = float(p_info.get("progress", 0.0))
+                            is_watched = bool(p_info.get("watched", False))
+                            newest_ts = max(raw_mod, raw_created)
+                            if not is_watched and (now_ts - newest_ts) <= seven_days_sec:
+                                is_new = True
+                            if self.is_movie_mode:
+                                is_movie_item = True
+                            cached_hdr = self.get_cached_hdr_func(entry.path, raw_mod)
+                            if cached_hdr is not None:
+                                is_hdr = bool(cached_hdr)
+
                         entries.append({
                             "name": entry.name,
                             "path": entry.path,
@@ -101,7 +445,13 @@ class DirectoryLoaderTask(QRunnable):
                             "raw_mod": raw_mod,
                             "raw_created": raw_created,
                             "thumb": existing_thumb,
-                            "folder_previews": folder_previews
+                            "folder_previews": folder_previews,
+                            "episode_num": "",
+                            "progress": progress_val,
+                            "is_watched": is_watched,
+                            "is_new": is_new,
+                            "is_movie_item": is_movie_item,
+                            "is_hdr": is_hdr
                         })
         except Exception:
             pass
@@ -218,8 +568,13 @@ class FileManagerBackend(QObject):
     sortByChanged = Signal()
     sortOrderChanged = Signal()
     selectedItemChanged = Signal()
+    selectedPathsChanged = Signal()
     showHiddenChanged = Signal()
     swapMouseButtonsChanged = Signal()
+    autoPlayHdrChanged = Signal()
+    daemonStateChanged = Signal()
+    mediaLibraryStateChanged = Signal()
+    showSubtitlesChanged = Signal()
     tabsChanged = Signal()
     cacheSizeChanged = Signal()
     maxCacheMbChanged = Signal()
@@ -254,10 +609,16 @@ class FileManagerBackend(QObject):
         self._transparent_blur = self.config_mgr.get("transparent_blur", True)
         self._show_hidden = bool(self.config_mgr.get("show_hidden", False))
         self._swap_mouse_buttons = bool(self.config_mgr.get("swap_mouse_buttons", False))
+        self._auto_play_hdr = bool(self.config_mgr.get("auto_play_hdr", True))
+        self._show_subtitles_in_media = False
+        self._active_hdr_pids = set()
         self._selected_item = {}
+        self._selected_paths = []
+        self._last_selected_row = -1
         self._search_results = []
         self._clipboard_cut = False
         self._clipboard_path = ""
+        self._clipboard_paths = []
         self._folder_size_cache = {}
         self._calculating_folders = set()
 
@@ -269,9 +630,24 @@ class FileManagerBackend(QObject):
         self.signals.directoryLoaded.connect(self._on_directory_loaded)
         self.signals.folderSizeReady.connect(self._on_folder_size_calculated)
         self.signals.mediaInfoReady.connect(self._on_media_info_ready)
+        self.signals.mpvProgressUpdated.connect(self._on_mpv_progress_updated)
+        self.signals.mpvExternalSubDetected.connect(self._on_mpv_external_sub_detected)
+        self.signals.mpvHdrSessionEnded.connect(self._on_mpv_hdr_session_ended)
+        self.signals.hdrStatusDetected.connect(self._on_hdr_status_detected)
 
         self.watcher = QFileSystemWatcher(self)
         self.watcher.directoryChanged.connect(self._on_dir_changed_externally)
+
+        self.progress_watcher = QFileSystemWatcher(self)
+        if not self.config_mgr.progress_file.exists():
+            self.config_mgr.save_progress()
+        self.progress_watcher.addPath(str(self.config_mgr.progress_file))
+        self.progress_watcher.addPath(str(self.config_mgr.config_dir))
+        self.progress_watcher.fileChanged.connect(self._on_progress_file_changed_externally)
+        self.progress_watcher.directoryChanged.connect(self._on_progress_dir_changed_externally)
+
+        if bool(self.config_mgr.get("daemon_autostart", True)):
+            self._ensure_media_daemon_running()
 
         self.thumb_mgr = ThumbnailManager(self.config_mgr.cache_dir, self)
         self.thumb_mgr.thumbnailReady.connect(self._on_thumbnail_ready)
@@ -329,6 +705,537 @@ class FileManagerBackend(QObject):
     @Slot(bool)
     def setSwapMouseButtons(self, val: bool):
         self.swapMouseButtons = val
+
+    @Property(bool, notify=autoPlayHdrChanged)
+    def autoPlayHdr(self):
+        return self._auto_play_hdr
+
+    @autoPlayHdr.setter
+    def autoPlayHdr(self, val: bool):
+        if self._auto_play_hdr != bool(val):
+            self._auto_play_hdr = bool(val)
+            self.config_mgr.set("auto_play_hdr", self._auto_play_hdr)
+            self.autoPlayHdrChanged.emit()
+
+    @Slot(bool)
+    def setAutoPlayHdr(self, val: bool):
+        self.autoPlayHdr = val
+
+    # ==========================================================================
+    # Media Library Background Daemon Manager (systemd --user + fallback process)
+    # ==========================================================================
+
+    def _get_daemon_service_path(self) -> Path:
+        xdg_config = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+        return Path(xdg_config) / "systemd" / "user" / "find-media-daemon.service"
+
+    def _get_daemon_script_path(self) -> Path:
+        return Path(__file__).resolve().parent / "media_daemon.py"
+
+    def _get_daemon_pid_file(self) -> Path:
+        return Path("/tmp") / f"find_media_daemon_{os.getuid()}.pid"
+
+    def _is_daemon_process_alive(self) -> bool:
+        pid_file = self._get_daemon_pid_file()
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
+                os.kill(pid, 0)
+                return True
+            except Exception:
+                pass
+        try:
+            res = subprocess.run(
+                ["systemctl", "--user", "is-active", "find-media-daemon.service"],
+                capture_output=True, text=True, timeout=1.5
+            )
+            if res.returncode == 0 and res.stdout.strip() == "active":
+                return True
+        except Exception:
+            pass
+        return False
+
+    def _ensure_media_daemon_running(self):
+        if self._is_daemon_process_alive():
+            return
+        srv_file = self._get_daemon_service_path()
+        if srv_file.exists() and shutil.which("systemctl"):
+            try:
+                subprocess.run(["systemctl", "--user", "start", "find-media-daemon.service"], timeout=2.0)
+                if self._is_daemon_process_alive():
+                    self.daemonStateChanged.emit()
+                    return
+            except Exception:
+                pass
+        script = self._get_daemon_script_path()
+        if script.exists():
+            try:
+                subprocess.Popen(
+                    [sys.executable, str(script)],
+                    start_new_session=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL
+                )
+                time.sleep(0.15)
+                self.daemonStateChanged.emit()
+            except Exception:
+                pass
+
+    @Property(bool, notify=daemonStateChanged)
+    def isDaemonRunning(self) -> bool:
+        return self._is_daemon_process_alive()
+
+    @Property(bool, notify=daemonStateChanged)
+    def isDaemonInstalled(self) -> bool:
+        return self._get_daemon_service_path().exists()
+
+    @Property(bool, notify=daemonStateChanged)
+    def daemonAutostart(self) -> bool:
+        return bool(self.config_mgr.get("daemon_autostart", True))
+
+    @Slot(bool)
+    def setDaemonAutostart(self, enabled: bool):
+        self.config_mgr.set("daemon_autostart", bool(enabled))
+        if self._get_daemon_service_path().exists() and shutil.which("systemctl"):
+            try:
+                action = "enable" if enabled else "disable"
+                subprocess.run(["systemctl", "--user", action, "find-media-daemon.service"], timeout=2.5)
+            except Exception:
+                pass
+        if enabled:
+            self._ensure_media_daemon_running()
+        self.daemonStateChanged.emit()
+
+    @Slot(result=str)
+    def getDaemonServiceContent(self) -> str:
+        srv = self._get_daemon_service_path()
+        if srv.exists():
+            try:
+                return srv.read_text(encoding="utf-8")
+            except Exception:
+                pass
+        script = self._get_daemon_script_path()
+        return (
+            "[Unit]\n"
+            "Description=Find Media Library MPV Tracker & HDR Daemon\n"
+            "After=graphical-session.target\n\n"
+            "[Service]\n"
+            "Type=simple\n"
+            f"ExecStart={sys.executable} {script}\n"
+            "Restart=on-failure\n"
+            "RestartSec=2\n\n"
+            "[Install]\n"
+            "WantedBy=default.target\n"
+        )
+
+    @Slot(str)
+    def installOrSaveDaemonService(self, custom_unit_content: str = ""):
+        srv = self._get_daemon_service_path()
+        srv.parent.mkdir(parents=True, exist_ok=True)
+        content = custom_unit_content.strip() if custom_unit_content.strip() else self.getDaemonServiceContent()
+        try:
+            srv.write_text(content + "\n", encoding="utf-8")
+            if shutil.which("systemctl"):
+                subprocess.run(["systemctl", "--user", "daemon-reload"], timeout=2.5)
+                if self.daemonAutostart:
+                    subprocess.run(["systemctl", "--user", "enable", "--now", "find-media-daemon.service"], timeout=3.0)
+                else:
+                    subprocess.run(["systemctl", "--user", "restart", "find-media-daemon.service"], timeout=3.0)
+            else:
+                self.restartMediaDaemon()
+        except Exception:
+            pass
+        self.daemonStateChanged.emit()
+
+    @Slot()
+    def startMediaDaemon(self):
+        self._ensure_media_daemon_running()
+        self.daemonStateChanged.emit()
+
+    @Slot()
+    def stopMediaDaemon(self):
+        if self._get_daemon_service_path().exists() and shutil.which("systemctl"):
+            try:
+                subprocess.run(["systemctl", "--user", "stop", "find-media-daemon.service"], timeout=2.5)
+            except Exception:
+                pass
+        pid_file = self._get_daemon_pid_file()
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text(encoding="utf-8").strip())
+                os.kill(pid, 15)
+            except Exception:
+                pass
+            try:
+                pid_file.unlink()
+            except OSError:
+                pass
+        self.daemonStateChanged.emit()
+
+    @Slot()
+    def restartMediaDaemon(self):
+        self.stopMediaDaemon()
+        time.sleep(0.15)
+        self._ensure_media_daemon_running()
+        self.daemonStateChanged.emit()
+
+    @Slot()
+    def removeDaemonService(self):
+        self.stopMediaDaemon()
+        srv = self._get_daemon_service_path()
+        if srv.exists():
+            if shutil.which("systemctl"):
+                try:
+                    subprocess.run(["systemctl", "--user", "disable", "find-media-daemon.service"], timeout=2.5)
+                except Exception:
+                    pass
+            try:
+                srv.unlink()
+            except OSError:
+                pass
+            if shutil.which("systemctl"):
+                try:
+                    subprocess.run(["systemctl", "--user", "daemon-reload"], timeout=2.5)
+                except Exception:
+                    pass
+        self.daemonStateChanged.emit()
+
+    def _on_progress_dir_changed_externally(self, _dir_path: str):
+        p_str = str(self.config_mgr.progress_file)
+        if os.path.exists(p_str) and p_str not in self.progress_watcher.files():
+            self.progress_watcher.addPath(p_str)
+            self._on_progress_file_changed_externally(p_str)
+
+    def _on_progress_file_changed_externally(self, path_str: str):
+        if os.path.exists(path_str) and path_str not in self.progress_watcher.files():
+            self.progress_watcher.addPath(path_str)
+        self.config_mgr.reload_progress_from_disk()
+        if self.isMediaLibraryView:
+            total = self.file_model.rowCount()
+            for r in range(total):
+                ent = self.file_model.get_entry_at(r)
+                if ent and not ent.get("is_dir", False):
+                    p_info = self.config_mgr.get_media_progress(ent["path"])
+                    self.file_model.update_media_progress(
+                        ent["path"],
+                        float(p_info.get("progress", 0.0)),
+                        bool(p_info.get("watched", False))
+                    )
+
+    def _on_hdr_status_detected(self, file_path_str: str, is_hdr: bool):
+        self.file_model.update_hdr_status(file_path_str, is_hdr)
+        if self._selected_item.get("path") == file_path_str:
+            updated = dict(self._selected_item)
+            updated["is_hdr"] = bool(is_hdr)
+            self._selected_item = updated
+            self.selectedItemChanged.emit()
+
+    # ==========================================================================
+    # Media Library & Movie Folder Management + MPV Integration
+    # ==========================================================================
+
+    def _check_path_in_media_library(self, path_str: str):
+        """Returns (is_in_library: bool, is_movie_folder: bool)."""
+        if not path_str or path_str in ("recent://", "trash://"):
+            return False, False
+        try:
+            norm_p = os.path.abspath(path_str)
+        except Exception:
+            return False, False
+
+        movie_dirs = set(self.config_mgr.get("movie_folders", []))
+        for mf in movie_dirs:
+            if norm_p == mf or norm_p.startswith(mf.rstrip(os.sep) + os.sep):
+                return True, True
+
+        libs = self.config_mgr.get("media_libraries", [])
+        matched_lib = None
+        for item in libs:
+            lp = item.get("path", "") if isinstance(item, dict) else str(item)
+            if not lp:
+                continue
+            if norm_p == lp or norm_p.startswith(lp.rstrip(os.sep) + os.sep):
+                matched_lib = item
+                break
+
+        if matched_lib is not None:
+            is_movie = (matched_lib.get("mode") == "movies") if isinstance(matched_lib, dict) else False
+            return True, is_movie
+        return False, False
+
+    @Property(bool, notify=mediaLibraryStateChanged)
+    def isMediaLibraryView(self):
+        in_lib, _ = self._check_path_in_media_library(str(self._current_path))
+        return in_lib
+
+    @Property(bool, notify=mediaLibraryStateChanged)
+    def isMovieFolderView(self):
+        _, is_mov = self._check_path_in_media_library(str(self._current_path))
+        return is_mov
+
+    @Property(bool, notify=showSubtitlesChanged)
+    def showSubtitlesInMedia(self):
+        return self._show_subtitles_in_media
+
+    @Slot()
+    def toggleSubtitlesInMedia(self):
+        self._show_subtitles_in_media = not self._show_subtitles_in_media
+        self.showSubtitlesChanged.emit()
+        if self.isMediaLibraryView:
+            self.refresh()
+
+    @Slot(result=list)
+    def getMediaLibraries(self):
+        raw = self.config_mgr.get("media_libraries", [])
+        out = []
+        for item in raw:
+            if isinstance(item, dict):
+                out.append({
+                    "name": item.get("name", Path(item.get("path", "")).name or "Library"),
+                    "path": item.get("path", ""),
+                    "mode": item.get("mode", "series")
+                })
+            elif isinstance(item, str) and item:
+                out.append({"name": Path(item).name or item, "path": item, "mode": "series"})
+        return out
+
+    @Slot(str, str)
+    def addMediaLibrary(self, folder_path: str, mode: str = "series"):
+        if not folder_path:
+            return
+        norm_p = os.path.abspath(os.path.expanduser(folder_path))
+        if not os.path.isdir(norm_p):
+            return
+        libs = self.getMediaLibraries()
+        for entry in libs:
+            if entry["path"] == norm_p:
+                entry["mode"] = mode if mode in ("series", "movies") else "series"
+                self.config_mgr.set("media_libraries", libs)
+                self.mediaLibraryStateChanged.emit()
+                self.refresh()
+                return
+        libs.append({
+            "name": Path(norm_p).name or norm_p,
+            "path": norm_p,
+            "mode": mode if mode in ("series", "movies") else "series"
+        })
+        self.config_mgr.set("media_libraries", libs)
+        self.mediaLibraryStateChanged.emit()
+        self.refresh()
+
+    @Slot(str)
+    def removeMediaLibrary(self, folder_path: str):
+        norm_p = os.path.abspath(os.path.expanduser(folder_path)) if folder_path else ""
+        libs = [x for x in self.getMediaLibraries() if x["path"] != norm_p and x["path"] != folder_path]
+        self.config_mgr.set("media_libraries", libs)
+        self.mediaLibraryStateChanged.emit()
+        self.refresh()
+
+    @Slot(str, str)
+    def setMediaLibraryMode(self, folder_path: str, mode: str):
+        libs = self.getMediaLibraries()
+        for entry in libs:
+            if entry["path"] == folder_path:
+                entry["mode"] = mode if mode in ("series", "movies") else "series"
+        self.config_mgr.set("media_libraries", libs)
+        self.mediaLibraryStateChanged.emit()
+        self.refresh()
+
+    @Slot(str, result=bool)
+    def isFolderMarkedAsMovie(self, folder_path: str) -> bool:
+        if not folder_path:
+            return False
+        _, is_mov = self._check_path_in_media_library(folder_path)
+        return is_mov
+
+    @Slot(str)
+    def toggleMovieFolderStatus(self, folder_path: str):
+        if not folder_path:
+            return
+        norm_p = os.path.abspath(folder_path)
+        movie_dirs = list(self.config_mgr.get("movie_folders", []))
+        if norm_p in movie_dirs:
+            movie_dirs.remove(norm_p)
+        else:
+            movie_dirs.append(norm_p)
+            # Also ensure it's registered as a media library if not already inside one
+            in_lib, _ = self._check_path_in_media_library(norm_p)
+            if not in_lib:
+                self.addMediaLibrary(norm_p, "movies")
+        self.config_mgr.set("movie_folders", movie_dirs)
+        self.mediaLibraryStateChanged.emit()
+        self.refresh()
+
+    @Slot(str, bool)
+    def markMediaWatched(self, file_path_str: str, watched: bool):
+        if not file_path_str:
+            return
+        cur = self.config_mgr.get_media_progress(file_path_str)
+        dur = cur.get("duration", 100.0) or 100.0
+        pos = dur if watched else 0.0
+        updated = self.config_mgr.set_media_progress(file_path_str, pos, dur, watched=watched)
+        self.file_model.update_media_progress(file_path_str, updated["progress"], updated["watched"])
+
+    def _on_mpv_progress_updated(self, file_path_str: str, pos: float, duration: float, is_done: bool):
+        updated = self.config_mgr.set_media_progress(file_path_str, pos, duration, watched=is_done)
+        self.file_model.update_media_progress(file_path_str, updated["progress"], updated["watched"])
+
+    def _on_mpv_external_sub_detected(self, file_path_str: str, sub_path_str: str):
+        self.config_mgr.set_media_external_sub(file_path_str, sub_path_str)
+
+    def _on_mpv_hdr_session_ended(self, pid: int):
+        self._active_hdr_pids.discard(pid)
+        if not self._active_hdr_pids:
+            _run_toggle_hdr_script("--off")
+
+    def _write_system_mpv_conf(self, hdr_mode: bool = False) -> str:
+        """
+        Completely replaces ~/.config/mpv/mpv.conf by merging:
+        1) 'Both' (Shared Base & Subtitles)
+        2) 'SDR' (when hdr_mode=False) OR 'HDR' (when hdr_mode=True)
+        Any key redefined in SDR or HDR cleanly overrides the key from 'Both'!
+        """
+        shader_cache = self.config_mgr.cache_dir / "mpv_shaders"
+        shader_cache.mkdir(parents=True, exist_ok=True)
+        fonts_dir = str(Path.home() / ".local" / "share" / "fonts")
+
+        def _format_vars(text: str) -> str:
+            return text.replace("{shader_cache}", str(shader_cache)).replace("{fonts_dir}", fonts_dir)
+
+        both_raw = _format_vars(self.getMpvBothConfig())
+        mode_raw = _format_vars(self.getMpvHdrConfig() if hdr_mode else self.getMpvSdrConfig())
+
+        def _normalize_key(k: str) -> str:
+            return k.strip().replace("_", "-")
+
+        mode_lines = []
+        overridden_keys = set()
+        for raw_ln in mode_raw.splitlines():
+            ln = raw_ln.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            if "=" in ln and not ln.startswith("["):
+                k = _normalize_key(ln.split("=", 1)[0])
+                overridden_keys.add(k)
+            mode_lines.append(ln)
+
+        final_lines = []
+        seen_both_keys = set()
+        for raw_ln in both_raw.splitlines():
+            ln = raw_ln.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            if ln in ("input-default-bindings=no", "input_default_bindings=no"):
+                ln = "input-default-bindings=yes"
+            elif ln in ("input-vo-keyboard=no", "input_vo_keyboard=no"):
+                ln = "input-vo-keyboard=yes"
+            elif ln == "osc=no":
+                ln = "osc=yes"
+
+            if "=" in ln and not ln.startswith("["):
+                k = _normalize_key(ln.split("=", 1)[0])
+                seen_both_keys.add(k)
+                if k in overridden_keys:
+                    continue
+            final_lines.append(ln)
+
+        all_keys = seen_both_keys | overridden_keys
+        if "input-default-bindings" not in all_keys:
+            final_lines.append("input-default-bindings=yes")
+        if "input-vo-keyboard" not in all_keys:
+            final_lines.append("input-vo-keyboard=yes")
+        if "save-position-on-quit" not in all_keys:
+            final_lines.append("save-position-on-quit=yes")
+        if "osd-on-seek" not in all_keys:
+            final_lines.append("osd-on-seek=no")
+
+        if mode_lines:
+            final_lines.append("")
+            final_lines.extend(mode_lines)
+
+        mpv_conf_dir = Path.home() / ".config" / "mpv"
+        mpv_conf_dir.mkdir(parents=True, exist_ok=True)
+        mpv_conf_file = mpv_conf_dir / "mpv.conf"
+
+        try:
+            with open(mpv_conf_file, "w", encoding="utf-8") as f:
+                f.write("\n".join(final_lines) + "\n")
+        except Exception:
+            pass
+        return str(mpv_conf_file)
+
+    def _launch_in_mpv_with_tracking(self, file_path_str: str, hdr_mode: bool = False):
+        if hdr_mode:
+            _run_toggle_hdr_script("--on")
+
+        base_id = f"find_mpv_{os.getpid()}_{int(time.time() * 1000)}"
+        sock_path = os.path.join("/tmp", f"{base_id}.sock")
+        meta_path = os.path.join("/tmp", f"{base_id}.json")
+        self._write_system_mpv_conf(hdr_mode=hdr_mode)
+        saved = self.config_mgr.get_media_progress(file_path_str)
+
+        if saved.get("watched", False):
+            try:
+                md5_hex = hashlib.md5(os.path.abspath(file_path_str).encode("utf-8")).hexdigest().upper()
+                for wl_f in (
+                    Path.home() / ".local" / "state" / "mpv" / "watch_later" / md5_hex,
+                    Path.home() / ".config" / "mpv" / "watch_later" / md5_hex,
+                ):
+                    if wl_f.exists():
+                        wl_f.unlink()
+            except Exception:
+                pass
+
+        initial_pos = 0.0
+        if not saved.get("watched", False) and saved.get("position", 0.0) > 5.0:
+            initial_pos = float(saved["position"])
+
+        cmd = [
+            "mpv",
+            f"--input-ipc-server={sock_path}",
+            "--no-resume-playback"
+        ]
+        ext_sub = saved.get("ext_sub", "")
+        if ext_sub and os.path.exists(ext_sub):
+            cmd.append(f"--sub-file={ext_sub}")
+
+        cmd.append(file_path_str)
+
+        # Ensure the background daemon is running so it can track MPV and turn off HDR even if Find is closed
+        self._ensure_media_daemon_running()
+
+        if self._is_daemon_process_alive():
+            try:
+                with open(meta_path, "w", encoding="utf-8") as mf:
+                    json.dump({
+                        "file_path": os.path.abspath(file_path_str),
+                        "hdr_mode": bool(hdr_mode),
+                        "initial_pos": initial_pos
+                    }, mf)
+            except Exception:
+                pass
+
+        proc = subprocess.Popen(
+            cmd,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+
+        # Fallback to in-process monitor ONLY if the daemon is not running
+        if not self._is_daemon_process_alive():
+            if hdr_mode:
+                self._active_hdr_pids.add(int(proc.pid))
+            monitor = MpvSessionMonitorTask(
+                file_path_str,
+                sock_path,
+                proc,
+                hdr_mode,
+                initial_pos,
+                self.config_mgr.get_media_progress,
+                self.signals
+            )
+            QThreadPool.globalInstance().start(monitor)
 
     def _tab_title_for_path(self, path_str: str) -> str:
         if path_str == "recent://":
@@ -432,21 +1339,63 @@ class FileManagerBackend(QObject):
         if len(self._tabs) > 1:
             self.switchTab((self._active_tab_index + 1) % len(self._tabs))
 
+    @Slot(int, int)
+    def moveTab(self, from_idx: int, to_idx: int):
+        if not (0 <= from_idx < len(self._tabs)) or not (0 <= to_idx < len(self._tabs)):
+            return
+        if from_idx == to_idx:
+            return
+        self._sync_current_tab_state()
+        item = self._tabs.pop(from_idx)
+        self._tabs.insert(to_idx, item)
+        if self._active_tab_index == from_idx:
+            self._active_tab_index = to_idx
+        elif from_idx < self._active_tab_index <= to_idx:
+            self._active_tab_index -= 1
+        elif to_idx <= self._active_tab_index < from_idx:
+            self._active_tab_index += 1
+        self.tabsChanged.emit()
+
+    @Slot(int)
+    def detachTabToNewWindow(self, index: int):
+        if not (0 <= index < len(self._tabs)):
+            return
+        target_path = self._tabs[index].get("path", str(Path.home()))
+        if target_path in ("recent://", "trash://"):
+            target_path = str(Path.home())
+        main_script = Path(__file__).resolve().parent.parent / "main.py"
+        try:
+            subprocess.Popen(
+                [sys.executable, str(main_script), target_path],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            if len(self._tabs) > 1:
+                self.closeTab(index)
+        except Exception:
+            pass
+
     @Slot(str, str, str)
     def startSystemDrag(self, file_path_str: str, display_name: str = "", icon_glyph: str = "📄"):
         try:
             p = Path(file_path_str)
             if not p.exists():
                 return
+            targets = list(self._selected_paths) if (file_path_str in self._selected_paths and len(self._selected_paths) > 1) else [file_path_str]
+            valid_paths = [Path(fp).resolve() for fp in targets if os.path.exists(fp)]
+            if not valid_paths:
+                return
+
             drag = QDrag(self)
             mime = QMimeData()
-            url = QUrl.fromLocalFile(str(p.resolve()))
-            mime.setUrls([url])
-            mime.setText(str(p.resolve()))
+            urls = [QUrl.fromLocalFile(str(vp)) for vp in valid_paths]
+            mime.setUrls(urls)
+            mime.setText("\n".join(str(vp) for vp in valid_paths))
             drag.setMimeData(mime)
 
             # Render a clean native drag badge pixmap so external apps & Wayland compositor show it
-            label = display_name if display_name else p.name
+            label = f"{len(valid_paths)} items selected" if len(valid_paths) > 1 else (display_name if display_name else p.name)
             if len(label) > 26:
                 label = label[:23] + "..."
             pm = QPixmap(220, 38)
@@ -600,6 +1549,10 @@ class FileManagerBackend(QObject):
     @Property(dict, notify=selectedItemChanged)
     def selectedItem(self):
         return self._selected_item
+
+    @Property(list, notify=selectedPathsChanged)
+    def selectedPaths(self):
+        return self._selected_paths
 
     @Property(list, notify=searchResultsChanged)
     def searchResults(self):
@@ -794,6 +1747,9 @@ class FileManagerBackend(QObject):
                     fv = views[anc_str]
                     break
 
+        in_lib, is_movie = self._check_path_in_media_library(target_resolved)
+        self.mediaLibraryStateChanged.emit()
+
         if fv:
             new_vm = fv.get("view_mode", self._view_mode)
             new_sb = fv.get("sort_by", self._sort_by)
@@ -816,22 +1772,196 @@ class FileManagerBackend(QObject):
         task = DirectoryLoaderTask(
             target_resolved,
             self._show_hidden,
+            in_lib,
+            is_movie,
+            self._show_subtitles_in_media,
             self.picker_ctx,
             self._format_size,
             self._determine_icon_and_type,
+            self.config_mgr.get_media_progress,
+            self.config_mgr.get_cached_hdr,
             self.thumb_mgr,
             self._folder_size_cache,
             self.signals
         )
         self.thread_pool.start(task)
 
+    def _parse_episode_info(self, filename: str):
+        """
+        Ultra-accurate torrent/anime/series episode parser handling S01E02, multi-season,
+        fansub brackets, decimal episodes (12.5), and complex release strings.
+        Returns (badge_str: str or None, sort_float: float or None).
+        """
+        stem = Path(filename).stem
+
+        def _fmt(raw_num_str: str):
+            val = float(raw_num_str)
+            if "." in raw_num_str:
+                parts = raw_num_str.split(".", 1)
+                return f"{int(parts[0]):02d}.{parts[1]}", val
+            return f"{int(val):02d}", val
+
+        # 0. Direct fast-path on original stem for standard S01E02 / S01E02v2 / S1x02 patterns
+        m_se = re.search(r'(?:^|[\s\._\-\[\(])[Ss](\d{1,2})[\s\._\-]*[Ee](\d{1,4}(?:\.\d)?)(?:v\d+)?(?:$|[\s\._\-\]\)]|\b)', stem)
+        if m_se:
+            return _fmt(m_se.group(2))
+
+        m_x = re.search(r'(?:^|[\s\._\-\[\(])(\d{1,2})[xX](\d{1,3}(?:\.\d)?)(?:v\d+)?(?:$|[\s\._\-\]\)]|\b)', stem)
+        if m_x and int(m_x.group(1)) < 50:
+            return _fmt(m_x.group(2))
+
+        # 1. Strip CRC32 hashes like [A1B2C3D4] or (0F8E9A12)
+        s = re.sub(r'[\[\(][0-9A-Fa-f]{8}[\]\)]', ' ', stem)
+
+        # 2. Extract any explicit episode inside brackets before stripping brackets e.g. [05] or [12.5] or [03v2]
+        bracket_ep = None
+        for bm in re.finditer(r'\[(\d{1,3}(?:\.\d)?)(?:v\d+)?\]', s, flags=re.I):
+            val = float(bm.group(1))
+            if 0 <= val < 1900 and int(val) not in (480, 576, 720, 1080, 264, 265):
+                bracket_ep = bm.group(1)
+
+        # 3. Strip all remaining [...] and (...) metadata blocks
+        s = re.sub(r'\[[^\]]*\]|\([^\)]*\)', ' ', s)
+
+        # 4. Replace dots and underscores with spaces (preserve decimal points only for .5 episodes)
+        s = re.sub(r'(\d)\.5\b', r'\1_HALF_EP_', s)
+        s = re.sub(r'[\._]+', ' ', s)
+        s = s.replace('_HALF_EP_', '.5')
+
+        # 5. Strip technical video/audio/release tokens & resolutions
+        tech_noise = (
+            r'\b(?:'
+            r'\d{3,4}p|\d{3,4}x\d{3,4}|4K|8K|UHD|FHD|HD|SD|'
+            r'[xh]\s*26[45]|HEVC|AVC|AV1|VP9|XviD|DivX|10\s*bit|8\s*bit|12\s*bit|Hi10P|Hi10|'
+            r'HDR10\+?|HDR|DV|DoVi|Dolby\s*Vision|HLG|SDR|'
+            r'WEB\s*DL|WEBRip|WEB|Blu\s*Ray|BDRip|BD|BRRip|DVDRip|HDTV|REMUX|'
+            r'AAC\d*|FLAC|EAC3|AC3|DDP\d*|DD\d*|Opus|MP3|TrueHD|Atmos|DTS(?:\s*HD)?(?:\s*MA)?|'
+            r'Dual\s*Audio|Multi\s*Subs?|Multiple\s*Subtitles?|Subbed|Dubbed|Uncensored|PROPER|REPACK|RERIP|'
+            r'CH\d+|2CH|6CH|8CH|5\s*1|7\s*1|2\s*0|'
+            r'(?:19|20)\d{2}'
+            r')\b'
+        )
+        s = re.sub(tech_noise, ' ', s, flags=re.I)
+
+        # Remove standalone season descriptors before further matching
+        s_no_season = re.sub(
+            r'\b(?:Season\s*\d{1,2}|S\d{1,2}|\d{1,2}(?:st|nd|rd|th)\s+Season|Part\s*\d{1,2}|Cour\s*\d{1,2})\b',
+            ' ',
+            s,
+            flags=re.I
+        )
+
+        # Rule B: Explicit Episode keywords: EP05, Ep 05, Episode 05, E05, #05, 第05話
+        m = re.search(r'(?:\b(?:Ep?(?:isode)?|Cap(?:itulo)?)|\#)\s*(\d{1,4}(?:\.\d)?)(?:v\d+)?\b', s_no_season, flags=re.I)
+        if m:
+            return _fmt(m.group(1))
+
+        m = re.search(r'第\s*(\d{1,4}(?:\.\d)?)\s*[話话集]', s_no_season)
+        if m:
+            return _fmt(m.group(1))
+
+        # Rule C: Anime/Torrent dash separator: "Title - 05", "Title - 05v2", "Title - 12.5 - EpTitle"
+        dash_matches = list(re.finditer(r'-\s*(\d{1,4}(?:\.\d)?)(?:v\d+)?(?:\b|\s|-|$)', s_no_season, flags=re.I))
+        if dash_matches:
+            return _fmt(dash_matches[0].group(1))
+
+        # Rule D: Bracketed episode number e.g. [05] found earlier
+        if bracket_ep is not None:
+            return _fmt(bracket_ep)
+
+        # Rule E: Standalone number in cleaned title
+        s_clean = re.sub(r'\s+', ' ', s_no_season).strip()
+        tokens = list(re.finditer(r'\b(\d{1,4}(?:\.\d)?)(?:v\d+)?\b', s_clean, flags=re.I))
+        if tokens:
+            chosen = tokens[-1]
+            if chosen.start() == 0 and len(tokens) == 1 and len(s_clean) > len(chosen.group(0)) + 2:
+                return None, None
+            val = float(chosen.group(1))
+            if 0 <= val <= 1999:
+                return _fmt(chosen.group(1))
+
+        return None, None
+
+    def _is_predominantly_video_folder(self, entries: list) -> bool:
+        """
+        Returns True ONLY if the current folder's items (ignoring subtitle & font files)
+        consist of >= 90% video files (and at least 1 video file).
+        """
+        relevant_total = 0
+        video_count = 0
+        for e in entries:
+            if e["is_dir"]:
+                relevant_total += 1
+            else:
+                ext = Path(e["name"]).suffix.lower()
+                if ext in SUBTITLE_EXTS or ext in FONT_EXTS:
+                    continue
+                relevant_total += 1
+                if ext in VIDEO_EXTS:
+                    video_count += 1
+        if relevant_total == 0 or video_count == 0:
+            return False
+        return (video_count / relevant_total) >= 0.90
+
     def _on_directory_loaded(self, path_loaded, entries):
         if str(self._current_path) in ("recent://", "trash://") or path_loaded != str(self._current_path):
             return
 
-        self._sort_entries(entries)
+        in_lib, is_movie = self._check_path_in_media_library(path_loaded)
+        is_episode_folder = (in_lib and not is_movie and self._is_predominantly_video_folder(entries))
+
+        # When the current directory is an episode folder (>= 90% videos),
+        # ignore inherited parent folder sort (like Date Modified on the root Anime folder)
+        # and sort episodes strictly by their episode number in ascending order!
+        if is_episode_folder:
+            exact_fv = self.config_mgr.get_folder_view(path_loaded)
+            # Only use a custom sort if the user explicitly clicked Sort inside THIS exact episode folder (not cascaded from parent)
+            if not exact_fv or exact_fv.get("cascade", False):
+                if self._sort_by != "name":
+                    self._sort_by = "name"
+                    self.sortByChanged.emit()
+                if not self._sort_ascending:
+                    self._sort_ascending = True
+                    self.sortOrderChanged.emit()
+
+        if in_lib:
+            unprobed_hdr = []
+            for e in entries:
+                if not e["is_dir"] and Path(e["name"]).suffix.lower() in VIDEO_EXTS:
+                    if is_movie:
+                        e["episode_num"] = ""
+                        e["is_movie_item"] = True
+                    else:
+                        badge, ep_sort = self._parse_episode_info(e["name"])
+                        e["_ep_sort"] = ep_sort
+                        e["_ep_badge"] = badge
+                        e["is_movie_item"] = False
+
+                    if self.config_mgr.get_cached_hdr(e["path"], e["raw_mod"]) is None:
+                        unprobed_hdr.append((e["path"], e["raw_mod"]))
+
+            self._sort_entries(entries, is_series_lib=is_episode_folder)
+
+            if not is_movie:
+                ep_counter = 1
+                for e in entries:
+                    if not e["is_dir"] and Path(e["name"]).suffix.lower() in VIDEO_EXTS:
+                        badge = e.pop("_ep_badge", None)
+                        e.pop("_ep_sort", None)
+                        e["episode_num"] = badge if badge is not None else f"{ep_counter:02d}"
+                        ep_counter += 1
+
+            if unprobed_hdr:
+                hdr_task = HdrBatchDetectorTask(unprobed_hdr, self.config_mgr, self.signals)
+                self.thread_pool.start(hdr_task)
+        else:
+            self._sort_entries(entries)
+
         self._selected_item = {}
+        self._selected_paths = []
+        self._last_selected_row = -1
         self.selectedItemChanged.emit()
+        self.selectedPathsChanged.emit()
         self.file_model.set_entries(entries)
 
     def _load_recent_directory(self):
@@ -939,25 +2069,40 @@ class FileManagerBackend(QObject):
         self.selectedItemChanged.emit()
         self.file_model.set_entries(final_entries)
 
-    def _sort_entries(self, entries):
+    def _sort_entries(self, entries, is_series_lib: bool = False):
         rev = not self._sort_ascending
 
         def natural_keys(text):
             return [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', text.lower())]
 
-        if self._sort_by == "name":
-            key_func = lambda x: natural_keys(x["name"])
-        elif self._sort_by == "size":
-            key_func = lambda x: x["raw_size"]
+        if self._sort_by == "size":
+            base_key = lambda x: x["raw_size"]
         elif self._sort_by == "modified":
-            key_func = lambda x: x["raw_mod"]
+            base_key = lambda x: x["raw_mod"]
         elif self._sort_by == "created":
-            key_func = lambda x: x["raw_created"]
+            base_key = lambda x: x["raw_created"]
         else:
-            key_func = lambda x: natural_keys(x["name"])
+            base_key = lambda x: natural_keys(x["name"])
 
-        dirs = sorted([e for e in entries if e["is_dir"]], key=key_func, reverse=rev)
-        files = sorted([e for e in entries if not e["is_dir"]], key=key_func, reverse=rev)
+        dirs = sorted([e for e in entries if e["is_dir"]], key=base_key, reverse=rev)
+
+        if is_series_lib:
+            # In a >=90% video episode folder, sort video files strictly by their extracted episode number!
+            ep_key = lambda x: (
+                0 if x.get("_ep_sort") is not None else 1,
+                float(x["_ep_sort"]) if x.get("_ep_sort") is not None else float("inf"),
+                natural_keys(x["name"])
+            )
+            exact_fv = self.config_mgr.get_folder_view(str(self._current_path))
+            has_manual_override = bool(exact_fv and not exact_fv.get("cascade", False) and self._sort_by != "name")
+            if has_manual_override:
+                files = sorted([e for e in entries if not e["is_dir"]], key=base_key, reverse=rev)
+            else:
+                ep_rev = (not self._sort_ascending) if (exact_fv and not exact_fv.get("cascade", False)) else False
+                files = sorted([e for e in entries if not e["is_dir"]], key=ep_key, reverse=ep_rev)
+        else:
+            files = sorted([e for e in entries if not e["is_dir"]], key=base_key, reverse=rev)
+
         entries[:] = dirs + files
 
     def _format_size(self, size):
@@ -995,11 +2140,72 @@ class FileManagerBackend(QObject):
                 self.picker_ctx.setSelectedPath(str(path))
                 self.confirmPickerSelection()
             else:
-                subprocess.Popen(["xdg-open", str(path)], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if path.suffix.lower() in VIDEO_EXTS and shutil.which("mpv"):
+                    use_hdr = False
+                    in_lib, _ = self._check_path_in_media_library(str(path))
+                    if in_lib and self._auto_play_hdr:
+                        try:
+                            mtime = path.stat().st_mtime
+                            cached_hdr = self.config_mgr.get_cached_hdr(str(path), mtime)
+                            if cached_hdr is None:
+                                cached_hdr = detect_video_hdr_sync(str(path))
+                                self.config_mgr.set_cached_hdr(str(path), mtime, cached_hdr)
+                                self.file_model.update_hdr_status(str(path), cached_hdr)
+                            use_hdr = bool(cached_hdr)
+                        except Exception:
+                            use_hdr = False
+                    self._launch_in_mpv_with_tracking(str(path), hdr_mode=use_hdr)
+                else:
+                    subprocess.Popen(["xdg-open", str(path)], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    @Slot(str, result=bool)
+    def isVideoFile(self, file_path_str: str) -> bool:
+        if not file_path_str:
+            return False
+        return Path(file_path_str).suffix.lower() in VIDEO_EXTS
+
+    @Slot(result=str)
+    def getMpvBothConfig(self) -> str:
+        val = self.config_mgr.get("mpv_both_config")
+        if not val:
+            val = self.config_mgr.get("mpv_base_config", self.config_mgr.DEFAULT_CONFIG["mpv_both_config"])
+        return val
+
+    @Slot(result=str)
+    def getMpvSdrConfig(self) -> str:
+        return self.config_mgr.get("mpv_sdr_config", self.config_mgr.DEFAULT_CONFIG["mpv_sdr_config"])
+
+    @Slot(result=str)
+    def getMpvHdrConfig(self) -> str:
+        return self.config_mgr.get("mpv_hdr_config", self.config_mgr.DEFAULT_CONFIG["mpv_hdr_config"])
+
+    @Slot(str, str, str)
+    def saveMpvConfigs(self, both_cfg: str, sdr_cfg: str, hdr_cfg: str):
+        self.config_mgr.set("mpv_both_config", both_cfg.strip())
+        self.config_mgr.set("mpv_sdr_config", sdr_cfg.strip())
+        self.config_mgr.set("mpv_hdr_config", hdr_cfg.strip())
+        self._write_system_mpv_conf(hdr_mode=False)
+
+    @Slot()
+    def resetMpvConfigsToDefault(self):
+        self.config_mgr.set("mpv_both_config", self.config_mgr.DEFAULT_CONFIG["mpv_both_config"])
+        self.config_mgr.set("mpv_sdr_config", self.config_mgr.DEFAULT_CONFIG["mpv_sdr_config"])
+        self.config_mgr.set("mpv_hdr_config", self.config_mgr.DEFAULT_CONFIG["mpv_hdr_config"])
+        self._write_system_mpv_conf(hdr_mode=False)
+
+    @Slot(str, bool)
+    def openInMpvCustom(self, file_path_str: str, hdr_mode: bool = False):
+        if not file_path_str or not os.path.exists(file_path_str):
+            return
+        if shutil.which("mpv"):
+            self._launch_in_mpv_with_tracking(file_path_str, hdr_mode=hdr_mode)
 
     @Slot(str, str)
     def openWithApp(self, file_path_str: str, app_cmd: str):
         try:
+            if app_cmd == "mpv" and Path(file_path_str).suffix.lower() in VIDEO_EXTS:
+                self._launch_in_mpv_with_tracking(file_path_str, hdr_mode=False)
+                return
             subprocess.Popen([app_cmd, file_path_str], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except Exception:
             pass
@@ -1038,18 +2244,20 @@ class FileManagerBackend(QObject):
 
     @Slot(str)
     def duplicateItem(self, file_path_str: str):
-        try:
-            p = Path(file_path_str)
-            if not p.exists():
-                return
-            target = self._get_unique_path(p.parent, f"{p.stem} (Copy)", p.suffix)
-            if p.is_dir():
-                shutil.copytree(p, target)
-            else:
-                shutil.copy2(p, target)
-            self.refresh()
-        except Exception:
-            pass
+        targets = self._selected_paths if (file_path_str in self._selected_paths and len(self._selected_paths) > 1) else [file_path_str]
+        for fp in targets:
+            try:
+                p = Path(fp)
+                if not p.exists():
+                    continue
+                target = self._get_unique_path(p.parent, f"{p.stem} (Copy)", p.suffix)
+                if p.is_dir():
+                    shutil.copytree(p, target)
+                else:
+                    shutil.copy2(p, target)
+            except Exception:
+                pass
+        self.refresh()
 
     @Slot(str, str)
     def renameItem(self, file_path_str: str, new_name: str):
@@ -1068,18 +2276,31 @@ class FileManagerBackend(QObject):
     def stageClipboard(self, file_path_str: str, is_cut: bool):
         if not file_path_str:
             return
-        self._clipboard_path = file_path_str
+        targets = list(self._selected_paths) if (file_path_str in self._selected_paths and len(self._selected_paths) > 1) else [file_path_str]
+        valid_paths = [str(Path(fp).resolve()) for fp in targets if os.path.exists(fp)]
+        if not valid_paths:
+            return
+        self._clipboard_path = valid_paths[0]
+        self._clipboard_paths = valid_paths
         self._clipboard_cut = bool(is_cut)
         clipboard = QGuiApplication.clipboard()
-        p = Path(file_path_str)
-        if p.exists():
-            mime = QMimeData()
-            urls = [QUrl.fromLocalFile(str(p.resolve()))]
-            mime.setUrls(urls)
-            mime.setText(str(p.resolve()))
-            op_word = "cut" if is_cut else "copy"
-            mime.setData("x-special/gnome-copied-files", f"{op_word}\n{urls[0].toString()}".encode("utf-8"))
-            clipboard.setMimeData(mime)
+        mime = QMimeData()
+        urls = [QUrl.fromLocalFile(vp) for vp in valid_paths]
+        mime.setUrls(urls)
+        mime.setText("\n".join(valid_paths))
+        op_word = "cut" if is_cut else "copy"
+        gnome_payload = op_word + "\n" + "\n".join(u.toString() for u in urls)
+        mime.setData("x-special/gnome-copied-files", gnome_payload.encode("utf-8"))
+        clipboard.setMimeData(mime)
+
+    @Slot(result=list)
+    def getClipboardPaths(self) -> list:
+        if self._clipboard_paths:
+            existing = [p for p in self._clipboard_paths if os.path.exists(p)]
+            if existing:
+                return existing
+        single = self.getClipboardPath()
+        return [single] if single else []
 
     @Slot(result=str)
     def getClipboardPath(self):
@@ -1112,6 +2333,7 @@ class FileManagerBackend(QObject):
     @Slot()
     def clearClipboardStage(self):
         self._clipboard_path = ""
+        self._clipboard_paths = []
         self._clipboard_cut = False
 
     @Slot(str)
@@ -1119,12 +2341,16 @@ class FileManagerBackend(QObject):
         try:
             if not dest_folder_str or dest_folder_str in ("recent://", "trash://"):
                 return
-            clip_path = self.getClipboardPath()
-            if not clip_path or not os.path.exists(clip_path):
+            clip_paths = self.getClipboardPaths()
+            if not clip_paths:
                 return
             op = "move" if self._clipboard_cut else "copy"
-            ok = self.executeDropTransfer(clip_path, dest_folder_str, op, "keep_both")
-            if ok and self._clipboard_cut:
+            any_ok = False
+            for cp in clip_paths:
+                if os.path.exists(cp):
+                    if self.executeDropTransfer(cp, dest_folder_str, op, "keep_both"):
+                        any_ok = True
+            if any_ok and self._clipboard_cut:
                 self.clearClipboardStage()
         except Exception:
             pass
@@ -1323,9 +2549,59 @@ class FileManagerBackend(QObject):
             self.config_mgr.apply_view_to_subfolders(str(self._current_path), self._view_mode, self._sort_by, self._sort_ascending)
 
     @Slot(str, str, bool, str, str, str)
-    def selectItem(self, path: str, name: str, is_dir: bool, size: str, modified: str, file_type: str):
+    @Slot(str, str, bool, str, str, str, int)
+    def selectItem(self, path: str, name: str, is_dir: bool, size: str, modified: str, file_type: str, modifiers: int = 0):
         if self.picker_ctx.isActive:
             self.picker_ctx.toggleSelect(path, is_dir)
+
+        row_idx = self.file_model.get_row_for_path(path)
+        ctrl_pressed = bool(modifiers & Qt.KeyboardModifier.ControlModifier.value)
+        shift_pressed = bool(modifiers & Qt.KeyboardModifier.ShiftModifier.value)
+
+        if shift_pressed and self._last_selected_row >= 0 and row_idx >= 0:
+            start_r = min(self._last_selected_row, row_idx)
+            end_r = max(self._last_selected_row, row_idx)
+            range_paths = []
+            for r in range(start_r, end_r + 1):
+                ent = self.file_model.get_entry_at(r)
+                if ent:
+                    range_paths.append(ent["path"])
+            if ctrl_pressed:
+                merged = list(self._selected_paths)
+                for rp in range_paths:
+                    if rp not in merged:
+                        merged.append(rp)
+                self._selected_paths = merged
+            else:
+                self._selected_paths = range_paths
+            self.selectedPathsChanged.emit()
+        elif ctrl_pressed:
+            updated_list = list(self._selected_paths)
+            if path in updated_list:
+                updated_list.remove(path)
+            else:
+                updated_list.append(path)
+            self._selected_paths = updated_list
+            if row_idx >= 0:
+                self._last_selected_row = row_idx
+            self.selectedPathsChanged.emit()
+            if not self._selected_paths:
+                self._selected_item = {}
+                self.selectedItemChanged.emit()
+                return
+            if path not in self._selected_paths:
+                last_p = self._selected_paths[-1]
+                last_r = self.file_model.get_row_for_path(last_p)
+                ent = self.file_model.get_entry_at(last_r)
+                if ent:
+                    path, name, is_dir, size, modified, file_type = (
+                        ent["path"], ent["name"], ent["is_dir"], ent["size"], ent["modified"], ent["type"]
+                    )
+        else:
+            self._selected_paths = [path]
+            if row_idx >= 0:
+                self._last_selected_row = row_idx
+            self.selectedPathsChanged.emit()
 
         preview_text = ""
         is_image = False
@@ -1412,10 +2688,63 @@ class FileManagerBackend(QObject):
             self._selected_item = updated
             self.selectedItemChanged.emit()
 
+    @Slot(int)
+    def selectByIndex(self, row: int):
+        entry = self.file_model.get_entry_at(row)
+        if entry is not None:
+            self.selectItem(
+                entry["path"],
+                entry["name"],
+                entry["is_dir"],
+                entry["size"],
+                entry["modified"],
+                entry["type"]
+            )
+
+    @Slot(int, int)
+    def moveSelectionRelative(self, delta: int, columns: int = 1):
+        total = self.file_model.rowCount()
+        if total <= 0:
+            return
+        cur_path = self._selected_item.get("path", "")
+        cur_idx = self.file_model.get_row_for_path(cur_path) if cur_path else -1
+        if cur_idx < 0:
+            target_idx = 0 if delta >= 0 else total - 1
+        else:
+            target_idx = max(0, min(total - 1, cur_idx + delta))
+        self.selectByIndex(target_idx)
+
+    @Slot(result=int)
+    def getSelectedRowIndex(self) -> int:
+        cur_path = self._selected_item.get("path", "")
+        if not cur_path:
+            return -1
+        return self.file_model.get_row_for_path(cur_path)
+
+    @Slot()
+    def selectAll(self):
+        total = self.file_model.rowCount()
+        if total <= 0:
+            return
+        all_paths = []
+        for r in range(total):
+            ent = self.file_model.get_entry_at(r)
+            if ent:
+                all_paths.append(ent["path"])
+        self._selected_paths = all_paths
+        self.selectedPathsChanged.emit()
+        if not self._selected_item and total > 0:
+            first = self.file_model.get_entry_at(0)
+            if first:
+                self.selectItem(first["path"], first["name"], first["is_dir"], first["size"], first["modified"], first["type"], Qt.KeyboardModifier.ControlModifier.value)
+
     @Slot()
     def clearSelection(self):
         self._selected_item = {}
+        self._selected_paths = []
+        self._last_selected_row = -1
         self.selectedItemChanged.emit()
+        self.selectedPathsChanged.emit()
 
     @Slot()
     def toggleShowHidden(self):
@@ -1520,33 +2849,37 @@ class FileManagerBackend(QObject):
 
     @Slot(str)
     def moveToTrash(self, file_path_str: str):
-        try:
-            if not file_path_str or not os.path.exists(file_path_str):
-                return
-            self.thumb_mgr.remove_thumbnail_for_path(file_path_str)
+        targets = list(self._selected_paths) if (file_path_str in self._selected_paths and len(self._selected_paths) > 1) else [file_path_str]
+        moved_any = False
+        for fp in targets:
+            try:
+                if not fp or not os.path.exists(fp):
+                    continue
+                self.thumb_mgr.remove_thumbnail_for_path(fp)
+                if shutil.which("gio"):
+                    res = subprocess.run(["gio", "trash", fp], capture_output=True)
+                    if res.returncode == 0:
+                        moved_any = True
+                        continue
+                if shutil.which("trash-put"):
+                    res = subprocess.run(["trash-put", fp], capture_output=True)
+                    if res.returncode == 0:
+                        moved_any = True
+                        continue
+
+                xdg_data = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+                t_files = Path(xdg_data) / "Trash" / "files"
+                t_files.mkdir(parents=True, exist_ok=True)
+                src = Path(fp)
+                dest = self._get_unique_path(t_files, src.stem, src.suffix)
+                shutil.move(str(src), str(dest))
+                moved_any = True
+            except Exception:
+                pass
+        if moved_any:
             self.config_mgr.clean_cache()
             self.cacheSizeChanged.emit()
-
-            if shutil.which("gio"):
-                res = subprocess.run(["gio", "trash", file_path_str], capture_output=True)
-                if res.returncode == 0:
-                    self.refresh()
-                    return
-            if shutil.which("trash-put"):
-                res = subprocess.run(["trash-put", file_path_str], capture_output=True)
-                if res.returncode == 0:
-                    self.refresh()
-                    return
-
-            xdg_data = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
-            t_files = Path(xdg_data) / "Trash" / "files"
-            t_files.mkdir(parents=True, exist_ok=True)
-            src = Path(file_path_str)
-            dest = self._get_unique_path(t_files, src.stem, src.suffix)
-            shutil.move(str(src), str(dest))
             self.refresh()
-        except Exception:
-            pass
 
     @Slot(int)
     def setMaxCacheMb(self, mb: int):

@@ -1,12 +1,13 @@
 import os
 import hashlib
 import json
+import random
 import tempfile
 import subprocess
 import shutil
 from pathlib import Path
 from PySide6.QtCore import QObject, Signal, QRunnable, QThreadPool
-from PIL import Image
+from PIL import Image, ImageDraw
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".ico"}
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".m4v"}
@@ -19,6 +20,26 @@ TEXT_EXTS = {
 
 EPHEMERAL_DIR = Path(tempfile.gettempdir()) / "find_ephemeral_previews"
 EPHEMERAL_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _apply_rounded_corners_to_file(img_path: Path, radius: int = 18):
+    """Applies clean anti-aliased rounded corners to a generated thumbnail image."""
+    try:
+        if not img_path.exists():
+            return
+        with Image.open(img_path) as im:
+            im_rgba = im.convert("RGBA")
+            w, h = im_rgba.size
+            scale = 2
+            mask = Image.new("L", (w * scale, h * scale), 0)
+            draw = ImageDraw.Draw(mask)
+            r = max(6, int(min(w, h) * 0.08)) * scale
+            draw.rounded_rectangle((0, 0, w * scale - 1, h * scale - 1), radius=r, fill=255)
+            mask = mask.resize((w, h), Image.Resampling.LANCZOS)
+            im_rgba.putalpha(mask)
+            im_rgba.save(str(img_path), "PNG", optimize=True)
+    except Exception:
+        pass
 
 
 def _record_manifest_entry(cache_dir: Path, thumb_filename: str, src_path: str):
@@ -51,7 +72,7 @@ def generate_single_thumbnail_sync(file_path: str, cache_dir: Path, save_to_cach
             return str(p)
 
         mtime = p.stat().st_mtime
-        key = f"{file_path}_{mtime}".encode("utf-8")
+        key = f"{file_path}_{mtime}_v2_rounded".encode("utf-8")
         hash_base = hashlib.md5(key).hexdigest()
 
         target_dir = cache_dir if save_to_cache else EPHEMERAL_DIR
@@ -64,48 +85,68 @@ def generate_single_thumbnail_sync(file_path: str, cache_dir: Path, save_to_cach
                     pass
                 return str(cand)
 
-        out_ext = ".png" if ext in {".png", ".ico"} else ".jpg"
-        thumb_path = target_dir / f"{hash_base}{out_ext}"
+        thumb_path = target_dir / f"{hash_base}.png"
 
         if ext in IMAGE_EXTS:
             with Image.open(p) as img:
-                img.thumbnail((360, 360))
-                if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
-                    img.save(str(thumb_path), "PNG", optimize=True)
-                else:
-                    img.convert("RGB").save(str(thumb_path), "JPEG", quality=86)
+                img.thumbnail((420, 420))
+                img.convert("RGBA").save(str(thumb_path), "PNG", optimize=True)
+            _apply_rounded_corners_to_file(thumb_path)
+            if save_to_cache:
+                _record_manifest_entry(cache_dir, thumb_path.name, file_path)
+            return str(thumb_path)
+
+        if ext in VIDEO_EXTS and shutil.which("ffmpeg"):
+            seek_sec = 5.0
+            if shutil.which("ffprobe"):
+                try:
+                    probe_cmd = [
+                        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                        "-of", "default=noprint_wrappers=1:nokey=1", str(p)
+                    ]
+                    pr = subprocess.run(probe_cmd, capture_output=True, text=True, timeout=1.5)
+                    if pr.returncode == 0 and pr.stdout.strip():
+                        duration = float(pr.stdout.strip())
+                        if duration > 4.0:
+                            # Random timestamp strictly within the first quarter (5% to 25% of duration)
+                            low_bound = max(1.0, duration * 0.05)
+                            high_bound = max(low_bound + 0.5, duration * 0.25)
+                            seek_sec = round(random.uniform(low_bound, high_bound), 2)
+                        elif duration > 1.0:
+                            seek_sec = round(duration * 0.15, 2)
+                except Exception:
+                    pass
+
+            cmd_random_first_quarter = [
+                "ffmpeg", "-v", "quiet", "-y", "-ss", str(seek_sec), "-i", str(p),
+                "-vframes", "1", "-vf", "scale='min(480,iw)':-1", str(thumb_path)
+            ]
+            res2 = subprocess.run(cmd_random_first_quarter, timeout=2.5)
+            if res2.returncode == 0 and thumb_path.exists() and thumb_path.stat().st_size > 0:
+                _apply_rounded_corners_to_file(thumb_path)
                 if save_to_cache:
                     _record_manifest_entry(cache_dir, thumb_path.name, file_path)
                 return str(thumb_path)
 
-        if ext in VIDEO_EXTS and shutil.which("ffmpeg"):
             cmd_cover = [
                 "ffmpeg", "-v", "quiet", "-y", "-i", str(p),
                 "-map", "0:v:1", "-vframes", "1",
-                "-vf", "scale='min(320,iw)':-1", str(thumb_path)
+                "-vf", "scale='min(480,iw)':-1", str(thumb_path)
             ]
             res = subprocess.run(cmd_cover, timeout=1.5)
             if res.returncode == 0 and thumb_path.exists() and thumb_path.stat().st_size > 0:
-                if save_to_cache:
-                    _record_manifest_entry(cache_dir, thumb_path.name, file_path)
-                return str(thumb_path)
-
-            cmd_fast = [
-                "ffmpeg", "-v", "quiet", "-y", "-ss", "1.0", "-i", str(p),
-                "-vframes", "1", "-vf", "scale='min(320,iw)':-1", str(thumb_path)
-            ]
-            res2 = subprocess.run(cmd_fast, timeout=2.0)
-            if res2.returncode == 0 and thumb_path.exists() and thumb_path.stat().st_size > 0:
+                _apply_rounded_corners_to_file(thumb_path)
                 if save_to_cache:
                     _record_manifest_entry(cache_dir, thumb_path.name, file_path)
                 return str(thumb_path)
 
             cmd_zero = [
                 "ffmpeg", "-v", "quiet", "-y", "-i", str(p),
-                "-vframes", "1", "-vf", "scale='min(320,iw)':-1", str(thumb_path)
+                "-vframes", "1", "-vf", "scale='min(480,iw)':-1", str(thumb_path)
             ]
             res3 = subprocess.run(cmd_zero, timeout=2.0)
             if res3.returncode == 0 and thumb_path.exists() and thumb_path.stat().st_size > 0:
+                _apply_rounded_corners_to_file(thumb_path)
                 if save_to_cache:
                     _record_manifest_entry(cache_dir, thumb_path.name, file_path)
                 return str(thumb_path)
@@ -276,7 +317,7 @@ class ThumbnailManager(QObject):
             if not p.exists():
                 return ""
             mtime = p.stat().st_mtime
-            key = f"{file_path}_{mtime}".encode("utf-8")
+            key = f"{file_path}_{mtime}_v2_rounded".encode("utf-8")
             hash_base = hashlib.md5(key).hexdigest()
             for ext in (".png", ".jpg"):
                 thumb_path = self.cache_dir / f"{hash_base}{ext}"

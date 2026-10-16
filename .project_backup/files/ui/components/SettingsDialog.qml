@@ -13,6 +13,7 @@ Dialog {
 
     property var hiddenItemsList: backend ? backend.getHiddenSidebarItems() : []
     property var customQAList: backend ? backend.getAllCustomQuickAccess() : []
+    property var mediaLibsList: backend ? backend.getMediaLibraries() : []
     property var defaultIconsMap: backend ? backend.getDefaultTypeIcons() : ({})
     property int selectedQAIndex: -1
     property string activePickerTarget: ""
@@ -26,6 +27,12 @@ Dialog {
                     pathInput.text = selected
                 } else if (root.activePickerTarget === "qa_icon") {
                     iconInput.text = selected
+                } else if (root.activePickerTarget === "media_lib_series") {
+                    backend.addMediaLibrary(selected, "series")
+                    root.mediaLibsList = backend.getMediaLibraries()
+                } else if (root.activePickerTarget === "media_lib_movies") {
+                    backend.addMediaLibrary(selected, "movies")
+                    root.mediaLibsList = backend.getMediaLibraries()
                 } else if (root.activePickerTarget.startsWith("def_icon_")) {
                     var key = root.activePickerTarget.replace("def_icon_", "")
                     backend.setDefaultTypeIcon(key, selected)
@@ -33,6 +40,11 @@ Dialog {
                 }
                 backend.cancelPicker()
                 root.open()
+            }
+        }
+        function onMediaLibraryStateChanged() {
+            if (backend) {
+                root.mediaLibsList = backend.getMediaLibraries()
             }
         }
     }
@@ -70,6 +82,8 @@ Dialog {
                 background: Rectangle { color: "transparent" }
 
                 TabButton { text: "General & UI" }
+                TabButton { text: "Media Library" }
+                TabButton { text: "MPV Config" }
                 TabButton { text: "Quick Access" }
                 TabButton { text: "Icons" }
                 TabButton { text: "Hidden" }
@@ -210,6 +224,21 @@ Dialog {
                 }
             }
 
+            RowLayout {
+                Layout.fillWidth: true
+                Text {
+                    text: "Swap Left & Right Mouse Button Roles (Select/Drag):"
+                    color: Theme.textSecondary
+                    font.pixelSize: Theme.fontSizeNormal
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                }
+                Switch {
+                    checked: backend ? backend.swapMouseButtons : false
+                    onToggled: if (backend) backend.setSwapMouseButtons(checked)
+                }
+            }
+
             Rectangle { Layout.fillWidth: true; height: 1; color: Theme.borderDim }
 
             Text {
@@ -285,7 +314,394 @@ Dialog {
             Item { Layout.fillHeight: true }
         }
 
-        // TAB 2: Quick Access Editor
+        // TAB 2: Media Library Manager (Series/Anime & Movies Folders + MPV Sync)
+        ColumnLayout {
+            spacing: Math.round(10 * Theme.scaleFactor)
+
+            Text {
+                text: "Media Library Folders (Anime, Series & Movies)"
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontSizeMedium
+                font.bold: true
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: "Folders added here (and all their subfolders) keep full File Manager features while enabling smart episode numbering, thin progress bars, custom completion checkmarks, silver 'HDR' badges, 'NEW' badges, automatic subtitle hiding (press 'C' to toggle), and live MPV playback tracking."
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSizeSmall
+                wrapMode: Text.WordWrap
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: Math.round(38 * Theme.scaleFactor)
+                radius: Theme.radiusSmall
+                color: Theme.bgCard
+                border.color: Theme.borderDim
+                border.width: 1
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 12
+                    spacing: 10
+
+                    Rectangle {
+                        implicitWidth: hdrSetPreview.implicitWidth + 10
+                        implicitHeight: Math.round(17 * Theme.scaleFactor)
+                        radius: 3
+                        color: "#24e2e8f0"
+                        border.color: "#e2e8f0"
+                        border.width: 1
+
+                        Text {
+                            id: hdrSetPreview
+                            anchors.centerIn: parent
+                            text: "HDR"
+                            color: "#f8fafc"
+                            font.pixelSize: Math.round(8 * Theme.scaleFactor)
+                            font.bold: true
+                            font.letterSpacing: 0.8
+                        }
+                    }
+
+                    Text {
+                        text: "Auto-Play HDR Content in HDR Mode (via mediainfo & toggle-hdr.sh):"
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontSizeNormal
+                        font.bold: true
+                        Layout.fillWidth: true
+                        elide: Text.ElideRight
+                    }
+
+                    Switch {
+                        checked: backend ? backend.autoPlayHdr : true
+                        onToggled: if (backend) backend.setAutoPlayHdr(checked)
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Button {
+                    text: "＋ Add Series / Anime Library..."
+                    onClicked: {
+                        root.activePickerTarget = "media_lib_series"
+                        root.close()
+                        backend.openInternalPicker("folder", "", "Select Series / Anime Root Folder")
+                    }
+                    contentItem: Text {
+                        text: parent.text
+                        color: "#ffffff"
+                        font.bold: true
+                        font.pixelSize: Theme.fontSizeSmall
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: Math.round(195 * Theme.scaleFactor)
+                        implicitHeight: Math.round(32 * Theme.scaleFactor)
+                        color: parent.hovered ? Theme.accentHover : Theme.accent
+                        radius: Theme.radiusSmall
+                    }
+                }
+
+                Button {
+                    text: "🎬 Add Movies Library..."
+                    onClicked: {
+                        root.activePickerTarget = "media_lib_movies"
+                        root.close()
+                        backend.openInternalPicker("folder", "", "Select Movies Root Folder")
+                    }
+                    contentItem: Text {
+                        text: parent.text
+                        color: Theme.textPrimary
+                        font.bold: true
+                        font.pixelSize: Theme.fontSizeSmall
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: Math.round(165 * Theme.scaleFactor)
+                        implicitHeight: Math.round(32 * Theme.scaleFactor)
+                        color: parent.hovered ? Theme.bgHover : Theme.bgCard
+                        border.color: Theme.borderDim
+                        radius: Theme.radiusSmall
+                    }
+                }
+
+                Item { Layout.fillWidth: true }
+            }
+
+            ListView {
+                id: mediaLibListView
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                clip: true
+                spacing: 6
+                model: root.mediaLibsList
+
+                delegate: Rectangle {
+                    width: mediaLibListView.width
+                    height: Math.round(42 * Theme.scaleFactor)
+                    radius: Theme.radiusSmall
+                    color: Theme.bgCard
+                    border.color: Theme.borderDim
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: 10
+
+                        Text {
+                            text: modelData.mode === "movies" ? "🎬" : "📺"
+                            font.pixelSize: Theme.fontSizeMedium
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 1
+                            Text {
+                                text: modelData.name
+                                color: Theme.textPrimary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeNormal
+                                elide: Text.ElideRight
+                                Layout.fillWidth: true
+                            }
+                            Text {
+                                text: modelData.path
+                                color: Theme.textTertiary
+                                font.pixelSize: Theme.fontSizeSmall
+                                elide: Text.ElideMiddle
+                                Layout.fillWidth: true
+                            }
+                        }
+
+                        Button {
+                            text: modelData.mode === "movies" ? "Mode: Movies (Separators)" : "Mode: Series (Numbered)"
+                            onClicked: {
+                                if (!backend) return
+                                var nextMode = modelData.mode === "movies" ? "series" : "movies"
+                                backend.setMediaLibraryMode(modelData.path, nextMode)
+                                root.mediaLibsList = backend.getMediaLibraries()
+                            }
+                        }
+
+                        Button {
+                            text: "Remove"
+                            onClicked: {
+                                if (!backend) return
+                                backend.removeMediaLibrary(modelData.path)
+                                root.mediaLibsList = backend.getMediaLibraries()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // TAB 3: MPV Config Editor (Both, SDR, and HDR Profiles -> Writes to ~/.config/mpv/mpv.conf)
+        ColumnLayout {
+            spacing: Math.round(8 * Theme.scaleFactor)
+
+            Text {
+                text: "MPV Configuration (~/.config/mpv/mpv.conf — Both / SDR / HDR)"
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontSizeMedium
+                font.bold: true
+            }
+
+            Text {
+                Layout.fillWidth: true
+                text: "'Both' holds shared base & subtitle settings. Any setting written in 'SDR' or 'HDR' (such as a custom sub-color) automatically overrides the corresponding key in 'Both'. HDR mode also runs 'toggle-hdr.sh --on' on launch and 'toggle-hdr.sh --off' when MPV closes."
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSizeSmall
+                wrapMode: Text.WordWrap
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: 8
+
+                // 1. BOTH (Shared Base & Subtitles)
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: 4
+
+                    Text {
+                        text: "1. Both (Shared Base & Subs):"
+                        color: Theme.accent
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.bold: true
+                    }
+
+                    ScrollView {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+
+                        TextArea {
+                            id: mpvBothEditor
+                            text: backend ? backend.getMpvBothConfig() : ""
+                            color: Theme.textPrimary
+                            font.family: "monospace"
+                            font.pixelSize: Theme.fontSizeSmall
+                            selectByMouse: true
+                            wrapMode: TextEdit.NoWrap
+                            background: Rectangle {
+                                color: Theme.bgCard
+                                radius: Theme.radiusSmall
+                                border.color: mpvBothEditor.activeFocus ? Theme.accent : Theme.borderDim
+                                border.width: 1
+                            }
+                        }
+                    }
+                }
+
+                // 2. SDR (Standard Mode Overrides)
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: 4
+
+                    Text {
+                        text: "2. SDR Only (Overrides Both):"
+                        color: "#34d399"
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.bold: true
+                    }
+
+                    ScrollView {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+
+                        TextArea {
+                            id: mpvSdrEditor
+                            text: backend ? backend.getMpvSdrConfig() : ""
+                            color: Theme.textPrimary
+                            font.family: "monospace"
+                            font.pixelSize: Theme.fontSizeSmall
+                            selectByMouse: true
+                            wrapMode: TextEdit.NoWrap
+                            background: Rectangle {
+                                color: Theme.bgCard
+                                radius: Theme.radiusSmall
+                                border.color: mpvSdrEditor.activeFocus ? Theme.accent : Theme.borderDim
+                                border.width: 1
+                            }
+                        }
+                    }
+                }
+
+                // 3. HDR (HDR Mode Overrides + Auto toggle-hdr.sh)
+                ColumnLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    spacing: 4
+
+                    Text {
+                        text: "3. HDR Only (Overrides Both):"
+                        color: "#fbbf24"
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.bold: true
+                    }
+
+                    ScrollView {
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        clip: true
+
+                        TextArea {
+                            id: mpvHdrEditor
+                            text: backend ? backend.getMpvHdrConfig() : ""
+                            color: Theme.textPrimary
+                            font.family: "monospace"
+                            font.pixelSize: Theme.fontSizeSmall
+                            selectByMouse: true
+                            wrapMode: TextEdit.NoWrap
+                            background: Rectangle {
+                                color: Theme.bgCard
+                                radius: Theme.radiusSmall
+                                border.color: mpvHdrEditor.activeFocus ? Theme.accent : Theme.borderDim
+                                border.width: 1
+                            }
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Button {
+                    text: "💾 Save All (Both / SDR / HDR)"
+                    onClicked: {
+                        if (backend) {
+                            backend.saveMpvConfigs(mpvBothEditor.text, mpvSdrEditor.text, mpvHdrEditor.text)
+                            mpvSaveStatus.text = "✔ Saved & updated ~/.config/mpv/mpv.conf"
+                        }
+                    }
+                    contentItem: Text {
+                        text: parent.text
+                        color: "#ffffff"
+                        font.bold: true
+                        font.pixelSize: Theme.fontSizeSmall
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: Math.round(185 * Theme.scaleFactor)
+                        implicitHeight: Math.round(32 * Theme.scaleFactor)
+                        color: parent.hovered ? Theme.accentHover : Theme.accent
+                        radius: Theme.radiusSmall
+                    }
+                }
+
+                Button {
+                    text: "↺ Reset Defaults"
+                    onClicked: {
+                        if (backend) {
+                            backend.resetMpvConfigsToDefault()
+                            mpvBothEditor.text = backend.getMpvBothConfig()
+                            mpvSdrEditor.text = backend.getMpvSdrConfig()
+                            mpvHdrEditor.text = backend.getMpvHdrConfig()
+                            mpvSaveStatus.text = "↺ Restored defaults"
+                        }
+                    }
+                    contentItem: Text {
+                        text: parent.text
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSizeSmall
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: Math.round(120 * Theme.scaleFactor)
+                        implicitHeight: Math.round(32 * Theme.scaleFactor)
+                        color: parent.hovered ? Theme.bgHover : Theme.bgCard
+                        border.color: Theme.borderDim
+                        radius: Theme.radiusSmall
+                    }
+                }
+
+                Text {
+                    id: mpvSaveStatus
+                    text: ""
+                    color: "#34d399"
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.bold: true
+                    Layout.fillWidth: true
+                    elide: Text.ElideRight
+                }
+            }
+        }
+
+        // TAB 4: Quick Access Editor
         RowLayout {
             spacing: Math.round(14 * Theme.scaleFactor)
 

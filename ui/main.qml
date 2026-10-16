@@ -152,10 +152,10 @@ ApplicationWindow {
         if (!backend) return
         var cur = backend.currentPath
         if (!cur || cur === "recent://" || cur === "trash://") return
-        var clipPath = backend.getClipboardPath()
-        if (clipPath !== "") {
+        var clipPaths = backend.getClipboardPaths()
+        if (clipPaths && clipPaths.length > 0) {
             var op = backend.isClipboardCut() ? "move" : "copy"
-            root.pendingDropUrls = [clipPath]
+            root.pendingDropUrls = clipPaths
             root.pendingDropDestDir = cur
             root.startBatchTransfer(op)
             if (op === "move") {
@@ -190,6 +190,12 @@ ApplicationWindow {
         sequence: "Ctrl+F"
         context: Qt.WindowShortcut
         onActivated: addressBar.toggleSearch()
+    }
+    Shortcut {
+        sequence: "Ctrl+A"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        onActivated: if (backend) backend.selectAll()
     }
     Shortcut {
         sequence: "Ctrl+C"
@@ -271,6 +277,66 @@ ApplicationWindow {
         context: Qt.WindowShortcut
         onActivated: if (backend) backend.nextTab()
     }
+    Shortcut {
+        sequence: "C"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive
+        onActivated: if (backend && backend.isMediaLibraryView) backend.toggleSubtitlesInMedia()
+    }
+    Shortcut {
+        sequences: ["Return", "Enter", "Space"]
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        onActivated: {
+            if (backend && backend.selectedItem && backend.selectedItem.path) {
+                backend.openEntry(backend.selectedItem.path)
+            } else if (backend) {
+                backend.selectByIndex(0)
+            }
+        }
+    }
+    Shortcut {
+        sequence: "Up"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        onActivated: {
+            if (!backend) return
+            var step = backend.viewMode === "grid" ? -centralFileView.currentGridColumns() : -1
+            backend.moveSelectionRelative(step, centralFileView.currentGridColumns())
+            centralFileView.syncViewScrollToSelection()
+        }
+    }
+    Shortcut {
+        sequence: "Down"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        onActivated: {
+            if (!backend) return
+            var step = backend.viewMode === "grid" ? centralFileView.currentGridColumns() : 1
+            backend.moveSelectionRelative(step, centralFileView.currentGridColumns())
+            centralFileView.syncViewScrollToSelection()
+        }
+    }
+    Shortcut {
+        sequence: "Left"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        onActivated: {
+            if (!backend) return
+            backend.moveSelectionRelative(-1, centralFileView.currentGridColumns())
+            centralFileView.syncViewScrollToSelection()
+        }
+    }
+    Shortcut {
+        sequence: "Right"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        onActivated: {
+            if (!backend) return
+            backend.moveSelectionRelative(1, centralFileView.currentGridColumns())
+            centralFileView.syncViewScrollToSelection()
+        }
+    }
 
     MouseArea {
         anchors.fill: parent
@@ -324,20 +390,71 @@ ApplicationWindow {
                         boundsBehavior: Flickable.StopAtBounds
                         model: backend ? backend.tabs : []
 
+                        moveDisplaced: Transition {
+                            NumberAnimation { properties: "x"; duration: 140; easing.type: Easing.OutCubic }
+                        }
+
+                        // Dynamic '+' Add Tab Button attached directly beside the last tab!
+                        footer: Item {
+                            width: Math.round(34 * Theme.scaleFactor)
+                            height: tabsListView.height
+
+                            Rectangle {
+                                width: Math.round(28 * Theme.scaleFactor)
+                                height: Math.round(28 * Theme.scaleFactor)
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.left: parent.left
+                                anchors.leftMargin: 4
+                                radius: Theme.radiusMedium
+                                color: addTabMouse.containsMouse ? Theme.bgHover : Theme.bgSurface
+                                border.color: addTabMouse.containsMouse ? Theme.accent : Theme.borderDim
+                                border.width: 1
+
+                                Behavior on x { NumberAnimation { duration: 120; easing.type: Easing.OutCubic } }
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "＋"
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeMedium
+                                    font.bold: true
+                                }
+
+                                MouseArea {
+                                    id: addTabMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: if (backend) backend.addTab("")
+                                }
+                            }
+                        }
+
                         delegate: Rectangle {
                             id: tabPill
                             readonly property bool isCurrTab: modelData.active
+                            property bool isDraggingTab: false
+                            property bool isDetachingHint: false
                             width: Math.min(Math.round(195 * Theme.scaleFactor), Math.max(Math.round(92 * Theme.scaleFactor), tabRow.implicitWidth + 20))
                             height: Math.round(28 * Theme.scaleFactor)
                             anchors.verticalCenter: parent ? parent.verticalCenter : undefined
+                            z: isDraggingTab ? 100 : 1
+                            scale: isDraggingTab ? 1.04 : 1.0
+                            opacity: isDetachingHint ? 0.72 : 1.0
                             radius: Theme.radiusMedium
-                            color: tabDropArea.containsDrag
-                                   ? "#380078d4"
-                                   : (isCurrTab ? Theme.bgSurface : (tabMouse.containsMouse ? Theme.bgHover : "transparent"))
-                            border.color: tabDropArea.containsDrag
-                                          ? Theme.accent
-                                          : (isCurrTab ? Theme.borderFocus : Theme.borderDim)
-                            border.width: isCurrTab || tabDropArea.containsDrag ? 1 : 0
+                            color: isDetachingHint
+                                   ? "#44f59e0b"
+                                   : (tabDropArea.containsDrag
+                                      ? "#380078d4"
+                                      : (isCurrTab ? Theme.bgSurface : (tabMouse.containsMouse ? Theme.bgHover : "transparent")))
+                            border.color: isDetachingHint
+                                          ? "#f59e0b"
+                                          : (tabDropArea.containsDrag || isDraggingTab
+                                             ? Theme.accent
+                                             : (isCurrTab ? Theme.borderFocus : Theme.borderDim))
+                            border.width: isCurrTab || tabDropArea.containsDrag || isDraggingTab ? 1 : 0
+
+                            Behavior on scale { NumberAnimation { duration: 100 } }
 
                             RowLayout {
                                 id: tabRow
@@ -347,13 +464,13 @@ ApplicationWindow {
                                 spacing: 6
 
                                 Text {
-                                    text: modelData.path === "recent://" ? "🕒" : (modelData.path === "trash://" ? "🗑️" : "📁")
+                                    text: tabPill.isDetachingHint ? "↗" : (modelData.path === "recent://" ? "🕒" : (modelData.path === "trash://" ? "🗑️" : "📁"))
                                     font.pixelSize: Theme.fontSizeSmall
                                 }
 
                                 Text {
                                     Layout.fillWidth: true
-                                    text: modelData.title
+                                    text: tabPill.isDetachingHint ? "Open in New Window" : modelData.title
                                     color: tabPill.isCurrTab ? Theme.textPrimary : Theme.textSecondary
                                     font.pixelSize: Theme.fontSizeSmall
                                     font.bold: tabPill.isCurrTab
@@ -390,14 +507,68 @@ ApplicationWindow {
                                 anchors.rightMargin: Math.round(22 * Theme.scaleFactor)
                                 hoverEnabled: true
                                 acceptedButtons: Qt.LeftButton | Qt.MiddleButton
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: function(mouse) {
+                                cursorShape: tabPill.isDraggingTab ? Qt.ClosedHandCursor : Qt.PointingHandCursor
+                                preventStealing: true
+
+                                property point pressLocal: Qt.point(0, 0)
+                                property point lastGlobal: Qt.point(0, 0)
+
+                                onPressed: function(mouse) {
+                                    pressLocal = Qt.point(mouse.x, mouse.y)
+                                    lastGlobal = tabMouse.mapToGlobal(mouse.x, mouse.y)
+                                    tabPill.isDraggingTab = false
+                                    tabPill.isDetachingHint = false
+                                }
+
+                                onPositionChanged: function(mouse) {
+                                    if (!(mouse.buttons & Qt.LeftButton) || !backend) return
+                                    var gPt = tabMouse.mapToGlobal(mouse.x, mouse.y)
+                                    var dx = gPt.x - lastGlobal.x
+                                    var totalDx = mouse.x - pressLocal.x
+                                    var totalDy = mouse.y - pressLocal.y
+
+                                    if (!tabPill.isDraggingTab && (Math.abs(totalDx) > 8 || Math.abs(totalDy) > 10)) {
+                                        tabPill.isDraggingTab = true
+                                        backend.switchTab(modelData.index)
+                                    }
+
+                                    if (tabPill.isDraggingTab) {
+                                        var barPt = tabsListView.mapFromGlobal(gPt.x, gPt.y)
+                                        // Dragged vertically outside the tab bar -> show detach hint
+                                        tabPill.isDetachingHint = (barPt.y < -24 || barPt.y > tabsListView.height + 28)
+
+                                        // Horizontal tab reordering
+                                        if (!tabPill.isDetachingHint) {
+                                            var targetIdx = tabsListView.indexAt(barPt.x + tabsListView.contentX, tabsListView.height / 2)
+                                            if (targetIdx >= 0 && targetIdx !== modelData.index) {
+                                                backend.moveTab(modelData.index, targetIdx)
+                                            }
+                                        }
+                                    }
+                                    lastGlobal = gPt
+                                }
+
+                                onReleased: function(mouse) {
                                     if (!backend) return
                                     if (mouse.button === Qt.MiddleButton) {
                                         backend.closeTab(modelData.index)
-                                    } else {
-                                        backend.switchTab(modelData.index)
+                                        return
                                     }
+                                    if (tabPill.isDraggingTab) {
+                                        var wasDetach = tabPill.isDetachingHint
+                                        tabPill.isDraggingTab = false
+                                        tabPill.isDetachingHint = false
+                                        if (wasDetach) {
+                                            backend.detachTabToNewWindow(modelData.index)
+                                        }
+                                        return
+                                    }
+                                    backend.switchTab(modelData.index)
+                                }
+
+                                onCanceled: {
+                                    tabPill.isDraggingTab = false
+                                    tabPill.isDetachingHint = false
                                 }
                             }
 
@@ -440,32 +611,6 @@ ApplicationWindow {
                             if (backend && targetIdx >= 0) {
                                 backend.switchTab(targetIdx)
                             }
-                        }
-                    }
-
-                    // Add Tab '+' Button
-                    Rectangle {
-                        implicitWidth: Math.round(28 * Theme.scaleFactor)
-                        implicitHeight: Math.round(28 * Theme.scaleFactor)
-                        radius: Theme.radiusMedium
-                        color: addTabMouse.containsMouse ? Theme.bgHover : Theme.bgSurface
-                        border.color: Theme.borderDim
-                        border.width: 1
-
-                        Text {
-                            anchors.centerIn: parent
-                            text: "＋"
-                            color: Theme.textPrimary
-                            font.pixelSize: Theme.fontSizeMedium
-                            font.bold: true
-                        }
-
-                        MouseArea {
-                            id: addTabMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: if (backend) backend.addTab("")
                         }
                     }
                 }

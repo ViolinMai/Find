@@ -21,6 +21,10 @@ class FileListModel(QAbstractListModel):
     IsNewRole = Qt.ItemDataRole.UserRole + 17
     IsMovieItemRole = Qt.ItemDataRole.UserRole + 18
     IsHdrRole = Qt.ItemDataRole.UserRole + 19
+    EpisodeTitleRole = Qt.ItemDataRole.UserRole + 20
+    OverviewRole = Qt.ItemDataRole.UserRole + 21
+    RatingRole = Qt.ItemDataRole.UserRole + 22
+    PosterRole = Qt.ItemDataRole.UserRole + 23
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -73,6 +77,14 @@ class FileListModel(QAbstractListModel):
             return bool(entry.get("is_movie_item", False))
         elif role == self.IsHdrRole:
             return bool(entry.get("is_hdr", False))
+        elif role == self.EpisodeTitleRole:
+            return str(entry.get("episode_title", ""))
+        elif role == self.OverviewRole:
+            return str(entry.get("overview", ""))
+        elif role == self.RatingRole:
+            return str(entry.get("rating", "")) if entry.get("rating") else ""
+        elif role == self.PosterRole:
+            return str(entry.get("poster", ""))
         return None
 
     def roleNames(self):
@@ -96,6 +108,10 @@ class FileListModel(QAbstractListModel):
             self.IsNewRole: b"is_new",
             self.IsMovieItemRole: b"is_movie_item",
             self.IsHdrRole: b"is_hdr",
+            self.EpisodeTitleRole: b"episode_title",
+            self.OverviewRole: b"overview",
+            self.RatingRole: b"rating",
+            self.PosterRole: b"poster",
         }
 
     def set_entries(self, entries):
@@ -110,6 +126,45 @@ class FileListModel(QAbstractListModel):
             self._entries[idx]["thumb"] = thumb_path
             model_idx = self.index(idx, 0)
             self.dataChanged.emit(model_idx, model_idx, [self.ThumbRole])
+
+    def update_jellyfin_metadata(
+        self,
+        file_path: str,
+        ep_title: str,
+        overview: str,
+        progress_val=None,
+        is_watched_val=None,
+        rating_val=None,
+        poster_path: str = ""
+    ):
+        idx = self._path_to_row.get(file_path)
+        if idx is not None and 0 <= idx < len(self._entries):
+            changed_roles = []
+            if ep_title and self._entries[idx].get("episode_title") != ep_title:
+                self._entries[idx]["episode_title"] = ep_title
+                changed_roles.append(self.EpisodeTitleRole)
+            if overview and self._entries[idx].get("overview") != overview:
+                self._entries[idx]["overview"] = overview
+                changed_roles.append(self.OverviewRole)
+            if rating_val is not None:
+                r_str = str(rating_val) if rating_val else ""
+                if self._entries[idx].get("rating") != r_str:
+                    self._entries[idx]["rating"] = r_str
+                    changed_roles.append(self.RatingRole)
+            if poster_path and self._entries[idx].get("poster") != poster_path:
+                self._entries[idx]["poster"] = poster_path
+                changed_roles.append(self.PosterRole)
+            if progress_val is not None:
+                self._entries[idx]["progress"] = float(progress_val)
+                changed_roles.append(self.ProgressRole)
+            if is_watched_val is not None:
+                self._entries[idx]["is_watched"] = bool(is_watched_val)
+                if is_watched_val:
+                    self._entries[idx]["is_new"] = False
+                changed_roles.extend([self.IsWatchedRole, self.IsNewRole])
+            if changed_roles:
+                model_idx = self.index(idx, 0)
+                self.dataChanged.emit(model_idx, model_idx, changed_roles)
 
     def update_hdr_status(self, file_path: str, is_hdr: bool):
         idx = self._path_to_row.get(file_path)

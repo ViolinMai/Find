@@ -12,9 +12,28 @@ MenuItem {
 
     implicitWidth: Math.max(Math.round(225 * Theme.scaleFactor), rowContent.implicitWidth + Math.round(26 * Theme.scaleFactor))
     implicitHeight: visible ? Math.round(33 * Theme.scaleFactor) : 0
+    height: visible ? implicitHeight : 0
     padding: 0
 
-    readonly property bool isHighlighted: menuItem.highlighted || menuItem.hovered
+    readonly property bool isHighlighted: (itemHover.hovered || (menuItem.subMenu && menuItem.subMenu.visible)) && menuItem.enabled
+
+    HoverHandler {
+        id: itemHover
+        onHoveredChanged: {
+            if (hovered && menuItem.menu) {
+                for (var i = 0; i < menuItem.menu.count; ++i) {
+                    if (menuItem.menu.itemAt(i) === menuItem) {
+                        menuItem.menu.currentIndex = i
+                        break
+                    }
+                }
+            } else if (!hovered && menuItem.menu && menuItem.highlighted) {
+                if (!menuItem.subMenu || !menuItem.subMenu.visible) {
+                    menuItem.menu.currentIndex = -1
+                }
+            }
+        }
+    }
 
     arrow: Item {
         width: 0

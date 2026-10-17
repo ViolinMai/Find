@@ -122,7 +122,7 @@ RowLayout {
             visible: !root.isCompactBar
             iconText: "⟳"
             isEnabled: true
-            onClicked: if (backend) backend.refresh()
+            onClicked: if (backend) backend.syncJellyfinAndRefresh()
         }
     }
 
@@ -698,8 +698,8 @@ RowLayout {
                 }
                 StyledMenuItem {
                     iconGlyph: "⟳"
-                    text: "Refresh"
-                    onTriggered: if (backend) backend.refresh()
+                    text: "Sync Jellyfin & Refresh (Ctrl+R)"
+                    onTriggered: if (backend) backend.syncJellyfinAndRefresh()
                 }
                 MenuSeparator {
                     contentItem: Rectangle { implicitHeight: 1; color: Theme.borderDim }

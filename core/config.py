@@ -25,6 +25,12 @@ class ConfigManager:
             "active_index": 0
         },
         "custom_icons_dir": "",
+        "jellyfin_enabled": True,
+        "jellyfin_url": "http://localhost:8096",
+        "jellyfin_token": "",
+        "jellyfin_user_id": "",
+        "jellyfin_stream_mode": False,
+        "show_series_posters": True,
         "media_libraries": [],
         "movie_folders": [],
         "mpv_both_config": (
@@ -217,13 +223,14 @@ class ConfigManager:
         self._progress = self._load_progress()
 
     def get_media_progress(self, file_path: str) -> dict:
-        default_entry = {"position": 0.0, "duration": 0.0, "progress": 0.0, "watched": False, "ext_sub": ""}
+        default_entry = {"position": 0.0, "duration": 0.0, "progress": 0.0, "watched": False, "ext_sub": "", "updated_at": 0.0}
         saved = self._progress.get(file_path)
         if isinstance(saved, dict):
             return {**default_entry, **saved}
         return default_entry
 
-    def set_media_progress(self, file_path: str, position: float, duration: float, watched: bool = None, ext_sub: str = None):
+    def set_media_progress(self, file_path: str, position: float, duration: float, watched: bool = None, ext_sub: str = None, updated_at: float = None):
+        import time as _time
         prev = self.get_media_progress(file_path)
         prog = 0.0
         if duration > 0:
@@ -233,12 +240,14 @@ class ConfigManager:
         elif watched and prog < 0.90:
             prog = 1.0
         sub_to_save = ext_sub if ext_sub is not None else prev.get("ext_sub", "")
+        ts_val = float(updated_at) if updated_at is not None else _time.time()
         self._progress[file_path] = {
             "position": round(float(position), 2),
             "duration": round(float(duration), 2),
             "progress": round(float(prog), 4),
             "watched": bool(watched),
-            "ext_sub": str(sub_to_save or "")
+            "ext_sub": str(sub_to_save or ""),
+            "updated_at": round(ts_val, 2)
         }
         self.save_progress()
         return self._progress[file_path]

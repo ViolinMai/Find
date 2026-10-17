@@ -12,12 +12,36 @@ Menu {
     leftPadding: Math.round(6 * Theme.scaleFactor)
     rightPadding: Math.round(6 * Theme.scaleFactor)
 
+    onOpened: {
+        control.currentIndex = -1
+    }
+
+    onClosed: {
+        control.currentIndex = -1
+    }
+
     enter: Transition {
         NumberAnimation { property: "opacity"; from: 0.0; to: 1.0; duration: 100; easing.type: Easing.OutCubic }
         NumberAnimation { property: "scale"; from: 0.96; to: 1.0; duration: 100; easing.type: Easing.OutCubic }
     }
     exit: Transition {
         NumberAnimation { property: "opacity"; from: 1.0; to: 0.0; duration: 75; easing.type: Easing.InCubic }
+    }
+
+    contentItem: ListView {
+        implicitHeight: contentHeight
+        model: control.contentModel
+        interactive: false
+        clip: true
+        currentIndex: control.currentIndex
+
+        HoverHandler {
+            onHoveredChanged: {
+                if (!hovered) {
+                    control.currentIndex = -1
+                }
+            }
+        }
     }
 
     background: Rectangle {

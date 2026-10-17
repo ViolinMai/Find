@@ -770,6 +770,118 @@ Dialog {
                     spacing: 14
 
                     SectionCard {
+                        sectionTitle: "Jellyfin Server Integration (Optional Sync & Chapters)"
+                        sectionSubtitle: "Syncs watch progress, official episode titles, synopsis, and injects chapter segments into MPV for your Skipper. Automatically falls back to local mode if token is empty or server is unreachable."
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "Enable Jellyfin Integration:"
+                                color: Theme.textPrimary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeNormal
+                                Layout.fillWidth: true
+                            }
+                            Switch {
+                                id: jfEnabledSwitch
+                                checked: backend ? backend.jellyfinEnabled : true
+                            }
+                        }
+
+                        GridLayout {
+                            columns: 2
+                            Layout.fillWidth: true
+                            rowSpacing: 8
+                            columnSpacing: 10
+
+                            Text { text: "Server URL:"; color: Theme.textSecondary; font.bold: true }
+                            TextField {
+                                id: jfUrlInput
+                                Layout.fillWidth: true
+                                text: backend ? backend.jellyfinUrl : "http://localhost:8096"
+                                placeholderText: "http://localhost:8096"
+                                color: Theme.textPrimary
+                                font.family: "monospace"
+                                font.pixelSize: Theme.fontSizeSmall
+                                selectByMouse: true
+                                background: Rectangle { color: Theme.bgSurface; radius: 4; border.color: Theme.borderDim }
+                            }
+
+                            Text { text: "API Token:"; color: Theme.textSecondary; font.bold: true }
+                            TextField {
+                                id: jfTokenInput
+                                Layout.fillWidth: true
+                                text: backend ? backend.jellyfinToken : ""
+                                placeholderText: "Paste Jellyfin API Key here (Leave empty for 100% local mode)"
+                                echoMode: TextInput.PasswordEchoOnEdit
+                                color: Theme.textPrimary
+                                font.family: "monospace"
+                                font.pixelSize: Theme.fontSizeSmall
+                                selectByMouse: true
+                                background: Rectangle { color: Theme.bgSurface; radius: 4; border.color: Theme.borderDim }
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "Show Official Vertical Poster on Series / Anime Folders (Level 2 Folders):"
+                                color: Theme.textPrimary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeSmall
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                            }
+                            Switch {
+                                checked: backend ? backend.showSeriesPosters : true
+                                onToggled: if (backend) backend.setShowSeriesPosters(checked)
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "Stream Video via Jellyfin HTTP URL (Instead of Local Path + IPC Chapter Injection):"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                            }
+                            Switch {
+                                id: jfStreamSwitch
+                                checked: backend ? backend.jellyfinStreamMode : false
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            ActionBtn {
+                                text: "💾 Save Jellyfin Config"
+                                isPrimary: true
+                                onClicked: {
+                                    if (backend) {
+                                        backend.saveJellyfinConfig(
+                                            jfEnabledSwitch.checked,
+                                            jfUrlInput.text,
+                                            jfTokenInput.text,
+                                            jfStreamSwitch.checked
+                                        )
+                                    }
+                                }
+                            }
+                            ActionBtn {
+                                text: "🔌 Test Connection"
+                                onClicked: {
+                                    if (backend) {
+                                        backend.testJellyfinConnection(jfUrlInput.text, jfTokenInput.text)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    SectionCard {
                         sectionTitle: "HDR Auto-Switching & MPV Background Daemon"
                         sectionSubtitle: "Tracks episode progress in real time, enables direct folder resume, and switches HDR on/off."
 

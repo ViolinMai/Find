@@ -136,9 +136,9 @@ Rectangle {
         }
         StyledMenuItem {
             iconGlyph: "⟳"
-            text: "Refresh"
-            shortcutText: "F5"
-            onTriggered: backend.refresh()
+            text: "Sync Jellyfin & Refresh"
+            shortcutText: "Ctrl+R"
+            onTriggered: if (backend) backend.syncJellyfinAndRefresh()
         }
     }
 
@@ -508,6 +508,7 @@ Rectangle {
                         target: null
                         orientation: Qt.Vertical
                         onWheel: function(event) {
+                            fileListView.cancelFlick()
                             var step = (event.angleDelta.y / 120.0) * Math.round(240 * Theme.scaleFactor)
                             var maxY = Math.max(0, fileListView.contentHeight - fileListView.height)
                             fileListView.contentY = Math.max(0, Math.min(maxY, fileListView.contentY - step))
@@ -527,9 +528,11 @@ Rectangle {
                     delegate: Item {
                         id: rowContainer
                         width: Math.max(fileListView.width, fileListView.contentWidth)
-                        readonly property bool isMediaVideoRow: (backend ? backend.isMediaLibraryView : false) && !model.is_dir && model.type === "Video"
-                        readonly property bool showMovieSeparator: isMediaVideoRow && model.is_movie_item
-                        height: Math.round((isMediaVideoRow ? (showMovieSeparator ? 84 : 72) : 38) * Theme.scaleFactor)
+                        readonly property bool isSeriesFolderWithPoster: (backend ? (backend.isMediaLibraryView && !backend.isMovieFolderView && backend.showSeriesPosters) : false) && model.is_dir && model.poster !== undefined && model.poster !== ""
+                        readonly property bool isMovieRow: ((backend ? backend.isMovieFolderView : false) && model.is_movie_item && (model.type === "Video" || (model.is_dir && model.poster !== ""))) || isSeriesFolderWithPoster
+                        readonly property bool isMediaVideoRow: ((backend ? backend.isMediaLibraryView : false) && !model.is_dir && model.type === "Video") || isMovieRow
+                        readonly property bool showMovieSeparator: isMovieRow
+                        height: Math.round((isMovieRow ? 124 : (isMediaVideoRow ? 72 : 38)) * Theme.scaleFactor)
 
                         readonly property string itemPath: model.path
                         readonly property bool itemIsDir: model.is_dir
@@ -582,30 +585,31 @@ Rectangle {
                                 spacing: 12
 
                                 Item {
-                                    implicitWidth: Math.round((rowContainer.isMediaVideoRow ? 92 : 24) * Theme.scaleFactor)
-                                    implicitHeight: Math.round((rowContainer.isMediaVideoRow ? 54 : 24) * Theme.scaleFactor)
+                                    readonly property bool hasVerticalPoster: rowContainer.isMovieRow && model.poster !== undefined && model.poster !== ""
+                                    implicitWidth: Math.round((hasVerticalPoster ? 70 : (rowContainer.isMovieRow ? 110 : (rowContainer.isMediaVideoRow ? 92 : 24))) * Theme.scaleFactor)
+                                    implicitHeight: Math.round((hasVerticalPoster ? 102 : (rowContainer.isMovieRow ? 76 : (rowContainer.isMediaVideoRow ? 54 : 24))) * Theme.scaleFactor)
 
                                     FolderPreviewIcon {
                                         anchors.fill: parent
-                                        visible: model.is_dir
+                                        visible: model.is_dir && !parent.hasVerticalPoster
                                         previews: model.folder_previews
                                     }
 
-                                    Rectangle {
+                                    Item {
                                         id: listThumbFrame
                                         anchors.fill: parent
-                                        radius: rowContainer.isMediaVideoRow ? Math.round(6 * Theme.scaleFactor) : 0
-                                        color: rowContainer.isMediaVideoRow ? "#141418" : "transparent"
-                                        border.color: rowContainer.isMediaVideoRow ? "#30ffffff" : "transparent"
-                                        border.width: rowContainer.isMediaVideoRow ? 1 : 0
-                                        clip: true
-                                        visible: !model.is_dir && (model.thumb !== "" || (model.icon && (model.icon.indexOf("/") !== -1 || model.icon.indexOf(".") !== -1)))
+                                        visible: parent.hasVerticalPoster || (!model.is_dir && (model.thumb !== "" || (model.icon && (model.icon.indexOf("/") !== -1 || model.icon.indexOf(".") !== -1))))
 
                                         Image {
                                             anchors.fill: parent
-                                            anchors.margins: rowContainer.isMediaVideoRow ? 1 : 0
-                                            source: parent.visible ? (model.thumb !== "" ? ("file://" + model.thumb) : ("file://" + model.icon)) : ""
-                                            fillMode: rowContainer.isMediaVideoRow ? Image.PreserveAspectCrop : Image.PreserveAspectFit
+                                            source: parent.visible
+                                                    ? (parent.parent.hasVerticalPoster
+                                                       ? ("file://" + model.poster)
+                                                       : (model.thumb !== "" ? ("file://" + model.thumb) : ("file://" + model.icon)))
+                                                    : ""
+                                            fillMode: parent.parent.hasVerticalPoster ? Image.PreserveAspectFit : (rowContainer.isMediaVideoRow ? Image.PreserveAspectCrop : Image.PreserveAspectFit)
+                                            asynchronous: true
+                                            smooth: true
                                             mipmap: true
                                         }
                                     }
@@ -649,13 +653,66 @@ Rectangle {
                                         Layout.fillWidth: true
                                         spacing: 8
 
-                                        Text {
+                                        ColumnLayout {
                                             Layout.fillWidth: true
-                                            text: model.name
-                                            color: (rowContainer.isMediaVideoRow && model.is_watched) ? Theme.textSecondary : Theme.textPrimary
-                                            font.pixelSize: Theme.fontSizeNormal
-                                            font.bold: rowDelegate.isSelected || rowContainer.isMediaVideoRow
-                                            elide: Text.ElideRight
+                                            spacing: rowContainer.isMovieRow ? 3 : 1
+
+                                            RowLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 8
+
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    text: (rowContainer.isMediaVideoRow && model.episode_title && model.episode_title !== "")
+                                                          ? model.episode_title
+                                                          : model.name
+                                                    color: (rowContainer.isMediaVideoRow && model.is_watched) ? Theme.textSecondary : Theme.textPrimary
+                                                    font.pixelSize: rowContainer.isMovieRow ? Theme.fontSizeMedium : Theme.fontSizeNormal
+                                                    font.bold: rowDelegate.isSelected || rowContainer.isMediaVideoRow
+                                                    elide: Text.ElideRight
+                                                }
+
+                                                // Movie / Episode Rating Pill (e.g. ⭐ 8.6)
+                                                Rectangle {
+                                                    visible: rowContainer.isMediaVideoRow && model.rating !== undefined && model.rating !== ""
+                                                    implicitWidth: ratingBadgeTxt.implicitWidth + 10
+                                                    implicitHeight: Math.round(17 * Theme.scaleFactor)
+                                                    radius: Theme.radiusSmall
+                                                    color: "#22fbbf24"
+                                                    border.color: "#66fbbf24"
+                                                    border.width: 1
+
+                                                    Text {
+                                                        id: ratingBadgeTxt
+                                                        anchors.centerIn: parent
+                                                        text: "⭐ " + model.rating
+                                                        color: "#fbbf24"
+                                                        font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
+                                                        font.bold: true
+                                                    }
+                                                }
+                                            }
+
+                                            Text {
+                                                visible: rowContainer.isMediaVideoRow && model.episode_title !== undefined && model.episode_title !== "" && model.episode_title !== model.name
+                                                Layout.fillWidth: true
+                                                text: model.name
+                                                color: Theme.textTertiary
+                                                font.pixelSize: Math.round(9.5 * Theme.scaleFactor)
+                                                elide: Text.ElideMiddle
+                                            }
+
+                                            // Movie Synopsis Preview directly inside the Movie Row
+                                            Text {
+                                                visible: rowContainer.isMovieRow && model.overview !== undefined && model.overview !== ""
+                                                Layout.fillWidth: true
+                                                text: model.overview || ""
+                                                color: Theme.textSecondary
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                maximumLineCount: 2
+                                                wrapMode: Text.WordWrap
+                                                elide: Text.ElideRight
+                                            }
                                         }
 
                                         // "NEW" Badge (Added within last 7 days and not yet finished)
@@ -731,9 +788,9 @@ Rectangle {
                                         }
                                     }
 
-                                    // Sleek Thin Progress Bar right under the episode/movie name
+                                    // Sleek Thin Progress Bar right under the episode/movie name (hidden for folder items)
                                     Rectangle {
-                                        visible: rowContainer.isMediaVideoRow
+                                        visible: rowContainer.isMediaVideoRow && !model.is_dir
                                         Layout.fillWidth: true
                                         height: Math.max(3, Math.round(3.5 * Theme.scaleFactor))
                                         radius: height / 2
@@ -774,18 +831,25 @@ Rectangle {
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
-                                preventStealing: isHoldingDrag || isPanning
+                                preventStealing: true
 
                                 property point pressPos: Qt.point(0, 0)
-                                property point lastGlobalPos: Qt.point(0, 0)
                                 property bool isHoldingDrag: false
-                                property bool isPanning: false
+                                property bool isReorderingFav: false
 
                                 onPressed: function(mouse) {
+                                    fileListView.cancelFlick()
                                     pressPos = Qt.point(mouse.x, mouse.y)
-                                    lastGlobalPos = itemArea.mapToGlobal(mouse.x, mouse.y)
                                     isHoldingDrag = false
-                                    isPanning = false
+                                    isReorderingFav = false
+
+                                    if (!backend) return
+                                    var swapped = backend.swapMouseButtons
+                                    var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
+
+                                    if (isPrimary && mouse.modifiers === Qt.NoModifier && !rowDelegate.isSelected) {
+                                        backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type, 0)
+                                    }
                                 }
 
                                 onPositionChanged: function(mouse) {
@@ -795,33 +859,18 @@ Rectangle {
                                     var dy = mouse.y - pressPos.y
 
                                     var swapped = backend.swapMouseButtons
-                                    var panBtn = swapped ? Qt.RightButton : Qt.LeftButton
+                                    var primaryBtn = swapped ? Qt.RightButton : Qt.LeftButton
                                     var dragBtn = swapped ? Qt.LeftButton : Qt.RightButton
 
-                                    if (mouse.buttons & panBtn) {
-                                        if (backend.currentPath === "favorites://") {
-                                            // Drag-to-Order inside Favorites Virtual Folder!
-                                            if (!isPanning && Math.abs(dy) > 6) {
-                                                isPanning = true
-                                            }
-                                            if (isPanning) {
-                                                var listPt = fileListView.mapFromGlobal(gPos.x, gPos.y)
-                                                var targetIdx = fileListView.indexAt(listPt.x + fileListView.contentX, listPt.y + fileListView.contentY)
-                                                if (targetIdx >= 0 && targetIdx !== index) {
-                                                    backend.moveFavoriteItem(index, targetIdx)
-                                                }
-                                            }
-                                        } else {
-                                            if (!isPanning && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
-                                                isPanning = true
-                                            }
-                                            if (isPanning) {
-                                                var stepX = gPos.x - lastGlobalPos.x
-                                                var stepY = gPos.y - lastGlobalPos.y
-                                                var maxY = Math.max(0, fileListView.contentHeight - fileListView.height)
-                                                var maxX = Math.max(0, fileListView.contentWidth - fileListView.width)
-                                                fileListView.contentY = Math.max(0, Math.min(maxY, fileListView.contentY - stepY))
-                                                fileListView.contentX = Math.max(0, Math.min(maxX, fileListView.contentX - stepX))
+                                    if ((mouse.buttons & primaryBtn) && backend.currentPath === "favorites://") {
+                                        if (!isReorderingFav && Math.abs(dy) > 8) {
+                                            isReorderingFav = true
+                                        }
+                                        if (isReorderingFav) {
+                                            var listPt = fileListView.mapFromGlobal(gPos.x, gPos.y)
+                                            var targetIdx = fileListView.indexAt(listPt.x + fileListView.contentX, listPt.y + fileListView.contentY)
+                                            if (targetIdx >= 0 && targetIdx !== index) {
+                                                backend.moveFavoriteItem(index, targetIdx)
                                             }
                                         }
                                     } else if (mouse.buttons & dragBtn) {
@@ -834,7 +883,6 @@ Rectangle {
                                             isHoldingDrag = false
                                         }
                                     }
-                                    lastGlobalPos = gPos
                                 }
 
                                 onReleased: function(mouse) {
@@ -849,10 +897,10 @@ Rectangle {
                                     var isSecondary = swapped ? (mouse.button === Qt.LeftButton) : (mouse.button === Qt.RightButton)
 
                                     if (isPrimary) {
-                                        if (!isPanning) {
+                                        if (!isReorderingFav && (mouse.modifiers !== Qt.NoModifier || backend.selectedPaths.length > 1 || !rowDelegate.isSelected)) {
                                             backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type, mouse.modifiers)
                                         }
-                                        isPanning = false
+                                        isReorderingFav = false
                                     } else if (isSecondary) {
                                         if (!isHoldingDrag) {
                                             if (!rowDelegate.isSelected) {
@@ -868,7 +916,7 @@ Rectangle {
                                 }
 
                                 onCanceled: {
-                                    isPanning = false
+                                    isReorderingFav = false
                                     isHoldingDrag = false
                                 }
 
@@ -876,7 +924,7 @@ Rectangle {
                                     if (!backend) return
                                     var swapped = backend.swapMouseButtons
                                     var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
-                                    if (isPrimary && !isPanning) {
+                                    if (isPrimary) {
                                         backend.openEntry(model.path)
                                     }
                                 }
@@ -905,6 +953,7 @@ Rectangle {
                         target: null
                         orientation: Qt.Vertical
                         onWheel: function(event) {
+                            fileGridView.cancelFlick()
                             var step = (event.angleDelta.y / 120.0) * Math.round(270 * Theme.scaleFactor)
                             var maxY = Math.max(0, fileGridView.contentHeight - fileGridView.height)
                             fileGridView.contentY = Math.max(0, Math.min(maxY, fileGridView.contentY - step))
@@ -912,10 +961,11 @@ Rectangle {
                         }
                     }
 
-                    readonly property int minCardSize: Math.round(145 * Theme.scaleFactor)
+                    readonly property bool isMoviePosterGrid: backend ? (backend.isMovieFolderView || (backend.isMediaLibraryView && backend.showSeriesPosters)) : false
+                    readonly property int minCardSize: Math.round((isMoviePosterGrid ? 165 : 145) * Theme.scaleFactor)
                     readonly property int targetCols: (backend && backend.gridColumns > 0) ? backend.gridColumns : Math.max(1, Math.floor(fileGridView.width / minCardSize))
                     cellWidth: Math.max(Math.round(115 * Theme.scaleFactor), Math.floor(fileGridView.width / Math.max(1, targetCols)))
-                    cellHeight: Math.round(cellWidth * 1.02)
+                    cellHeight: Math.round(cellWidth * (isMoviePosterGrid ? 1.44 : 1.02))
 
                     ScrollBar.vertical: ScrollBar {
                         active: true
@@ -940,7 +990,8 @@ Rectangle {
                             return (backend.selectedItem && backend.selectedItem.path === model.path) ? true : false
                         }
                         readonly property bool isFloatingStyle: backend ? (backend.gridStyle === "floating") : true
-                        readonly property bool hasMediaThumb: !model.is_dir && (model.thumb !== "" || (model.icon && (model.icon.indexOf("/") !== -1 || model.icon.indexOf(".") !== -1)))
+                        readonly property bool hasMoviePoster: model.poster !== undefined && model.poster !== "" && (!model.is_dir || (backend && backend.showSeriesPosters))
+                        readonly property bool hasMediaThumb: hasMoviePoster || (!model.is_dir && (model.thumb !== "" || (model.icon && (model.icon.indexOf("/") !== -1 || model.icon.indexOf(".") !== -1))))
 
                         Component.onCompleted: {
                             if (!backend) return
@@ -984,7 +1035,7 @@ Rectangle {
 
                                     // A) File Explorer Style Folder Preview (Videos -> Images -> Texts)
                                     FolderPreviewIcon {
-                                        visible: model.is_dir
+                                        visible: model.is_dir && !gridContainer.hasMoviePoster
                                         width: Math.min(parent.width * 0.88, parent.height * 0.96)
                                         height: width * 0.88
                                         anchors.centerIn: parent
@@ -992,9 +1043,9 @@ Rectangle {
                                         isSelected: gridContainer.isSelected
                                     }
 
-                                    // B) Image / Video Thumbnail with Dynamic Aspect-Ratio Wrapping Frame
+                                    // B) Image / Video Thumbnail or Vertical Movie Poster with Dynamic Aspect-Ratio Wrapping Frame
                                     Item {
-                                        visible: !model.is_dir && gridContainer.hasMediaThumb
+                                        visible: gridContainer.hasMoviePoster || (!model.is_dir && gridContainer.hasMediaThumb)
                                         anchors.fill: parent
 
                                         Image {
@@ -1002,21 +1053,25 @@ Rectangle {
                                             anchors.centerIn: parent
                                             width: parent.width
                                             height: parent.height
-                                            source: parent.visible ? (model.thumb !== "" ? ("file://" + model.thumb) : ("file://" + model.icon)) : ""
+                                            source: parent.visible
+                                                    ? (gridContainer.hasMoviePoster
+                                                       ? ("file://" + model.poster)
+                                                       : (model.thumb !== "" ? ("file://" + model.thumb) : ("file://" + model.icon)))
+                                                    : ""
                                             fillMode: Image.PreserveAspectFit
                                             asynchronous: true
                                             mipmap: true
                                         }
 
-                                        // Tightly hugs the actual painted image dimensions (no ugly empty square box!)
+                                        // Tightly hugs the actual painted image dimensions (no border around pre-rounded posters unless selected!)
                                         Rectangle {
                                             anchors.centerIn: thumbImg
-                                            width: thumbImg.paintedWidth > 0 ? thumbImg.paintedWidth + 4 : 0
-                                            height: thumbImg.paintedHeight > 0 ? thumbImg.paintedHeight + 4 : 0
-                                            radius: Theme.radiusSmall
+                                            width: thumbImg.paintedWidth > 0 ? thumbImg.paintedWidth : 0
+                                            height: thumbImg.paintedHeight > 0 ? thumbImg.paintedHeight : 0
+                                            radius: Math.round(8 * Theme.scaleFactor)
                                             color: "transparent"
-                                            border.color: gridContainer.isSelected ? Theme.accent : "#40ffffff"
-                                            border.width: gridContainer.isSelected ? 2 : 1
+                                            border.color: gridContainer.isSelected ? Theme.accent : "transparent"
+                                            border.width: gridContainer.isSelected ? 2 : 0
                                             visible: thumbImg.status === Image.Ready
 
                                             // Sleek Thin Silver HDR Badge on Grid Thumbnail
@@ -1096,10 +1151,10 @@ Rectangle {
                                         id: nameLabel
                                         anchors.centerIn: parent
                                         width: parent.width - 8
-                                        text: model.name
+                                        text: (model.episode_title !== undefined && model.episode_title !== "") ? model.episode_title : model.name
                                         color: Theme.textPrimary
                                         font.pixelSize: Theme.fontSizeSmall
-                                        font.bold: gridContainer.isSelected
+                                        font.bold: gridContainer.isSelected || gridContainer.hasMoviePoster
                                         horizontalAlignment: Text.AlignHCenter
                                         elide: Text.ElideMiddle
                                         maximumLineCount: 2
@@ -1113,18 +1168,25 @@ Rectangle {
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
-                                preventStealing: isHoldingDrag || isPanning
+                                preventStealing: true
 
                                 property point pressPos: Qt.point(0, 0)
-                                property point lastGlobalPos: Qt.point(0, 0)
                                 property bool isHoldingDrag: false
-                                property bool isPanning: false
+                                property bool isReorderingFav: false
 
                                 onPressed: function(mouse) {
+                                    fileGridView.cancelFlick()
                                     pressPos = Qt.point(mouse.x, mouse.y)
-                                    lastGlobalPos = gridMouseArea.mapToGlobal(mouse.x, mouse.y)
                                     isHoldingDrag = false
-                                    isPanning = false
+                                    isReorderingFav = false
+
+                                    if (!backend) return
+                                    var swapped = backend.swapMouseButtons
+                                    var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
+
+                                    if (isPrimary && mouse.modifiers === Qt.NoModifier && !gridContainer.isSelected) {
+                                        backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type, 0)
+                                    }
                                 }
 
                                 onPositionChanged: function(mouse) {
@@ -1134,33 +1196,18 @@ Rectangle {
                                     var dy = mouse.y - pressPos.y
 
                                     var swapped = backend.swapMouseButtons
-                                    var panBtn = swapped ? Qt.RightButton : Qt.LeftButton
+                                    var primaryBtn = swapped ? Qt.RightButton : Qt.LeftButton
                                     var dragBtn = swapped ? Qt.LeftButton : Qt.RightButton
 
-                                    if (mouse.buttons & panBtn) {
-                                        if (backend.currentPath === "favorites://") {
-                                            // Drag-to-Order inside Favorites Grid View!
-                                            if (!isPanning && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
-                                                isPanning = true
-                                            }
-                                            if (isPanning) {
-                                                var gridPt = fileGridView.mapFromGlobal(gPos.x, gPos.y)
-                                                var targetGridIdx = fileGridView.indexAt(gridPt.x + fileGridView.contentX, gridPt.y + fileGridView.contentY)
-                                                if (targetGridIdx >= 0 && targetGridIdx !== index) {
-                                                    backend.moveFavoriteItem(index, targetGridIdx)
-                                                }
-                                            }
-                                        } else {
-                                            if (!isPanning && (Math.abs(dx) > 6 || Math.abs(dy) > 6)) {
-                                                isPanning = true
-                                            }
-                                            if (isPanning) {
-                                                var stepX = gPos.x - lastGlobalPos.x
-                                                var stepY = gPos.y - lastGlobalPos.y
-                                                var maxY = Math.max(0, fileGridView.contentHeight - fileGridView.height)
-                                                var maxX = Math.max(0, fileGridView.contentWidth - fileGridView.width)
-                                                fileGridView.contentY = Math.max(0, Math.min(maxY, fileGridView.contentY - stepY))
-                                                fileGridView.contentX = Math.max(0, Math.min(maxX, fileGridView.contentX - stepX))
+                                    if ((mouse.buttons & primaryBtn) && backend.currentPath === "favorites://") {
+                                        if (!isReorderingFav && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
+                                            isReorderingFav = true
+                                        }
+                                        if (isReorderingFav) {
+                                            var gridPt = fileGridView.mapFromGlobal(gPos.x, gPos.y)
+                                            var targetGridIdx = fileGridView.indexAt(gridPt.x + fileGridView.contentX, gridPt.y + fileGridView.contentY)
+                                            if (targetGridIdx >= 0 && targetGridIdx !== index) {
+                                                backend.moveFavoriteItem(index, targetGridIdx)
                                             }
                                         }
                                     } else if (mouse.buttons & dragBtn) {
@@ -1173,7 +1220,6 @@ Rectangle {
                                             isHoldingDrag = false
                                         }
                                     }
-                                    lastGlobalPos = gPos
                                 }
 
                                 onReleased: function(mouse) {
@@ -1188,10 +1234,10 @@ Rectangle {
                                     var isSecondary = swapped ? (mouse.button === Qt.LeftButton) : (mouse.button === Qt.RightButton)
 
                                     if (isPrimary) {
-                                        if (!isPanning) {
+                                        if (!isReorderingFav && (mouse.modifiers !== Qt.NoModifier || backend.selectedPaths.length > 1 || !gridContainer.isSelected)) {
                                             backend.selectItem(model.path, model.name, model.is_dir, model.size, model.modified, model.type, mouse.modifiers)
                                         }
-                                        isPanning = false
+                                        isReorderingFav = false
                                     } else if (isSecondary) {
                                         if (!isHoldingDrag) {
                                             if (!gridContainer.isSelected) {
@@ -1207,7 +1253,7 @@ Rectangle {
                                 }
 
                                 onCanceled: {
-                                    isPanning = false
+                                    isReorderingFav = false
                                     isHoldingDrag = false
                                 }
 
@@ -1215,7 +1261,7 @@ Rectangle {
                                     if (!backend) return
                                     var swapped = backend.swapMouseButtons
                                     var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
-                                    if (isPrimary && !isPanning) {
+                                    if (isPrimary) {
                                         backend.openEntry(model.path)
                                     }
                                 }

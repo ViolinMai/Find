@@ -7,8 +7,88 @@ import socket
 import shutil
 import hashlib
 import subprocess
+import threading
+import requests
 from pathlib import Path
 from urllib.parse import unquote, urlparse
+
+HTTP_SESSION = requests.Session()
+
+
+def _dispatch_jellyfin_sync_worker(jf_meta: dict, action: str, pos_sec: float, dur_sec: float, is_paused: bool = False):
+    if not jf_meta or not isinstance(jf_meta, dict):
+        return
+    api_url = str(jf_meta.get("api_url") or "").rstrip("/")
+    token = str(jf_meta.get("api_token") or "").strip()
+    user_id = str(jf_meta.get("user_id") or "").strip()
+    item_id = str(jf_meta.get("item_id") or "").strip()
+    if not api_url or not token or not item_id:
+        return
+
+    ticks = int(max(0.0, float(pos_sec)) * 10_000_000)
+    media_source_id = str(jf_meta.get("media_source_id") or item_id)
+    play_session_id = str(jf_meta.get("play_session_id") or "find_session")
+    headers = {
+        "Authorization": f'MediaBrowser Client="Find", Device="Linux PC", DeviceId="Find-Linux-PC", Version="2.0.0", Token="{token}"',
+        "X-Emby-Token": token
+    }
+    payload = {
+        "ItemId": item_id,
+        "MediaSourceId": media_source_id,
+        "PlaySessionId": play_session_id,
+        "PositionTicks": ticks,
+        "IsPaused": bool(is_paused),
+        "IsMuted": False,
+        "VolumeLevel": 100,
+        "PlayMethod": "DirectPlay",
+        "RepeatMode": "RepeatNone",
+        "EventName": "TimeUpdate"
+    }
+    try:
+        if action == "start":
+            HTTP_SESSION.post(f"{api_url}/Sessions/Playing", json=payload, headers=headers, timeout=2.5)
+        elif action == "progress":
+            HTTP_SESSION.post(f"{api_url}/Sessions/Playing/Progress", json=payload, headers=headers, timeout=2.5)
+            if user_id:
+                HTTP_SESSION.post(
+                    f"{api_url}/Users/{user_id}/PlayingItems/{item_id}/Progress",
+                    params={"PositionTicks": ticks},
+                    headers=headers,
+                    timeout=2.5
+                )
+                played_now = bool(dur_sec > 0 and (pos_sec / dur_sec) >= 0.90)
+                HTTP_SESSION.post(
+                    f"{api_url}/Users/{user_id}/Items/{item_id}/UserData",
+                    json={"PlaybackPositionTicks": 0 if played_now else ticks, "Played": played_now},
+                    headers=headers,
+                    timeout=2.5
+                )
+        elif action == "stop":
+            payload["EventName"] = "PlaybackStopped"
+            HTTP_SESSION.post(f"{api_url}/Sessions/Playing/Stopped", json=payload, headers=headers, timeout=2.5)
+            if user_id:
+                played = bool(dur_sec > 0 and (pos_sec / dur_sec) >= 0.90)
+                final_ticks = 0 if played else ticks
+                HTTP_SESSION.post(
+                    f"{api_url}/Users/{user_id}/Items/{item_id}/UserData",
+                    json={"PlaybackPositionTicks": final_ticks, "Played": played},
+                    headers=headers,
+                    timeout=2.5
+                )
+    except Exception:
+        pass
+
+
+def post_jellyfin_playback_event(jf_meta: dict, action: str, pos_sec: float, dur_sec: float, is_paused: bool = False):
+    """Non-blocking async sender so MPV local tracking is NEVER delayed by HTTP calls."""
+    if not jf_meta or not isinstance(jf_meta, dict) or not jf_meta.get("item_id"):
+        return
+    t = threading.Thread(
+        target=_dispatch_jellyfin_sync_worker,
+        args=(dict(jf_meta), action, float(pos_sec), float(dur_sec), bool(is_paused)),
+        daemon=True
+    )
+    t.start()
 
 
 def get_paths():
@@ -82,25 +162,38 @@ def query_ipc(sock: socket.socket, prop: str, req_id: int):
     cmd = json.dumps({"command": ["get_property", prop], "request_id": req_id}) + "\n"
     sock.sendall(cmd.encode("utf-8"))
     buf = b""
-    while b"\n" not in buf:
-        chunk = sock.recv(4096)
-        if not chunk:
-            break
-        buf += chunk
-    for line in buf.decode("utf-8", errors="ignore").splitlines():
+    deadline = time.time() + 0.45
+    while time.time() < deadline:
         try:
-            msg = json.loads(line)
-            if msg.get("request_id") == req_id and msg.get("error") == "success":
-                return msg.get("data")
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            buf += chunk
+            for line in buf.decode("utf-8", errors="ignore").splitlines():
+                try:
+                    msg = json.loads(line)
+                    if msg.get("request_id") == req_id:
+                        if msg.get("error") == "success":
+                            return msg.get("data")
+                        return None
+                except Exception:
+                    pass
         except Exception:
-            pass
+            break
     return None
 
 
 def send_ipc_cmd(sock: socket.socket, cmd_list: list, req_id: int = 99):
+    """Sends an IPC command and drains its ack reply so the socket buffer stays clean."""
     try:
         payload = json.dumps({"command": cmd_list, "request_id": req_id}) + "\n"
         sock.sendall(payload.encode("utf-8"))
+        sock.settimeout(0.15)
+        try:
+            sock.recv(4096)
+        except Exception:
+            pass
+        sock.settimeout(0.6)
     except Exception:
         pass
 
@@ -146,9 +239,23 @@ def update_progress_entry(progress_file: Path, file_path: str, pos: float, dur: 
         "watched": bool(watched),
         "ext_sub": str(sub_val or "")
     }
-    if data.get(file_path) != new_entry:
-        data[file_path] = new_entry
+    now_ts = round(time.time(), 2)
+    old_cmp = {k: v for k, v in data.get(file_path, {}).items() if k != "updated_at"}
+    if old_cmp != new_entry:
+        new_entry_with_ts = {**new_entry, "updated_at": now_ts}
+        data[file_path] = new_entry_with_ts
         save_json_atomic(progress_file, data)
+        # Also keep jellyfin_map.json in sync on disk so reopening the file never reads stale 0.0 progress
+        jf_map_file = progress_file.parent / "jellyfin_map.json"
+        if jf_map_file.exists():
+            jf_map = load_json_safe(jf_map_file)
+            if file_path in jf_map and isinstance(jf_map[file_path], dict):
+                jf_map[file_path]["position"] = new_entry["position"]
+                jf_map[file_path]["duration"] = new_entry["duration"]
+                jf_map[file_path]["progress"] = new_entry["progress"]
+                jf_map[file_path]["watched"] = new_entry["watched"]
+                jf_map[file_path]["server_updated_at"] = now_ts
+                save_json_atomic(jf_map_file, jf_map)
 
 
 def run_daemon_loop():
@@ -179,13 +286,21 @@ def run_daemon_loop():
                         init_file = os.path.abspath(meta.get("file_path", ""))
                         hdr_mode = bool(meta.get("hdr_mode", False))
                         init_pos = float(meta.get("initial_pos", 0.0) or 0.0)
+                        jf_meta = meta.get("jellyfin") if isinstance(meta.get("jellyfin"), dict) else {}
+                        stream_map = meta.get("stream_to_local") if isinstance(meta.get("stream_to_local"), dict) else {}
                         sessions[sock_path] = {
                             "meta_file": str(mf),
+                            "playlist_file": str(meta.get("playlist_file") or ""),
                             "active_file": init_file,
                             "base_dir": os.path.dirname(init_file) if init_file else "",
                             "hdr_mode": hdr_mode,
                             "initial_pos": init_pos,
                             "initial_seek_done": False,
+                            "chapters_injected": False,
+                            "jellyfin": jf_meta,
+                            "stream_to_local": stream_map,
+                            "last_jf_sync_ts": 0.0,
+                            "jf_started": False,
                             "last_pos": 0.0,
                             "duration": 0.0,
                             "eof_reached": False,
@@ -211,13 +326,19 @@ def run_daemon_loop():
                         s.connect(sock_path)
                         st["connected_once"] = True
 
-                        cur_mpv_path = query_ipc(s, "path", 4)
-                        resolved = resolve_mpv_path(cur_mpv_path, st["base_dir"])
+                        cur_mpv_path = str(query_ipc(s, "path", 4) or "").strip()
+                        is_http_stream = cur_mpv_path.startswith(("http://", "https://"))
+                        if is_http_stream:
+                            resolved = st.get("stream_to_local", {}).get(cur_mpv_path, st["active_file"])
+                        else:
+                            resolved = resolve_mpv_path(cur_mpv_path, st["base_dir"])
 
                         if resolved and os.path.exists(resolved) and resolved != st["active_file"]:
                             if st["duration"] > 0 and st["last_pos"] > 0:
                                 prev_done = st["eof_reached"] or (st["last_pos"] / st["duration"] >= 0.88)
                                 update_progress_entry(progress_file, st["active_file"], st["last_pos"], st["duration"], prev_done)
+                                if st.get("jellyfin"):
+                                    post_jellyfin_playback_event(st["jellyfin"], "stop", st["last_pos"], st["duration"])
                             st["prev_final_pos"] = st["last_pos"]
                             st["active_file"] = resolved
                             st["base_dir"] = os.path.dirname(resolved)
@@ -226,6 +347,23 @@ def run_daemon_loop():
                             st["eof_reached"] = False
                             st["last_sub"] = ""
                             st["switch_ts"] = time.time()
+                            # Load Jellyfin metadata & chapters for the newly switched episode from jellyfin_map.json
+                            jf_map_file = paths["config_dir"] / "jellyfin_map.json"
+                            jf_map = load_json_safe(jf_map_file)
+                            cfg_data = load_json_safe(paths["config_file"])
+                            next_jf = jf_map.get(resolved, {})
+                            if next_jf and cfg_data.get("jellyfin_enabled", True) and cfg_data.get("jellyfin_token"):
+                                st["jellyfin"] = {
+                                    **next_jf,
+                                    "api_url": cfg_data.get("jellyfin_url", ""),
+                                    "api_token": cfg_data.get("jellyfin_token", ""),
+                                    "user_id": cfg_data.get("jellyfin_user_id", ""),
+                                    "play_session_id": f"find_{int(time.time())}"
+                                }
+                                st["chapters_injected"] = False
+                                st["jf_started"] = False
+                            else:
+                                st["jellyfin"] = {}
 
                             all_prog = load_json_safe(progress_file)
                             saved_next = all_prog.get(resolved, {})
@@ -246,6 +384,18 @@ def run_daemon_loop():
 
                         if isinstance(dur_val, (int, float)) and dur_val > 0:
                             st["duration"] = float(dur_val)
+                            # Inject Jellyfin chapters into MPV so built-in MPV Skipper scripts work seamlessly!
+                            if not st.get("chapters_injected"):
+                                st["chapters_injected"] = True
+                                jf_chapters = (st.get("jellyfin") or {}).get("chapters") or []
+                                if jf_chapters:
+                                    existing_ch = query_ipc(s, "chapter-list", 14)
+                                    if not existing_ch:
+                                        send_ipc_cmd(s, ["set_property", "chapter-list", jf_chapters], 15)
+                                title_str = (st.get("jellyfin") or {}).get("title", "")
+                                if title_str:
+                                    send_ipc_cmd(s, ["set_property", "media-title", title_str], 16)
+
                             if not st["initial_seek_done"]:
                                 st["initial_seek_done"] = True
                                 if st["initial_pos"] > 5.0 and st["initial_pos"] < st["duration"] * 0.95:
@@ -276,6 +426,16 @@ def run_daemon_loop():
                         if st["duration"] > 0 and st["last_pos"] > 0:
                             is_done = st["eof_reached"] or (st["last_pos"] / st["duration"] >= 0.90)
                             update_progress_entry(progress_file, st["active_file"], st["last_pos"], st["duration"], is_done)
+                            if st.get("jellyfin"):
+                                now_t = time.time()
+                                if not st.get("jf_started"):
+                                    st["jf_started"] = True
+                                    st["last_jf_sync_ts"] = now_t
+                                    post_jellyfin_playback_event(st["jellyfin"], "start", st["last_pos"], st["duration"])
+                                elif (now_t - st.get("last_jf_sync_ts", 0.0)) >= 2.5:
+                                    st["last_jf_sync_ts"] = now_t
+                                    paused_val = bool(query_ipc(s, "pause", 17))
+                                    post_jellyfin_playback_event(st["jellyfin"], "progress", st["last_pos"], st["duration"], paused_val)
 
                 except (ConnectionRefusedError, FileNotFoundError, OSError):
                     if st["connected_once"] or (time.time() - st["created_ts"] > 4.0):
@@ -290,6 +450,8 @@ def run_daemon_loop():
                 if st["duration"] > 0 and st["last_pos"] > 0:
                     is_done = st["eof_reached"] or (st["last_pos"] / st["duration"] >= 0.90)
                     update_progress_entry(progress_file, st["active_file"], st["last_pos"], st["duration"], is_done)
+                    if st.get("jellyfin"):
+                        post_jellyfin_playback_event(st["jellyfin"], "stop", st["last_pos"], st["duration"])
                 try:
                     if os.path.exists(sp):
                         os.unlink(sp)
@@ -299,6 +461,12 @@ def run_daemon_loop():
                 if mf_path and os.path.exists(mf_path):
                     try:
                         os.unlink(mf_path)
+                    except OSError:
+                        pass
+                pl_path = st.get("playlist_file", "")
+                if pl_path and pl_path.startswith("/tmp/") and os.path.exists(pl_path):
+                    try:
+                        os.unlink(pl_path)
                     except OSError:
                         pass
                 if sp in active_hdr_sockets:

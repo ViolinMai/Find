@@ -192,7 +192,12 @@ ApplicationWindow {
     Shortcut {
         sequence: "F5"
         context: Qt.WindowShortcut
-        onActivated: if (backend) backend.refresh()
+        onActivated: if (backend) backend.syncJellyfinAndRefresh()
+    }
+    Shortcut {
+        sequence: "Ctrl+R"
+        context: Qt.WindowShortcut
+        onActivated: if (backend) backend.syncJellyfinAndRefresh()
     }
     Shortcut {
         sequence: "Ctrl+H"
@@ -931,6 +936,66 @@ ApplicationWindow {
             PickerBottomBar {
                 Layout.fillWidth: true
                 visible: backend && backend.picker ? backend.picker.isActive : false
+            }
+        }
+
+        // Floating Live Compression Progress Card
+        Rectangle {
+            visible: backend ? backend.isCompressing : false
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: Math.round(112 * Theme.scaleFactor)
+            anchors.horizontalCenter: parent.horizontalCenter
+            z: 99998
+            width: Math.min(Math.round(360 * Theme.scaleFactor), parent.width - 32)
+            height: Math.round(62 * Theme.scaleFactor)
+            radius: Theme.radiusLarge
+            color: "#f218181f"
+            border.color: Theme.accent
+            border.width: 1
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 12
+                spacing: 6
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Text {
+                        text: "🗜️"
+                        font.pixelSize: Theme.fontSizeMedium
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: backend ? backend.compressionStatus : "Compressing..."
+                        color: Theme.textPrimary
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.bold: true
+                        elide: Text.ElideMiddle
+                    }
+                    Text {
+                        text: backend ? (Math.round(backend.compressionProgress * 100) + "%") : "0%"
+                        color: Theme.accent
+                        font.pixelSize: Theme.fontSizeSmall
+                        font.bold: true
+                    }
+                }
+
+                Rectangle {
+                    Layout.fillWidth: true
+                    height: Math.round(5 * Theme.scaleFactor)
+                    radius: height / 2
+                    color: "#28ffffff"
+                    clip: true
+
+                    Rectangle {
+                        width: parent.width * (backend ? Math.min(1.0, Math.max(0.02, backend.compressionProgress)) : 0.0)
+                        height: parent.height
+                        radius: parent.radius
+                        color: Theme.accent
+                        Behavior on width { NumberAnimation { duration: 110; easing.type: Easing.OutQuad } }
+                    }
+                }
             }
         }
 

@@ -11,7 +11,7 @@ import subprocess
 import shutil
 from datetime import datetime
 from pathlib import Path
-from PySide6.QtCore import QObject, Slot, Property, Signal, QRunnable, QThreadPool, QFileSystemWatcher, QUrl, Qt
+from PySide6.QtCore import QObject, Slot, Property, Signal, QRunnable, QThreadPool, QFileSystemWatcher, QTimer, QUrl, Qt
 from PySide6.QtGui import QGuiApplication, QDrag, QPixmap, QPainter, QColor, QFont
 from PySide6.QtCore import QMimeData
 from core.models import FileListModel
@@ -23,6 +23,7 @@ FONT_EXTS = {".ttf", ".otf", ".woff", ".woff2", ".ttc"}
 from core.search import SearchManager
 from core.picker_context import PickerContext
 from core.portal_service import SystemIntegrationBridge, install_desktop_and_set_default, is_default_file_manager
+from core.jellyfin_bridge import JellyfinBridge, JellyfinSignals, JellyfinFolderSyncTask, post_jellyfin_playback_event
 
 EXECUTABLE_EXTS = {".appimage", ".sh", ".bin", ".run", ".out", ".py"}
 
@@ -172,6 +173,85 @@ class AsyncWorkerSignals(QObject):
     hdrStatusDetected = Signal(str, bool)
     externalPickerFinished = Signal(list)
     iconGalleryReady = Signal(list)
+    archiveProgress = Signal(float, str)
+    archiveFinished = Signal(bool, str)
+
+
+class ArchiveTask(QRunnable):
+    """Background multi-file/folder compressor with real-time progress reporting."""
+    def __init__(self, target_paths: list, dest_archive_path: Path, archive_format: str, signals):
+        super().__init__()
+        self.target_paths = [Path(p) for p in target_paths if os.path.exists(p)]
+        self.dest_archive_path = dest_archive_path
+        self.archive_format = archive_format
+        self.signals = signals
+
+    def run(self):
+        import zipfile
+        import tarfile
+
+        if not self.target_paths:
+            self.signals.archiveFinished.emit(False, "No valid files selected to compress.")
+            return
+
+        try:
+            file_items = []
+            empty_dirs = []
+            for root_item in self.target_paths:
+                base_parent = root_item.parent
+                if root_item.is_file() or root_item.is_symlink():
+                    file_items.append((root_item, root_item.name))
+                elif root_item.is_dir():
+                    has_children = False
+                    for r, dirs, files in os.walk(str(root_item)):
+                        rel_dir = os.path.relpath(r, str(base_parent))
+                        if not dirs and not files:
+                            empty_dirs.append((Path(r), rel_dir))
+                        for f in files:
+                            has_children = True
+                            fp = Path(r) / f
+                            rel_arc = os.path.relpath(str(fp), str(base_parent))
+                            file_items.append((fp, rel_arc))
+                    if not has_children and not empty_dirs:
+                        empty_dirs.append((root_item, root_item.name))
+
+            total_items = max(1, len(file_items) + len(empty_dirs))
+            processed = 0
+
+            self.signals.archiveProgress.emit(0.01, f"Creating {self.dest_archive_path.name}...")
+
+            if self.archive_format == "zip":
+                with zipfile.ZipFile(str(self.dest_archive_path), "w", compression=zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+                    for d_path, rel_arc in empty_dirs:
+                        zf.writestr(rel_arc.rstrip("/") + "/", "")
+                        processed += 1
+                        self.signals.archiveProgress.emit(processed / total_items, f"Packing {rel_arc}")
+                    for f_path, rel_arc in file_items:
+                        if f_path.exists():
+                            zf.write(str(f_path), arcname=rel_arc)
+                        processed += 1
+                        self.signals.archiveProgress.emit(processed / total_items, f"Compressing {f_path.name}")
+            else:
+                with tarfile.open(str(self.dest_archive_path), "w:gz") as tf:
+                    for d_path, rel_arc in empty_dirs:
+                        if d_path.exists():
+                            tf.add(str(d_path), arcname=rel_arc, recursive=False)
+                        processed += 1
+                        self.signals.archiveProgress.emit(processed / total_items, f"Packing {rel_arc}")
+                    for f_path, rel_arc in file_items:
+                        if f_path.exists():
+                            tf.add(str(f_path), arcname=rel_arc, recursive=False)
+                        processed += 1
+                        self.signals.archiveProgress.emit(processed / total_items, f"Compressing {f_path.name}")
+
+            self.signals.archiveFinished.emit(True, f"✔ Created archive: {self.dest_archive_path.name}")
+        except Exception as e:
+            try:
+                if self.dest_archive_path.exists():
+                    self.dest_archive_path.unlink()
+            except OSError:
+                pass
+            self.signals.archiveFinished.emit(False, f"⚠️ Compression failed: {e}")
 
 
 class MpvSessionMonitorTask(QRunnable):
@@ -180,7 +260,7 @@ class MpvSessionMonitorTask(QRunnable):
     and streams live playback progress, episode changes, and drag-and-dropped subtitles back to Find.
     Also automatically turns off HDR via toggle-hdr.sh --off when an HDR mpv session exits.
     """
-    def __init__(self, file_path_str: str, ipc_sock_path: str, proc, hdr_mode: bool, initial_start_pos: float, get_progress_func, signals):
+    def __init__(self, file_path_str: str, ipc_sock_path: str, proc, hdr_mode: bool, initial_start_pos: float, get_progress_func, signals, jf_meta: dict = None, stream_to_local: dict = None):
         super().__init__()
         self.file_path_str = file_path_str
         self.ipc_sock_path = ipc_sock_path
@@ -189,11 +269,19 @@ class MpvSessionMonitorTask(QRunnable):
         self.initial_start_pos = float(initial_start_pos or 0.0)
         self.get_progress_func = get_progress_func
         self.signals = signals
+        self.jf_meta = dict(jf_meta) if isinstance(jf_meta, dict) else {}
+        self.stream_to_local = dict(stream_to_local) if isinstance(stream_to_local, dict) else {}
 
     def _send_ipc_command(self, sock, cmd_list: list, req_id: int = 99):
         try:
             payload = json.dumps({"command": cmd_list, "request_id": req_id}) + "\n"
             sock.sendall(payload.encode("utf-8"))
+            sock.settimeout(0.15)
+            try:
+                sock.recv(4096)
+            except Exception:
+                pass
+            sock.settimeout(0.8)
         except Exception:
             pass
 
@@ -264,6 +352,9 @@ class MpvSessionMonitorTask(QRunnable):
         duration = 0.0
         eof_reached = False
         initial_seek_done = False
+        chapters_injected = False
+        jf_started = False
+        last_jf_sync_ts = 0.0
         last_recorded_sub = ""
         file_switch_ts = 0.0
         prev_file_final_pos = -1.0
@@ -280,8 +371,12 @@ class MpvSessionMonitorTask(QRunnable):
                     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
                         s.settimeout(0.8)
                         s.connect(self.ipc_sock_path)
-                        cur_mpv_path = self._query_ipc_property(s, "path", 4)
-                        resolved_mpv_path = self._resolve_active_path(cur_mpv_path, base_dir)
+                        cur_mpv_path = str(self._query_ipc_property(s, "path", 4) or "").strip()
+                        is_http_stream = cur_mpv_path.startswith(("http://", "https://"))
+                        if is_http_stream:
+                            resolved_mpv_path = self.stream_to_local.get(cur_mpv_path, active_file)
+                        else:
+                            resolved_mpv_path = self._resolve_active_path(cur_mpv_path, base_dir)
 
                         # Detect when the user switches to the next/previous episode inside MPV!
                         if resolved_mpv_path and os.path.exists(resolved_mpv_path) and resolved_mpv_path != active_file:
@@ -316,6 +411,13 @@ class MpvSessionMonitorTask(QRunnable):
 
                         if isinstance(dur_val, (int, float)) and dur_val > 0:
                             duration = float(dur_val)
+                            if not chapters_injected:
+                                chapters_injected = True
+                                jf_chapters = self.jf_meta.get("chapters") or []
+                                if jf_chapters:
+                                    existing_ch = self._query_ipc_property(s, "chapter-list", 14)
+                                    if not existing_ch:
+                                        self._send_ipc_command(s, ["set_property", "chapter-list", jf_chapters], 15)
                             # Perform initial resume seek ONLY for the first launched file via IPC (never global --start!)
                             if not initial_seek_done:
                                 initial_seek_done = True
@@ -342,6 +444,19 @@ class MpvSessionMonitorTask(QRunnable):
                         if duration > 0 and last_pos > 0:
                             is_done = eof_reached or (last_pos / duration >= 0.90)
                             self.signals.mpvProgressUpdated.emit(active_file, last_pos, duration, is_done)
+                            if self.jf_meta.get("item_id"):
+                                now_t = time.time()
+                                if not jf_started:
+                                    jf_started = True
+                                    last_jf_sync_ts = now_t
+                                    QThreadPool.globalInstance().start(
+                                        lambda p=last_pos, d=duration: post_jellyfin_playback_event(self.jf_meta, "start", p, d, False)
+                                    )
+                                elif (now_t - last_jf_sync_ts) >= 2.5:
+                                    last_jf_sync_ts = now_t
+                                    QThreadPool.globalInstance().start(
+                                        lambda p=last_pos, d=duration: post_jellyfin_playback_event(self.jf_meta, "progress", p, d, False)
+                                    )
                 except Exception:
                     pass
             time.sleep(0.8)
@@ -360,6 +475,10 @@ class MpvSessionMonitorTask(QRunnable):
         if duration > 0 and last_pos > 0:
             is_done = eof_reached or (last_pos / duration >= 0.90)
             self.signals.mpvProgressUpdated.emit(active_file, last_pos, duration, is_done)
+            if self.jf_meta.get("item_id"):
+                QThreadPool.globalInstance().start(
+                    lambda p=last_pos, d=duration: post_jellyfin_playback_event(self.jf_meta, "stop", p, d, True)
+                )
 
         if self.hdr_mode:
             self.signals.mpvHdrSessionEnded.emit(int(self.proc.pid))
@@ -496,7 +615,11 @@ class DirectoryLoaderTask(QRunnable):
                             "is_watched": is_watched,
                             "is_new": is_new,
                             "is_movie_item": is_movie_item,
-                            "is_hdr": is_hdr
+                            "is_hdr": is_hdr,
+                            "episode_title": "",
+                            "overview": "",
+                            "rating": "",
+                            "poster": ""
                         })
         except Exception:
             pass
@@ -632,6 +755,8 @@ class FileManagerBackend(QObject):
     sessionConfigChanged = Signal()
     iconGalleryChanged = Signal()
     toastMessage = Signal(str)
+    compressionProgressChanged = Signal()
+    jellyfinConfigChanged = Signal()
     searchResultsChanged = Signal()
     searchScopeChanged = Signal()
     folderSizeReady = Signal(str, str)
@@ -640,6 +765,9 @@ class FileManagerBackend(QObject):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.config_mgr = ConfigManager()
+        self.jf_bridge = JellyfinBridge(self.config_mgr)
+        self.jf_signals = JellyfinSignals()
+        self.jf_signals.folderMetadataReady.connect(self._on_jellyfin_folder_metadata_ready)
         self.picker_ctx = PickerContext(self)
 
         self._default_view_mode = self.config_mgr.get("view_mode", "details")
@@ -710,6 +838,9 @@ class FileManagerBackend(QObject):
         self._clipboard_cut = False
         self._clipboard_path = ""
         self._clipboard_paths = []
+        self._is_compressing = False
+        self._compression_progress = 0.0
+        self._compression_status = ""
         self._pending_highlight_paths = []
         self._folder_size_cache = {}
         self._calculating_folders = set()
@@ -729,6 +860,8 @@ class FileManagerBackend(QObject):
         self.signals.hdrStatusDetected.connect(self._on_hdr_status_detected)
         self.signals.externalPickerFinished.connect(self._on_external_picker_finished)
         self.signals.iconGalleryReady.connect(self._on_icon_gallery_ready)
+        self.signals.archiveProgress.connect(self._on_archive_progress)
+        self.signals.archiveFinished.connect(self._on_archive_finished)
 
         self.watcher = QFileSystemWatcher(self)
         self.watcher.directoryChanged.connect(self._on_dir_changed_externally)
@@ -742,7 +875,14 @@ class FileManagerBackend(QObject):
         self.progress_watcher.directoryChanged.connect(self._on_progress_dir_changed_externally)
 
         if bool(self.config_mgr.get("daemon_autostart", True)):
-            self._ensure_media_daemon_running()
+            # Restart daemon on startup so any updated media_daemon.py code takes effect immediately
+            self.restartMediaDaemon()
+
+        # Automatic background Jellyfin sync timer (every 25 seconds while inside a Media Library)
+        self.jf_auto_sync_timer = QTimer(self)
+        self.jf_auto_sync_timer.setInterval(25000)
+        self.jf_auto_sync_timer.timeout.connect(self._on_auto_jellyfin_poll)
+        self.jf_auto_sync_timer.start()
 
         self.thumb_mgr = ThumbnailManager(self.config_mgr.cache_dir, self)
         self.thumb_mgr.thumbnailReady.connect(self._on_thumbnail_ready)
@@ -1165,14 +1305,136 @@ class FileManagerBackend(QObject):
     def markMediaWatched(self, file_path_str: str, watched: bool):
         if not file_path_str:
             return
-        cur = self.config_mgr.get_media_progress(file_path_str)
-        dur = cur.get("duration", 100.0) or 100.0
-        pos = dur if watched else 0.0
-        updated = self.config_mgr.set_media_progress(file_path_str, pos, dur, watched=watched)
-        self.file_model.update_media_progress(file_path_str, updated["progress"], updated["watched"])
+        targets = (
+            list(self._selected_paths)
+            if (file_path_str in self._selected_paths and len(self._selected_paths) > 1)
+            else [file_path_str]
+        )
+        now_ts = time.time()
+        for fp in targets:
+            if not fp or not os.path.exists(fp) or os.path.isdir(fp):
+                continue
+            cur = self.config_mgr.get_media_progress(fp)
+            dur = cur.get("duration", 100.0) or 100.0
+            pos = 0.0
+            updated = self.config_mgr.set_media_progress(fp, pos, dur, watched=watched, updated_at=now_ts)
+            self.jf_bridge.update_local_cached_progress(fp, pos, dur, watched)
+            self.file_model.update_media_progress(fp, updated["progress"], updated["watched"])
+            self.jf_bridge.mark_watched_async(fp, watched, QThreadPool.globalInstance())
+
+        action_lbl = "Marked as Watched" if watched else "Reset watch progress"
+        self.toastMessage.emit(f"✔ {action_lbl} ({len(targets)} item{'s' if len(targets) > 1 else ''})")
+
+    def _on_auto_jellyfin_poll(self):
+        """Periodically polls Jellyfin in the background so external changes appear automatically."""
+        if not self.jf_bridge.is_enabled or not self.isMediaLibraryView:
+            return
+        cur_p = str(self._current_path)
+        if cur_p in ("recent://", "trash://", "favorites://") or not os.path.isdir(cur_p):
+            return
+        total = self.file_model.rowCount()
+        if total <= 0:
+            return
+        entries_snapshot = []
+        for r in range(total):
+            ent = self.file_model.get_entry_at(r)
+            if ent:
+                entries_snapshot.append(dict(ent))
+        if entries_snapshot:
+            jf_task = JellyfinFolderSyncTask(self.jf_bridge, cur_p, entries_snapshot, self.jf_signals)
+            self.thread_pool.start(jf_task)
+
+    @Slot()
+    def syncJellyfinAndRefresh(self):
+        """Fast shortcut (Ctrl+R) to force-sync Jellyfin and refresh Find immediately."""
+        self.config_mgr.reload_progress_from_disk()
+        if self.jf_bridge.is_enabled:
+            self.jf_bridge._server_online = True
+            self.jf_bridge._last_fail_ts = 0.0
+            self.toastMessage.emit("🔄 Syncing latest progress & metadata with Jellyfin...")
+        else:
+            self.toastMessage.emit("⟳ Refreshed folder")
+        self.refresh()
+
+    # ==========================================================================
+    # Jellyfin Server Settings & Metadata Sync
+    # ==========================================================================
+
+    @Property(bool, notify=jellyfinConfigChanged)
+    def jellyfinEnabled(self) -> bool:
+        return bool(self.config_mgr.get("jellyfin_enabled", True))
+
+    @Property(str, notify=jellyfinConfigChanged)
+    def jellyfinUrl(self) -> str:
+        return str(self.config_mgr.get("jellyfin_url", "http://localhost:8096"))
+
+    @Property(str, notify=jellyfinConfigChanged)
+    def jellyfinToken(self) -> str:
+        return str(self.config_mgr.get("jellyfin_token", ""))
+
+    @Property(bool, notify=jellyfinConfigChanged)
+    def jellyfinStreamMode(self) -> bool:
+        return bool(self.config_mgr.get("jellyfin_stream_mode", False))
+
+    @Property(bool, notify=jellyfinConfigChanged)
+    def showSeriesPosters(self) -> bool:
+        return bool(self.config_mgr.get("show_series_posters", True))
+
+    @Slot(bool)
+    def setShowSeriesPosters(self, enabled: bool):
+        if bool(self.config_mgr.get("show_series_posters", True)) != bool(enabled):
+            self.config_mgr.set("show_series_posters", bool(enabled))
+            self.jellyfinConfigChanged.emit()
+
+    @Slot(bool, str, str, bool)
+    def saveJellyfinConfig(self, enabled: bool, url: str, token: str, stream_mode: bool):
+        self.config_mgr.set("jellyfin_enabled", bool(enabled))
+        self.config_mgr.set("jellyfin_url", url.strip().rstrip("/"))
+        self.config_mgr.set("jellyfin_token", token.strip())
+        self.config_mgr.set("jellyfin_stream_mode", bool(stream_mode))
+        self.jellyfinConfigChanged.emit()
+        self.toastMessage.emit("✔ Saved Jellyfin settings")
+        if self.isMediaLibraryView:
+            self.refresh()
+
+    @Slot(str, str, result=str)
+    def testJellyfinConnection(self, url: str, token: str) -> str:
+        ok, msg = self.jf_bridge.test_connection_sync(url, token)
+        self.jellyfinConfigChanged.emit()
+        self.toastMessage.emit(msg)
+        if ok and self.isMediaLibraryView:
+            self.refresh()
+        return msg
+
+    def _on_jellyfin_folder_metadata_ready(self, folder_path: str, meta_map: dict):
+        if str(self._current_path) != folder_path:
+            return
+        for fpath, meta in meta_map.items():
+            self.file_model.update_jellyfin_metadata(
+                fpath,
+                meta.get("title", ""),
+                meta.get("overview", ""),
+                meta.get("progress"),
+                meta.get("watched"),
+                meta.get("rating"),
+                meta.get("poster", "")
+            )
+            if self._selected_item.get("path") == fpath:
+                updated = dict(self._selected_item)
+                if meta.get("title"):
+                    updated["episode_title"] = meta["title"]
+                if meta.get("overview"):
+                    updated["overview"] = meta["overview"]
+                if meta.get("rating"):
+                    updated["rating"] = str(meta["rating"])
+                if meta.get("poster"):
+                    updated["poster"] = meta["poster"]
+                self._selected_item = updated
+                self.selectedItemChanged.emit()
 
     def _on_mpv_progress_updated(self, file_path_str: str, pos: float, duration: float, is_done: bool):
         updated = self.config_mgr.set_media_progress(file_path_str, pos, duration, watched=is_done)
+        self.jf_bridge.update_local_cached_progress(file_path_str, pos, duration, updated["watched"])
         self.file_model.update_media_progress(file_path_str, updated["progress"], updated["watched"])
 
     def _on_mpv_external_sub_detected(self, file_path_str: str, sub_path_str: str):
@@ -1281,6 +1543,16 @@ class FileManagerBackend(QObject):
             except Exception:
                 pass
 
+        # Query Jellyfin metadata & chapters (falls back immediately if token is empty or server is offline)
+        jf_session_meta = {}
+        if self.jf_bridge.is_enabled:
+            jf_session_meta = self.jf_bridge.resolve_item_for_playback_sync(file_path_str)
+            if jf_session_meta:
+                local_pos = float(saved.get("position", 0.0) or 0.0)
+                srv_pos = float(jf_session_meta.get("position", 0.0) or 0.0)
+                if srv_pos > local_pos and not jf_session_meta.get("watched", False) and not saved.get("watched", False):
+                    saved["position"] = srv_pos
+
         initial_pos = 0.0
         if not saved.get("watched", False) and saved.get("position", 0.0) > 5.0:
             initial_pos = float(saved["position"])
@@ -1294,7 +1566,38 @@ class FileManagerBackend(QObject):
         if ext_sub and os.path.exists(ext_sub):
             cmd.append(f"--sub-file={ext_sub}")
 
-        cmd.append(file_path_str)
+        # Build full ordered episode playlist for the folder so Next/Previous in MPV works seamlessly!
+        ordered_videos = []
+        total_rows = self.file_model.rowCount()
+        for r in range(total_rows):
+            ent = self.file_model.get_entry_at(r)
+            if ent and not ent.get("is_dir") and Path(ent["name"]).suffix.lower() in VIDEO_EXTS:
+                ordered_videos.append(os.path.abspath(ent["path"]))
+
+        abs_clicked = os.path.abspath(file_path_str)
+        if abs_clicked not in ordered_videos:
+            parent_d = os.path.dirname(abs_clicked)
+            try:
+                siblings = [
+                    os.path.join(parent_d, fn)
+                    for fn in os.listdir(parent_d)
+                    if Path(fn).suffix.lower() in VIDEO_EXTS and not fn.startswith(".")
+                ]
+                siblings.sort(key=lambda p: [int(c) if c.isdigit() else c for c in re.split(r'(\d+)', os.path.basename(p).lower())])
+                ordered_videos = siblings if abs_clicked in siblings else [abs_clicked]
+            except Exception:
+                ordered_videos = [abs_clicked]
+
+        playlist_m3u_or_file, start_idx, stream_to_local = self.jf_bridge.build_playlist_for_folder(
+            abs_clicked,
+            ordered_videos,
+            base_id=base_id
+        )
+        if str(playlist_m3u_or_file).endswith(".m3u8"):
+            cmd.append(f"--playlist={playlist_m3u_or_file}")
+            cmd.append(f"--playlist-start={start_idx}")
+        else:
+            cmd.append(playlist_m3u_or_file)
 
         # Ensure the background daemon is running so it can track MPV and turn off HDR even if Find is closed
         self._ensure_media_daemon_running()
@@ -1303,9 +1606,12 @@ class FileManagerBackend(QObject):
             try:
                 with open(meta_path, "w", encoding="utf-8") as mf:
                     json.dump({
-                        "file_path": os.path.abspath(file_path_str),
+                        "file_path": abs_clicked,
+                        "playlist_file": playlist_m3u_or_file if str(playlist_m3u_or_file).endswith(".m3u8") else "",
                         "hdr_mode": bool(hdr_mode),
-                        "initial_pos": initial_pos
+                        "initial_pos": initial_pos,
+                        "jellyfin": jf_session_meta,
+                        "stream_to_local": stream_to_local
                     }, mf)
             except Exception:
                 pass
@@ -1328,7 +1634,9 @@ class FileManagerBackend(QObject):
                 hdr_mode,
                 initial_pos,
                 self.config_mgr.get_media_progress,
-                self.signals
+                self.signals,
+                jf_session_meta,
+                stream_to_local
             )
             QThreadPool.globalInstance().start(monitor)
 
@@ -2143,9 +2451,24 @@ class FileManagerBackend(QObject):
                         e["episode_num"] = badge if badge is not None else f"{ep_counter:02d}"
                         ep_counter += 1
 
+            # Apply any cached Jellyfin titles/overviews/posters immediately, then trigger async background sync
+            for e in entries:
+                if is_movie and e["is_dir"]:
+                    e["is_movie_item"] = True
+                cached_jf = self.jf_bridge.get_cached_item(e["path"])
+                if cached_jf:
+                    e["episode_title"] = cached_jf.get("title", "")
+                    e["overview"] = cached_jf.get("overview", "")
+                    e["rating"] = str(cached_jf.get("rating", "")) if cached_jf.get("rating") else ""
+                    e["poster"] = cached_jf.get("poster", "")
+
             if unprobed_hdr:
                 hdr_task = HdrBatchDetectorTask(unprobed_hdr, self.config_mgr, self.signals)
                 self.thread_pool.start(hdr_task)
+
+            if self.jf_bridge.is_enabled:
+                jf_task = JellyfinFolderSyncTask(self.jf_bridge, path_loaded, list(entries), self.jf_signals)
+                self.thread_pool.start(jf_task)
         else:
             self._sort_entries(entries)
 
@@ -2616,19 +2939,67 @@ class FileManagerBackend(QObject):
         except Exception:
             return False
 
+    @Property(bool, notify=compressionProgressChanged)
+    def isCompressing(self) -> bool:
+        return self._is_compressing
+
+    @Property(float, notify=compressionProgressChanged)
+    def compressionProgress(self) -> float:
+        return self._compression_progress
+
+    @Property(str, notify=compressionProgressChanged)
+    def compressionStatus(self) -> str:
+        return self._compression_status
+
+    def _on_archive_progress(self, progress: float, status_text: str):
+        self._is_compressing = True
+        self._compression_progress = round(min(1.0, max(0.0, float(progress))), 3)
+        self._compression_status = status_text
+        self.compressionProgressChanged.emit()
+
+    def _on_archive_finished(self, success: bool, message: str):
+        self._is_compressing = False
+        self._compression_progress = 0.0
+        self._compression_status = ""
+        self.compressionProgressChanged.emit()
+        if message:
+            self.toastMessage.emit(message)
+        if success:
+            self.refresh()
+
     @Slot(str, str)
     def compressItem(self, file_path_str: str, archive_format: str):
-        try:
-            p = Path(file_path_str)
-            if not p.exists():
-                return
-            if archive_format == "zip":
-                shutil.make_archive(str(p.parent / p.stem), 'zip', str(p.parent), p.name)
-            elif archive_format == "tar.gz":
-                shutil.make_archive(str(p.parent / p.stem), 'gztar', str(p.parent), p.name)
-            self.refresh()
-        except Exception:
-            pass
+        if self._is_compressing:
+            self.toastMessage.emit("⏳ Another compression task is already running...")
+            return
+
+        targets = (
+            list(self._selected_paths)
+            if (file_path_str in self._selected_paths and len(self._selected_paths) > 1)
+            else ([file_path_str] if file_path_str else list(self._selected_paths))
+        )
+        valid_targets = [p for p in targets if p and os.path.exists(p)]
+        if not valid_targets:
+            return
+
+        first_p = Path(valid_targets[0])
+        parent_dir = first_p.parent
+        ext = ".zip" if archive_format == "zip" else ".tar.gz"
+
+        if len(valid_targets) == 1:
+            base_name = first_p.stem if first_p.is_file() else first_p.name
+        else:
+            base_name = parent_dir.name if parent_dir.name else "Archive"
+
+        dest_archive = self._get_unique_path(parent_dir, base_name, ext)
+
+        self._is_compressing = True
+        self._compression_progress = 0.01
+        self._compression_status = f"Preparing {len(valid_targets)} item(s)..."
+        self.compressionProgressChanged.emit()
+
+        task = ArchiveTask(valid_targets, dest_archive, archive_format, self.signals)
+        QThreadPool.globalInstance().start(task)
 
     @Slot(str)
     def moveToNewFolder(self, file_path_str: str):
@@ -2851,6 +3222,7 @@ class FileManagerBackend(QObject):
                     task = FolderSizeTask(str(p), self.signals)
                     self.thread_pool.start(task)
 
+        jf_cached = self.jf_bridge.get_cached_item(path)
         self._selected_item = {
             "path": path,
             "name": name,
@@ -2863,6 +3235,10 @@ class FileManagerBackend(QObject):
             "is_video": is_video,
             "thumb": thumb,
             "folder_previews": folder_previews,
+            "episode_title": jf_cached.get("title", ""),
+            "overview": jf_cached.get("overview", ""),
+            "rating": str(jf_cached.get("rating", "")) if jf_cached.get("rating") else "",
+            "poster": jf_cached.get("poster", ""),
             "resolution": "",
             "codec": "",
             "bit_depth": "",

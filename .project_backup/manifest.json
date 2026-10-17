@@ -1,14 +1,6 @@
 {
   "modified": [
-    "core/thumbnails.py",
-    "core/config.py",
-    "core/backend.py",
-    "ui/components/DolphinContextMenu.qml",
-    "ui/components/DesktopMakerDialog.qml",
-    "ui/components/SettingsDialog.qml",
-    "ui/main.qml"
+    "core/jellyfin_bridge.py"
   ],
-  "created": [
-    "ui/components/IconBrowserDialog.qml"
-  ]
+  "created": []
 }

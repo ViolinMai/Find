@@ -26,23 +26,27 @@ Rectangle {
             font.bold: true
         }
 
-        // Preview Viewport (Adapts to aspect ratio & shows FolderPreviewIcon for folders)
+        // Preview Viewport (Adapts to aspect ratio & shows tall vertical poster for movies & series folders!)
         Item {
+            readonly property bool hasPosterImg: root.hasSelection && root.safeVal(root.item.poster) !== "" && (!root.item.is_dir || (backend && backend.showSeriesPosters))
             Layout.fillWidth: true
-            Layout.preferredHeight: Math.min(Math.round(180 * Theme.scaleFactor), Math.max(95, root.height * 0.36))
+            Layout.preferredHeight: Math.min(
+                Math.round((hasPosterImg ? 255 : 180) * Theme.scaleFactor),
+                Math.max(110, root.height * (hasPosterImg ? 0.46 : 0.36))
+            )
 
-            // Folder Preview inside Details Panel
+            // Folder Preview inside Details Panel (when no vertical poster overrides it)
             FolderPreviewIcon {
-                visible: root.hasSelection && root.item.is_dir === true
+                visible: root.hasSelection && root.item.is_dir === true && !parent.hasPosterImg
                 width: Math.min(parent.width * 0.78, parent.height * 0.94)
                 height: width * 0.88
                 anchors.centerIn: parent
                 previews: (root.hasSelection && root.item.folder_previews) ? root.item.folder_previews : []
             }
 
-            // Image or Video Preview with Floating Aspect-Ratio Frame
+            // Image, Video, or Jellyfin Vertical Movie Poster Preview
             Item {
-                visible: root.hasSelection && (root.item.is_image === true || (root.item.is_video === true && root.safeVal(root.item.thumb) !== ""))
+                visible: root.hasSelection && (parent.hasPosterImg || root.item.is_image === true || (root.item.is_video === true && root.safeVal(root.item.thumb) !== ""))
                 anchors.fill: parent
 
                 Image {
@@ -50,7 +54,11 @@ Rectangle {
                     anchors.centerIn: parent
                     width: parent.width
                     height: parent.height
-                    source: parent.visible ? (root.item.is_image ? "file://" + root.safeVal(root.item.path) : "file://" + root.safeVal(root.item.thumb)) : ""
+                    source: parent.visible
+                            ? (parent.parent.hasPosterImg
+                               ? ("file://" + root.safeVal(root.item.poster))
+                               : (root.item.is_image ? "file://" + root.safeVal(root.item.path) : "file://" + root.safeVal(root.item.thumb)))
+                            : ""
                     fillMode: Image.PreserveAspectFit
                     asynchronous: true
                     cache: true
@@ -59,12 +67,12 @@ Rectangle {
 
                 Rectangle {
                     anchors.centerIn: panelImg
-                    width: panelImg.paintedWidth > 0 ? panelImg.paintedWidth + 4 : 0
-                    height: panelImg.paintedHeight > 0 ? panelImg.paintedHeight + 4 : 0
-                    radius: Theme.radiusMedium
+                    width: panelImg.paintedWidth > 0 ? panelImg.paintedWidth : 0
+                    height: panelImg.paintedHeight > 0 ? panelImg.paintedHeight : 0
+                    radius: Math.round(9 * Theme.scaleFactor)
                     color: "transparent"
-                    border.color: Theme.borderDim
-                    border.width: 1
+                    border.color: parent.parent.hasPosterImg ? "transparent" : Theme.borderDim
+                    border.width: parent.parent.hasPosterImg ? 0 : 1
                     visible: panelImg.status === Image.Ready
                 }
             }
@@ -137,7 +145,11 @@ Rectangle {
 
                 Text {
                     Layout.fillWidth: true
-                    text: root.hasSelection ? root.safeVal(root.item.name) : "Current Location"
+                    text: {
+                        if (!root.hasSelection) return "Current Location"
+                        var epT = root.safeVal(root.item.episode_title)
+                        return epT !== "" ? epT : root.safeVal(root.item.name)
+                    }
                     color: Theme.textPrimary
                     font.pixelSize: Theme.fontSizeTitle
                     font.bold: true
@@ -175,6 +187,8 @@ Rectangle {
                     }
                 }
 
+                DetailRow { label: "Episode"; val: root.hasSelection ? root.safeVal(root.item.episode_title) : "" }
+                DetailRow { label: "Rating"; val: (root.hasSelection && root.safeVal(root.item.rating) !== "") ? ("⭐ " + root.safeVal(root.item.rating)) : "" }
                 DetailRow { label: "Type"; val: root.hasSelection ? root.safeVal(root.item.type) : "Directory" }
                 DetailRow { label: "Size"; val: root.hasSelection ? root.safeVal(root.item.size) : "" }
                 DetailRow { label: "Modified"; val: root.hasSelection ? root.safeVal(root.item.modified) : "" }
@@ -186,6 +200,38 @@ Rectangle {
                 DetailRow { label: "Framerate"; val: root.hasSelection ? root.safeVal(root.item.fps) : "" }
                 DetailRow { label: "Bitrate"; val: root.hasSelection ? root.safeVal(root.item.bitrate) : "" }
                 DetailRow { label: "Audio Codec"; val: root.hasSelection ? root.safeVal(root.item.audio_codec) : "" }
+
+                // Jellyfin Synopsis / Overview Box
+                Rectangle {
+                    visible: root.hasSelection && root.safeVal(root.item.overview) !== ""
+                    Layout.fillWidth: true
+                    implicitHeight: overviewCol.implicitHeight + 14
+                    radius: Theme.radiusSmall
+                    color: Theme.bgSurface
+                    border.color: Theme.borderDim
+                    border.width: 1
+
+                    ColumnLayout {
+                        id: overviewCol
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        spacing: 4
+
+                        Text {
+                            text: "📖 Synopsis (Jellyfin)"
+                            color: Theme.accent
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.bold: true
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: root.hasSelection ? root.safeVal(root.item.overview) : ""
+                            color: Theme.textSecondary
+                            font.pixelSize: Theme.fontSizeSmall
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                }
 
                 // Clickable Path Row -> Copies plaintext path directly on click!
                 Rectangle {

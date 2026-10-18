@@ -1,6 +1,9 @@
 {
   "modified": [
-    "core/jellyfin_bridge.py"
+    "main.py",
+    "core/backend.py",
+    "ui/components/AddressBar.qml",
+    "ui/components/PreviewPanel.qml"
   ],
   "created": []
 }

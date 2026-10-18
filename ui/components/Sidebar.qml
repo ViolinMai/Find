@@ -8,7 +8,7 @@ Rectangle {
     color: Theme.bgSidebar
 
     LayoutMirroring.enabled: false
-    LayoutMirroring.childrenInherit: true
+    LayoutMirroring.childrenInherit: false
 
     property var appWindow: null
     property bool compactMode: false
@@ -40,17 +40,30 @@ Rectangle {
             onTriggered: if (backend) backend.addTab(sidebarItemMenu.targetPath)
         }
         StyledMenuItem {
-            visible: sidebarItemMenu.targetPath !== "recent://" && sidebarItemMenu.targetPath !== "trash://" && sidebarItemMenu.targetPath !== "favorites://"
+            visible: sidebarItemMenu.targetPath !== "recent://" && sidebarItemMenu.targetPath !== "trash://" && sidebarItemMenu.targetPath !== "favorites://" && sidebarItemMenu.targetPath !== "mediahub://"
+            iconGlyph: "📊"
+            text: "Storage Analyzer (Largest Items)"
+            font.bold: true
+            onTriggered: if (backend) backend.openStorageAnalyzer(sidebarItemMenu.targetPath)
+        }
+        StyledMenuItem {
+            visible: sidebarItemMenu.targetPath !== "recent://" && sidebarItemMenu.targetPath !== "trash://" && sidebarItemMenu.targetPath !== "favorites://" && sidebarItemMenu.targetPath !== "mediahub://"
             iconGlyph: "💻"
             text: "Open in Terminal"
             onTriggered: if (backend) backend.openInTerminal(sidebarItemMenu.targetPath)
         }
+        StyledMenuItem {
+            visible: sidebarItemMenu.targetPath.startsWith("/run/media") || sidebarItemMenu.targetPath.startsWith("/media") || sidebarItemMenu.targetPath.startsWith("/mnt")
+            iconGlyph: "⏏"
+            text: "Unmount / Eject Drive"
+            onTriggered: if (backend) backend.unmountDrive(sidebarItemMenu.targetPath)
+        }
         MenuSeparator {
-            visible: sidebarItemMenu.targetPath !== "recent://" && sidebarItemMenu.targetPath !== "trash://" && sidebarItemMenu.targetPath !== "favorites://"
+            visible: sidebarItemMenu.targetPath !== "recent://" && sidebarItemMenu.targetPath !== "trash://" && sidebarItemMenu.targetPath !== "favorites://" && sidebarItemMenu.targetPath !== "mediahub://"
             contentItem: Rectangle { implicitHeight: 1; color: Theme.borderDim }
         }
         StyledMenuItem {
-            visible: sidebarItemMenu.targetPath !== "recent://" && sidebarItemMenu.targetPath !== "trash://" && sidebarItemMenu.targetPath !== "favorites://"
+            visible: sidebarItemMenu.targetPath !== "recent://" && sidebarItemMenu.targetPath !== "trash://" && sidebarItemMenu.targetPath !== "favorites://" && sidebarItemMenu.targetPath !== "mediahub://"
             iconGlyph: "👁️"
             text: "Hide from Sidebar"
             isDanger: true
@@ -63,13 +76,16 @@ Rectangle {
         property string itemName: ""
         property string itemPath: ""
         property string itemIcon: "📁"
+        property string usageText: ""
+        property real usageRatio: -1.0
         property bool isFav: false
         property int idxInSection: -1
         property int sectionTotal: 0
 
         readonly property bool isCurrent: (backend ? backend.currentPath : "") === itemPath
+        readonly property bool hasDriveBar: !root.compactMode && usageRatio >= 0.0 && usageText !== ""
         Layout.fillWidth: true
-        implicitHeight: Math.round(32 * Theme.scaleFactor)
+        implicitHeight: Math.round((hasDriveBar ? 46 : 32) * Theme.scaleFactor)
         radius: Theme.radiusMedium
         color: dropTarget.containsDrag
                ? "#380078d4"
@@ -77,42 +93,75 @@ Rectangle {
         border.color: dropTarget.containsDrag ? Theme.accent : (isCurrent ? Theme.borderFocus : "transparent")
         border.width: dropTarget.containsDrag || isCurrent ? 1 : 0
 
-        RowLayout {
+        ColumnLayout {
             anchors.fill: parent
             anchors.leftMargin: root.compactMode ? 0 : 10
-            anchors.rightMargin: root.compactMode ? 0 : 6
-            spacing: 8
+            anchors.rightMargin: root.compactMode ? 0 : 8
+            anchors.topMargin: entryRoot.hasDriveBar ? 5 : 0
+            anchors.bottomMargin: entryRoot.hasDriveBar ? 5 : 0
+            spacing: 4
 
-            Item {
-                Layout.preferredWidth: root.compactMode ? entryRoot.width : Math.round(20 * Theme.scaleFactor)
+            RowLayout {
+                Layout.fillWidth: true
                 Layout.fillHeight: true
+                spacing: 8
 
-                Image {
-                    anchors.centerIn: parent
-                    width: Math.round(18 * Theme.scaleFactor)
-                    height: Math.round(18 * Theme.scaleFactor)
-                    visible: entryRoot.itemIcon.indexOf("/") !== -1 || entryRoot.itemIcon.indexOf(".") !== -1
-                    source: visible ? ("file://" + entryRoot.itemIcon) : ""
-                    fillMode: Image.PreserveAspectFit
+                Item {
+                    Layout.preferredWidth: root.compactMode ? entryRoot.width : Math.round(20 * Theme.scaleFactor)
+                    Layout.fillHeight: true
+
+                    Image {
+                        anchors.centerIn: parent
+                        width: Math.round(18 * Theme.scaleFactor)
+                        height: Math.round(18 * Theme.scaleFactor)
+                        visible: entryRoot.itemIcon.indexOf("/") !== -1 || entryRoot.itemIcon.indexOf(".") !== -1
+                        source: visible ? ("file://" + entryRoot.itemIcon) : ""
+                        fillMode: Image.PreserveAspectFit
+                    }
+
+                    Text {
+                        anchors.centerIn: parent
+                        visible: entryRoot.itemIcon.indexOf("/") === -1 && entryRoot.itemIcon.indexOf(".") === -1
+                        text: entryRoot.itemIcon
+                        font.pixelSize: Theme.fontSizeMedium
+                    }
                 }
 
                 Text {
-                    anchors.centerIn: parent
-                    visible: entryRoot.itemIcon.indexOf("/") === -1 && entryRoot.itemIcon.indexOf(".") === -1
-                    text: entryRoot.itemIcon
-                    font.pixelSize: Theme.fontSizeMedium
+                    visible: !root.compactMode
+                    Layout.fillWidth: true
+                    text: entryRoot.itemName
+                    color: entryRoot.isCurrent ? Theme.textPrimary : Theme.textSecondary
+                    font.pixelSize: Theme.fontSizeNormal
+                    font.bold: entryRoot.isCurrent
+                    horizontalAlignment: Text.AlignLeft
+                    elide: Text.ElideRight
+                }
+
+                Text {
+                    visible: entryRoot.hasDriveBar
+                    text: entryRoot.usageText
+                    color: Theme.textTertiary
+                    font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
+                    font.bold: true
                 }
             }
 
-            Text {
-                visible: !root.compactMode
+            // Drive Capacity Progress Bar (e.g. 344GB/1TB)
+            Rectangle {
+                visible: entryRoot.hasDriveBar
                 Layout.fillWidth: true
-                text: entryRoot.itemName
-                color: entryRoot.isCurrent ? Theme.textPrimary : Theme.textSecondary
-                font.pixelSize: Theme.fontSizeNormal
-                font.bold: entryRoot.isCurrent
-                horizontalAlignment: Text.AlignLeft
-                elide: Text.ElideRight
+                height: Math.round(4.5 * Theme.scaleFactor)
+                radius: height / 2
+                color: "#26ffffff"
+                clip: true
+
+                Rectangle {
+                    width: parent.width * Math.min(1.0, Math.max(0.03, entryRoot.usageRatio))
+                    height: parent.height
+                    radius: parent.radius
+                    color: entryRoot.usageRatio > 0.90 ? "#f87171" : (entryRoot.usageRatio > 0.78 ? "#f59e0b" : Theme.accent)
+                }
             }
         }
 
@@ -187,6 +236,12 @@ Rectangle {
             }
 
             SidebarEntry {
+                itemName: "Media Hub"
+                itemPath: "mediahub://"
+                itemIcon: "🎬"
+            }
+
+            SidebarEntry {
                 itemName: "Favorites"
                 itemPath: "favorites://"
                 itemIcon: "⭐"
@@ -231,6 +286,8 @@ Rectangle {
                     itemName: modelData.name
                     itemPath: modelData.path
                     itemIcon: modelData.icon
+                    usageText: modelData.usage_text || ""
+                    usageRatio: modelData.usage_ratio !== undefined ? modelData.usage_ratio : -1.0
                 }
             }
 

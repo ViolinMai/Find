@@ -25,6 +25,8 @@ class FileListModel(QAbstractListModel):
     OverviewRole = Qt.ItemDataRole.UserRole + 21
     RatingRole = Qt.ItemDataRole.UserRole + 22
     PosterRole = Qt.ItemDataRole.UserRole + 23
+    SizeRatioRole = Qt.ItemDataRole.UserRole + 24
+    PercentStrRole = Qt.ItemDataRole.UserRole + 25
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -85,6 +87,10 @@ class FileListModel(QAbstractListModel):
             return str(entry.get("rating", "")) if entry.get("rating") else ""
         elif role == self.PosterRole:
             return str(entry.get("poster", ""))
+        elif role == self.SizeRatioRole:
+            return float(entry.get("size_ratio", 0.0))
+        elif role == self.PercentStrRole:
+            return str(entry.get("percent_str", ""))
         return None
 
     def roleNames(self):
@@ -112,6 +118,8 @@ class FileListModel(QAbstractListModel):
             self.OverviewRole: b"overview",
             self.RatingRole: b"rating",
             self.PosterRole: b"poster",
+            self.SizeRatioRole: b"size_ratio",
+            self.PercentStrRole: b"percent_str",
         }
 
     def set_entries(self, entries):

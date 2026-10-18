@@ -14,6 +14,20 @@ Rectangle {
     readonly property var chosen: (backend && backend.picker) ? backend.picker.selectedPaths : []
     readonly property string displayChosen: chosen.length > 0 ? chosen.join(", ") : ((backend && backend.picker && backend.picker.mode === "folder") ? backend.currentPath : "No item selected")
 
+    function tryConfirmPicker() {
+        if (!backend) return
+        if (root.isSaveMode) {
+            var fn = saveNameInput.text.trim()
+            if (fn === "") return
+            var targetFull = backend.currentPath + "/" + fn
+            if (backend.checkTransferConflict(targetFull, backend.currentPath)) {
+                saveOverwriteDialog.open()
+                return
+            }
+        }
+        backend.confirmPickerSelection()
+    }
+
     RowLayout {
         anchors.fill: parent
         anchors.leftMargin: 16
@@ -45,7 +59,7 @@ Rectangle {
                     backend.picker.setSaveFilename(text)
                 }
             }
-            onAccepted: backend.confirmPickerSelection()
+            onAccepted: root.tryConfirmPicker()
             background: Rectangle {
                 color: Theme.bgSurface
                 radius: Theme.radiusSmall
@@ -112,7 +126,49 @@ Rectangle {
                 color: parent.enabled ? (parent.hovered ? Theme.accentHover : Theme.accent) : Theme.bgHover
                 radius: Theme.radiusSmall
             }
-            onClicked: backend.confirmPickerSelection()
+            onClicked: root.tryConfirmPicker()
+        }
+
+        Dialog {
+            id: saveOverwriteDialog
+            title: "Confirm Overwrite"
+            modal: true
+            anchors.centerIn: Overlay.overlay
+            width: Math.round(380 * Theme.scaleFactor)
+
+            background: Rectangle {
+                color: Theme.bgSurface
+                border.color: "#f59e0b"
+                border.width: 1
+                radius: Theme.radiusLarge
+            }
+
+            ColumnLayout {
+                anchors.fill: parent
+                spacing: 12
+                Text {
+                    Layout.fillWidth: true
+                    text: "A file named \"" + saveNameInput.text.trim() + "\" already exists in this folder.\n\nDo you want to replace it?"
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSizeNormal
+                    wrapMode: Text.WordWrap
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Item { Layout.fillWidth: true }
+                    Button {
+                        text: "Cancel"
+                        onClicked: saveOverwriteDialog.close()
+                    }
+                    Button {
+                        text: "Replace"
+                        onClicked: {
+                            saveOverwriteDialog.close()
+                            if (backend) backend.confirmPickerSelection()
+                        }
+                    }
+                }
+            }
         }
 
         Button {

@@ -67,8 +67,9 @@ def generate_single_thumbnail_sync(file_path: str, cache_dir: Path, save_to_cach
         if ext not in IMAGE_EXTS and ext not in VIDEO_EXTS:
             return ""
 
-        # If save_to_cache is False (Folder Preview), do NOT store in persistent cache!
-        if not save_to_cache and ext in IMAGE_EXTS:
+        # For Folder Previews (save_to_cache=False), still generate a lightweight 420px thumbnail in EPHEMERAL_DIR
+        # so QML never decodes 48MP raw images into RAM!
+        if not save_to_cache and ext == ".svg":
             return str(p)
 
         mtime = p.stat().st_mtime
@@ -240,9 +241,10 @@ class FolderPreviewTask(QRunnable):
             previews = []
             for kind, fpath, fname in combined:
                 if kind == "image":
+                    thumb = generate_single_thumbnail_sync(fpath, self.cache_dir, save_to_cache=False)
                     previews.append({
                         "kind": "image",
-                        "thumb": fpath,
+                        "thumb": thumb if thumb else fpath,
                         "snippet": "",
                         "name": fname
                     })
@@ -315,20 +317,20 @@ class ThumbnailManager(QObject):
             pass
 
     def get_existing_thumbnail(self, file_path: str):
+        if not file_path:
+            return ""
+        ext_low = os.path.splitext(file_path)[1].lower()
+        if ext_low not in IMAGE_EXTS and ext_low not in VIDEO_EXTS:
+            return ""
+        if ext_low == ".svg":
+            return file_path
         try:
-            p = Path(file_path)
-            if not p.exists():
-                return ""
-            mtime = p.stat().st_mtime
-            key = f"{file_path}_{mtime}_v2_rounded".encode("utf-8")
+            st = os.stat(file_path)
+            key = f"{file_path}_{st.st_mtime}_v2_rounded".encode("utf-8")
             hash_base = hashlib.md5(key).hexdigest()
             for ext in (".png", ".jpg"):
                 thumb_path = self.cache_dir / f"{hash_base}{ext}"
                 if thumb_path.exists() and thumb_path.stat().st_size > 0:
-                    try:
-                        os.utime(thumb_path, None)
-                    except OSError:
-                        pass
                     return str(thumb_path)
         except Exception:
             pass

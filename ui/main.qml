@@ -14,6 +14,9 @@ ApplicationWindow {
     title: (backend && backend.picker && backend.picker.isActive) ? backend.picker.title : "Find"
     color: (backend && backend.transparentBlur) ? "transparent" : Theme.bgBase
 
+    LayoutMirroring.enabled: false
+    LayoutMirroring.childrenInherit: true
+
     // Hyprland Multi-Tile Adaptive Layout Engine (Supports 1/2, 1/3, 1/4, 1/5 screen in any aspect ratio)
     readonly property real aspectRatio: height > 0 ? (width / height) : 1.0
     readonly property bool isPortraitTile: aspectRatio < 0.88
@@ -66,6 +69,13 @@ ApplicationWindow {
     property var topDrivesModel: backend ? backend.getDrives() : []
     property string activeToastText: ""
 
+    readonly property bool isTextInputFocused: root.activeFocusItem && (
+        root.activeFocusItem.toString().indexOf("TextInput") !== -1 ||
+        root.activeFocusItem.toString().indexOf("TextField") !== -1 ||
+        root.activeFocusItem.toString().indexOf("TextArea") !== -1
+    )
+    readonly property bool isModalOpen: conflictDialog.visible || renameConflictDialog.visible || settingsDialog.visible || centralFileView.hasOpenModal
+
     Connections {
         target: backend
         function onSidebarUpdated() {
@@ -81,6 +91,17 @@ ApplicationWindow {
         function onToastMessage(msg) {
             root.activeToastText = msg
             toastTimer.restart()
+        }
+        function onRenameConflictDetected(originalPath, desiredName, conflictingPath) {
+            renameConflictDialog.originalPath = originalPath
+            renameConflictDialog.desiredName = desiredName
+            renameConflictDialog.conflictingPath = conflictingPath
+            var parts = originalPath.split("/")
+            renameConflictDialog.originalFileName = parts[parts.length - 1]
+            conflictNewNameInput.text = desiredName + " (Old)"
+            renameConflictDialog.open()
+            conflictNewNameInput.forceActiveFocus()
+            conflictNewNameInput.selectAll()
         }
     }
 
@@ -169,7 +190,7 @@ ApplicationWindow {
     function triggerPasteInCurrentFolder() {
         if (!backend) return
         var cur = backend.currentPath
-        if (!cur || cur === "recent://" || cur === "trash://") return
+        if (!cur || cur === "recent://" || cur === "trash://" || cur === "favorites://" || cur === "mediahub://") return
         var clipPaths = backend.getClipboardPaths()
         if (clipPaths && clipPaths.length > 0) {
             var op = backend.isClipboardCut() ? "move" : "copy"
@@ -179,16 +200,39 @@ ApplicationWindow {
             if (op === "move") {
                 backend.clearClipboardStage()
             }
+        } else {
+            backend.pasteToFolder(cur)
         }
     }
 
     onClosing: function(close) {
+        if (backend) {
+            backend.shutdownCleanup()
+        }
         if (backend && backend.picker && backend.picker.isActive) {
             backend.cancelPicker()
         }
     }
 
-    // Global Window Shortcuts (Active regardless of child focus)
+    // Global Window Shortcuts (Active when no modal dialog or text input is capturing keys)
+    Shortcut {
+        sequences: ["F", "F11"]
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !root.isModalOpen && !root.isTextInputFocused
+        onActivated: {
+            if (root.visibility === Window.FullScreen) {
+                root.showNormal()
+            } else {
+                root.showFullScreen()
+            }
+        }
+    }
+    Shortcut {
+        sequences: ["Alt+Return", "Alt+Enter"]
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !root.isModalOpen
+        onActivated: centralFileView.openPropertiesForSelected()
+    }
     Shortcut {
         sequence: "F5"
         context: Qt.WindowShortcut
@@ -223,24 +267,27 @@ ApplicationWindow {
     Shortcut {
         sequence: "Ctrl+C"
         context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive
         onActivated: {
-            if (backend && backend.selectedItem && backend.selectedItem.path) {
-                backend.stageClipboard(backend.selectedItem.path, false)
+            if (backend) {
+                backend.stageClipboard("", false)
             }
         }
     }
     Shortcut {
         sequence: "Ctrl+X"
         context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive
         onActivated: {
-            if (backend && backend.selectedItem && backend.selectedItem.path) {
-                backend.stageClipboard(backend.selectedItem.path, true)
+            if (backend) {
+                backend.stageClipboard("", true)
             }
         }
     }
     Shortcut {
         sequence: "Ctrl+V"
         context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive
         onActivated: root.triggerPasteInCurrentFolder()
     }
     Shortcut {
@@ -253,11 +300,33 @@ ApplicationWindow {
         }
     }
     Shortcut {
-        sequences: ["Delete", "Backspace"]
+        sequence: "Delete"
         context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !root.isModalOpen && !root.isTextInputFocused
         onActivated: {
             if (backend && backend.selectedItem && backend.selectedItem.path) {
-                backend.moveToTrash(backend.selectedItem.path)
+                if (backend.isTrashView) {
+                    centralFileView.promptPermanentDelete(backend.selectedItem.path, false)
+                } else {
+                    backend.moveToTrash(backend.selectedItem.path)
+                }
+            }
+        }
+    }
+    Shortcut {
+        sequence: "Backspace"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !root.isModalOpen && !root.isTextInputFocused
+        onActivated: if (backend) backend.goUp()
+    }
+    Shortcut {
+        sequence: "Ctrl+Alt+C"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !root.isModalOpen
+        onActivated: {
+            if (backend) {
+                var target = (backend.selectedItem && backend.selectedItem.path) ? backend.selectedItem.path : backend.currentPath
+                backend.copyToClipboard(target)
             }
         }
     }
@@ -307,9 +376,30 @@ ApplicationWindow {
         onActivated: if (backend && backend.isMediaLibraryView) backend.toggleSubtitlesInMedia()
     }
     Shortcut {
+        sequence: "Shift+A"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible && !(root.activeFocusItem && (root.activeFocusItem.toString().indexOf("TextInput") !== -1 || root.activeFocusItem.toString().indexOf("TextField") !== -1 || root.activeFocusItem.toString().indexOf("TextArea") !== -1))
+        onActivated: if (backend) backend.toggleAnonymousMode()
+    }
+    Shortcut {
+        sequence: "Ctrl+I"
+        context: Qt.WindowShortcut
+        onActivated: {
+            if (!backend) return
+            root.userShowSidebar = true
+            if (root.isSidebarCompactRail) {
+                backend.setSidebarMode("full")
+                root.railExpandedOverride = true
+            } else {
+                backend.setSidebarMode("rail")
+                root.railExpandedOverride = false
+            }
+        }
+    }
+    Shortcut {
         sequences: ["Return", "Enter", "Space"]
         context: Qt.WindowShortcut
-        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !root.isModalOpen && !root.isTextInputFocused
         onActivated: {
             if (backend && backend.selectedItem && backend.selectedItem.path) {
                 backend.openEntry(backend.selectedItem.path)
@@ -321,7 +411,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Up"
         context: Qt.WindowShortcut
-        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !root.isModalOpen && !root.isTextInputFocused
         onActivated: {
             if (!backend) return
             var step = backend.viewMode === "grid" ? -centralFileView.currentGridColumns() : -1
@@ -332,7 +422,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Down"
         context: Qt.WindowShortcut
-        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !root.isModalOpen && !root.isTextInputFocused
         onActivated: {
             if (!backend) return
             var step = backend.viewMode === "grid" ? centralFileView.currentGridColumns() : 1
@@ -343,7 +433,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Left"
         context: Qt.WindowShortcut
-        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !root.isModalOpen && !root.isTextInputFocused
         onActivated: {
             if (!backend) return
             backend.moveSelectionRelative(-1, centralFileView.currentGridColumns())
@@ -353,7 +443,7 @@ ApplicationWindow {
     Shortcut {
         sequence: "Right"
         context: Qt.WindowShortcut
-        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !conflictDialog.visible
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !root.isModalOpen && !root.isTextInputFocused
         onActivated: {
             if (!backend) return
             backend.moveSelectionRelative(1, centralFileView.currentGridColumns())
@@ -487,7 +577,7 @@ ApplicationWindow {
                                 spacing: 6
 
                                 Text {
-                                    text: tabPill.isDetachingHint ? "↗" : (modelData.path === "recent://" ? "🕒" : (modelData.path === "trash://" ? "🗑️" : "📁"))
+                                    text: tabPill.isDetachingHint ? "↗" : (modelData.path === "mediahub://" ? "🎬" : (modelData.path === "favorites://" ? "⭐" : (modelData.path === "recent://" ? "🕒" : (modelData.path === "trash://" ? "🗑️" : "📁"))))
                                     font.pixelSize: Theme.fontSizeSmall
                                 }
 
@@ -497,6 +587,7 @@ ApplicationWindow {
                                     color: tabPill.isCurrTab ? Theme.textPrimary : Theme.textSecondary
                                     font.pixelSize: Theme.fontSizeSmall
                                     font.bold: tabPill.isCurrTab
+                                    horizontalAlignment: Text.AlignLeft
                                     elide: Text.ElideRight
                                 }
 
@@ -687,6 +778,37 @@ ApplicationWindow {
                         id: pillRow
                         height: parent.height
                         spacing: 6
+
+                        Rectangle {
+                            readonly property bool isHubCurr: (backend ? backend.currentPath : "") === "mediahub://"
+                            implicitHeight: Math.round(26 * Theme.scaleFactor)
+                            implicitWidth: hubTopRow.implicitWidth + 14
+                            radius: Theme.radiusMedium
+                            color: isHubCurr ? Theme.accent : (hubTopMouse.containsMouse ? Theme.bgHover : Theme.bgSurface)
+                            border.color: isHubCurr ? Theme.accentHover : "#6638bdf8"
+                            border.width: 1
+
+                            RowLayout {
+                                id: hubTopRow
+                                anchors.centerIn: parent
+                                spacing: 5
+                                Text { text: "🎬"; font.pixelSize: Theme.fontSizeSmall }
+                                Text {
+                                    text: "Media Hub"
+                                    color: parent.parent.isHubCurr ? "#ffffff" : Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.bold: true
+                                }
+                            }
+
+                            MouseArea {
+                                id: hubTopMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: if (backend) backend.navigateTo("mediahub://")
+                            }
+                        }
 
                         Rectangle {
                             readonly property bool isFavCurr: (backend ? backend.currentPath : "") === "favorites://"
@@ -1085,6 +1207,12 @@ ApplicationWindow {
             onTriggered: if (backend) backend.addTab(topStripMenu.targetPath)
         }
         StyledMenuItem {
+            iconGlyph: "📊"
+            text: "Storage Analyzer (Largest Items)"
+            font.bold: true
+            onTriggered: if (backend) backend.openStorageAnalyzer(topStripMenu.targetPath)
+        }
+        StyledMenuItem {
             iconGlyph: "💻"
             text: "Open in Terminal"
             onTriggered: if (backend) backend.openInTerminal(topStripMenu.targetPath)
@@ -1118,6 +1246,153 @@ ApplicationWindow {
             onTriggered: {
                 root.pendingDropUrls = []
                 root.pendingDropIndex = 0
+            }
+        }
+    }
+
+    // Rename Conflict Resolution Dialog (Revert vs Rename Conflicting Item)
+    Dialog {
+        id: renameConflictDialog
+        title: "Rename Conflict"
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: Math.min(Math.round(460 * Theme.scaleFactor), root.width - 24)
+
+        property string originalPath: ""
+        property string originalFileName: ""
+        property string desiredName: ""
+        property string conflictingPath: ""
+
+        background: Rectangle {
+            color: Theme.bgSurface
+            border.color: "#f59e0b"
+            border.width: 1
+            radius: Theme.radiusLarge
+        }
+
+        header: Rectangle {
+            height: Math.round(44 * Theme.scaleFactor)
+            color: Theme.bgCard
+            radius: Theme.radiusLarge
+
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 16
+                anchors.rightMargin: 16
+                spacing: 10
+
+                Text {
+                    text: "⚠️  Name Conflict in Folder"
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSizeTitle
+                    font.bold: true
+                }
+            }
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: Math.round(12 * Theme.scaleFactor)
+
+            Text {
+                Layout.fillWidth: true
+                text: "Another item named \"" + renameConflictDialog.desiredName + "\" already exists in this folder.\n\nWould you like to revert your rename, or give the existing conflicting item a new name so \"" + renameConflictDialog.originalFileName + "\" can take \"" + renameConflictDialog.desiredName + "\"?"
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSizeNormal
+                wrapMode: Text.WordWrap
+            }
+
+            ColumnLayout {
+                Layout.fillWidth: true
+                spacing: 4
+
+                Text {
+                    text: "New name for the existing conflicting item:"
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.bold: true
+                }
+
+                TextField {
+                    id: conflictNewNameInput
+                    Layout.fillWidth: true
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSizeNormal
+                    selectByMouse: true
+                    onAccepted: {
+                        if (backend && conflictNewNameInput.text.trim() !== "") {
+                            backend.resolveRenameByRenamingConflict(
+                                renameConflictDialog.originalPath,
+                                renameConflictDialog.desiredName,
+                                conflictNewNameInput.text
+                            )
+                            renameConflictDialog.close()
+                        }
+                    }
+                    background: Rectangle {
+                        implicitHeight: Math.round(32 * Theme.scaleFactor)
+                        color: Theme.bgCard
+                        radius: Theme.radiusSmall
+                        border.color: conflictNewNameInput.activeFocus ? Theme.accent : Theme.borderDim
+                        border.width: 1
+                    }
+                }
+            }
+
+            Rectangle { Layout.fillWidth: true; height: 1; color: Theme.borderDim }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+
+                Button {
+                    text: "↩ Revert / Cancel"
+                    onClicked: renameConflictDialog.close()
+                    contentItem: Text {
+                        text: parent.text
+                        color: Theme.textSecondary
+                        font.bold: true
+                        font.pixelSize: Theme.fontSizeSmall
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: Math.round(125 * Theme.scaleFactor)
+                        implicitHeight: Math.round(34 * Theme.scaleFactor)
+                        color: parent.hovered ? Theme.bgHover : "transparent"
+                        border.color: Theme.borderDim
+                        radius: Theme.radiusMedium
+                    }
+                }
+
+                Item { Layout.fillWidth: true }
+
+                Button {
+                    text: "✏️ Rename Conflicting Item & Apply"
+                    enabled: conflictNewNameInput.text.trim() !== "" && conflictNewNameInput.text.trim() !== renameConflictDialog.desiredName
+                    onClicked: {
+                        if (backend) {
+                            backend.resolveRenameByRenamingConflict(
+                                renameConflictDialog.originalPath,
+                                renameConflictDialog.desiredName,
+                                conflictNewNameInput.text
+                            )
+                        }
+                        renameConflictDialog.close()
+                    }
+                    contentItem: Text {
+                        text: parent.text
+                        color: parent.enabled ? "#ffffff" : Theme.textTertiary
+                        font.bold: true
+                        font.pixelSize: Theme.fontSizeSmall
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: Math.round(220 * Theme.scaleFactor)
+                        implicitHeight: Math.round(34 * Theme.scaleFactor)
+                        color: parent.enabled ? (parent.hovered ? Theme.accentHover : Theme.accent) : Theme.bgCard
+                        radius: Theme.radiusMedium
+                    }
+                }
             }
         }
     }

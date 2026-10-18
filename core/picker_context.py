@@ -1,4 +1,5 @@
 import fnmatch
+from pathlib import Path
 from PySide6.QtCore import QObject, Signal, Property, Slot
 
 
@@ -124,4 +125,18 @@ class PickerContext(QObject):
     @Slot(str)
     def setSelectedPath(self, path: str):
         self._selected_paths = [path] if path else []
+        self.selectedChanged.emit()
+
+    @Slot(list)
+    def setSelectedPaths(self, paths: list):
+        if self._mode == "folder":
+            self._selected_paths = [paths[0]] if paths else []
+        elif self._mode == "save":
+            if paths:
+                self._selected_paths = [paths[0]]
+                self._save_filename = Path(paths[0]).name
+        elif self._mode == "multi_file":
+            self._selected_paths = list(paths)
+        else:
+            self._selected_paths = [paths[0]] if paths else []
         self.selectedChanged.emit()

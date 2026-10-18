@@ -1,5 +1,9 @@
 import json
 import os
+import time
+import shutil
+import threading
+import fcntl
 from pathlib import Path
 
 
@@ -17,6 +21,8 @@ class ConfigManager:
         "show_hidden": False,
         "swap_mouse_buttons": False,
         "auto_play_hdr": True,
+        "mpv_auto_fullscreen": True,
+        "recent_watched_folders": [],
         "daemon_autostart": True,
         "restore_last_session": True,
         "startup_path": str(Path.home()),
@@ -31,6 +37,13 @@ class ConfigManager:
         "jellyfin_user_id": "",
         "jellyfin_stream_mode": False,
         "show_series_posters": True,
+        "anonymous_mode": False,
+        "media_hub_rows": [
+            {"id": "continue_watching", "title": "Continue Watching", "visible": True},
+            {"id": "recently_added", "title": "Recently Added Episodes", "visible": True},
+            {"id": "next_up", "title": "Next Up", "visible": True}
+        ],
+        "media_hub_hidden": {},
         "media_libraries": [],
         "movie_folders": [],
         "mpv_both_config": (
@@ -130,94 +143,134 @@ class ConfigManager:
         self._progress = self._load_progress()
         self._hdr_cache = self._load_hdr_cache()
 
+        self._lock = threading.RLock()
         self.config_dir.mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-
         self._config = self._load()
-        cur_hdr = self._config.get("mpv_hdr_config", "")
-        if "sub-color=0.68/0.68/0.68/1.0" not in cur_hdr:
-            self._config["mpv_hdr_config"] = self.DEFAULT_CONFIG["mpv_hdr_config"]
-            self.save()
-        cur_both = self._config.get("mpv_both_config", "")
-        if "slang=ar,ara,arabic" not in cur_both:
-            self._config["mpv_both_config"] = self.DEFAULT_CONFIG["mpv_both_config"]
-            self.save()
+
+    def _atomic_write_json(self, target_file: Path, data_snapshot: dict, indent=2, secure_perms: bool = False):
+        lock_path = target_file.with_suffix(target_file.suffix + ".lock")
+        tmp_path = target_file.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
+        try:
+            with open(lock_path, "w", encoding="utf-8") as lf:
+                fcntl.flock(lf, fcntl.LOCK_EX)
+                try:
+                    with open(tmp_path, "w", encoding="utf-8") as f:
+                        json.dump(data_snapshot, f, indent=indent)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    if secure_perms:
+                        try:
+                            os.chmod(tmp_path, 0o600)
+                        except OSError:
+                            pass
+                    os.replace(tmp_path, target_file)
+                finally:
+                    fcntl.flock(lf, fcntl.LOCK_UN)
+        except Exception:
+            if tmp_path.exists():
+                try:
+                    tmp_path.unlink()
+                except OSError:
+                    pass
 
     def _load(self):
         if self.config_file.exists():
             try:
                 with open(self.config_file, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    return {**self.DEFAULT_CONFIG, **data}
+                    if isinstance(data, dict):
+                        return {**self.DEFAULT_CONFIG, **data}
             except Exception:
-                pass
+                # Preserve corrupted config file as backup instead of silently overwriting it!
+                try:
+                    bak = self.config_file.with_suffix(f".corrupt.{int(time.time())}.bak")
+                    shutil.copy2(self.config_file, bak)
+                except Exception:
+                    pass
         return dict(self.DEFAULT_CONFIG)
 
     def save(self):
-        tmp_file = self.config_file.with_suffix(".tmp")
-        try:
-            with open(tmp_file, "w", encoding="utf-8") as f:
-                json.dump(self._config, f, indent=2)
-            os.replace(tmp_file, self.config_file)
-        except Exception:
-            if tmp_file.exists():
-                try:
-                    tmp_file.unlink()
-                except OSError:
-                    pass
+        with self._lock:
+            snapshot = dict(self._config)
+        self._atomic_write_json(self.config_file, snapshot, indent=2, secure_perms=True)
 
     def get(self, key, default=None):
-        return self._config.get(key, default)
+        with self._lock:
+            return self._config.get(key, default)
 
     def set(self, key, value):
-        self._config[key] = value
-        self.save()
+        with self._lock:
+            # Read-merge-write from disk so multi-instance changes are not clobbered
+            if self.config_file.exists():
+                try:
+                    with open(self.config_file, "r", encoding="utf-8") as f:
+                        disk_data = json.load(f)
+                        if isinstance(disk_data, dict):
+                            self._config.update(disk_data)
+                except Exception:
+                    pass
+            self._config[key] = value
+            snapshot = dict(self._config)
+        self._atomic_write_json(self.config_file, snapshot, indent=2, secure_perms=True)
 
     def _load_progress(self):
         if self.progress_file.exists():
             try:
                 with open(self.progress_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
             except Exception:
                 pass
         return {}
 
     def save_progress(self):
-        tmp = self.progress_file.with_suffix(".tmp")
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self._progress, f, indent=2)
-            os.replace(tmp, self.progress_file)
-        except Exception:
-            pass
+        with self._lock:
+            if self.progress_file.exists():
+                try:
+                    with open(self.progress_file, "r", encoding="utf-8") as f:
+                        disk_prog = json.load(f)
+                        if isinstance(disk_prog, dict):
+                            for k, v in disk_prog.items():
+                                if k not in self._progress or (
+                                    isinstance(v, dict) and isinstance(self._progress.get(k), dict) and
+                                    float(v.get("updated_at", 0.0)) > float(self._progress[k].get("updated_at", 0.0))
+                                ):
+                                    self._progress[k] = v
+                except Exception:
+                    pass
+            snapshot = dict(self._progress)
+        self._atomic_write_json(self.progress_file, snapshot, indent=2)
 
     def _load_hdr_cache(self):
         if hasattr(self, "hdr_cache_file") and self.hdr_cache_file.exists():
             try:
                 with open(self.hdr_cache_file, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
             except Exception:
                 pass
         return {}
 
     def save_hdr_cache(self):
-        tmp = self.hdr_cache_file.with_suffix(".tmp")
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(self._hdr_cache, f)
-            os.replace(tmp, self.hdr_cache_file)
-        except Exception:
-            pass
+        with self._lock:
+            snapshot = dict(self._hdr_cache)
+        self._atomic_write_json(self.hdr_cache_file, snapshot, indent=None)
 
     def get_cached_hdr(self, file_path: str, mtime: float):
-        entry = self._hdr_cache.get(file_path)
-        if isinstance(entry, dict) and entry.get("mtime") == mtime:
-            return entry.get("is_hdr")
+        with self._lock:
+            entry = self._hdr_cache.get(file_path)
+            if isinstance(entry, dict) and entry.get("mtime") == mtime:
+                return entry.get("is_hdr")
         return None
 
-    def set_cached_hdr(self, file_path: str, mtime: float, is_hdr: bool):
-        self._hdr_cache[file_path] = {"mtime": mtime, "is_hdr": bool(is_hdr)}
-        self.save_hdr_cache()
+    def set_cached_hdr(self, file_path: str, mtime: float, is_hdr: bool, flush: bool = True):
+        with self._lock:
+            self._hdr_cache[file_path] = {"mtime": mtime, "is_hdr": bool(is_hdr)}
+        if flush:
+            self.save_hdr_cache()
 
     def reload_progress_from_disk(self):
         self._progress = self._load_progress()

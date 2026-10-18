@@ -230,7 +230,7 @@ Dialog {
                     target: null
                     orientation: Qt.Vertical
                     onWheel: function(event) {
-                        var step = (event.angleDelta.y / 120.0) * Math.round(240 * Theme.scaleFactor)
+                        var step = (event.angleDelta.y / 120.0) * Math.round(480 * Theme.scaleFactor)
                         var maxY = Math.max(0, iconsGrid.contentHeight - iconsGrid.height)
                         iconsGrid.contentY = Math.max(0, Math.min(maxY, iconsGrid.contentY - step))
                         event.accepted = true

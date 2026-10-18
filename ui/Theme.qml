@@ -2,7 +2,7 @@ pragma Singleton
 import QtQuick
 
 QtObject {
-    readonly property real scaleFactor: 1.35
+    readonly property real scaleFactor: (typeof backend !== "undefined" && backend && backend.uiScaleFactor) ? backend.uiScaleFactor : 1.35
 
     // Base background with clean, high translucency
     readonly property color bgBase: (typeof backend !== "undefined" && backend && backend.transparentBlur) ? "#a8131317" : "#18181c"

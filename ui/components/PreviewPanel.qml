@@ -153,6 +153,7 @@ Rectangle {
                     color: Theme.textPrimary
                     font.pixelSize: Theme.fontSizeTitle
                     font.bold: true
+                    horizontalAlignment: Text.AlignLeft
                     wrapMode: Text.WrapAnywhere
                     maximumLineCount: 2
                     elide: Text.ElideRight
@@ -183,23 +184,115 @@ Rectangle {
                         text: parent.val
                         color: Theme.textSecondary
                         font.pixelSize: Theme.fontSizeSmall
+                        horizontalAlignment: Text.AlignLeft
                         elide: Text.ElideMiddle
                     }
                 }
 
+                DetailRow { label: "Selected"; val: (root.hasSelection && root.item.is_multi === true) ? (String(root.item.multi_count) + " Items") : "" }
                 DetailRow { label: "Episode"; val: root.hasSelection ? root.safeVal(root.item.episode_title) : "" }
                 DetailRow { label: "Rating"; val: (root.hasSelection && root.safeVal(root.item.rating) !== "") ? ("⭐ " + root.safeVal(root.item.rating)) : "" }
                 DetailRow { label: "Type"; val: root.hasSelection ? root.safeVal(root.item.type) : "Directory" }
-                DetailRow { label: "Size"; val: root.hasSelection ? root.safeVal(root.item.size) : "" }
+                DetailRow { label: (root.hasSelection && root.item.is_multi === true) ? "Total Size" : "Size"; val: root.hasSelection ? root.safeVal(root.item.size) : "" }
                 DetailRow { label: "Modified"; val: root.hasSelection ? root.safeVal(root.item.modified) : "" }
 
-                DetailRow { label: "Resolution"; val: root.hasSelection ? root.safeVal(root.item.resolution) : "" }
-                DetailRow { label: "Video Codec"; val: root.hasSelection ? root.safeVal(root.item.codec) : "" }
-                DetailRow { label: "Bit Depth"; val: root.hasSelection ? root.safeVal(root.item.bit_depth) : "" }
-                DetailRow { label: "Color Space"; val: root.hasSelection ? root.safeVal(root.item.color_profile) : "" }
-                DetailRow { label: "Framerate"; val: root.hasSelection ? root.safeVal(root.item.fps) : "" }
-                DetailRow { label: "Bitrate"; val: root.hasSelection ? root.safeVal(root.item.bitrate) : "" }
-                DetailRow { label: "Audio Codec"; val: root.hasSelection ? root.safeVal(root.item.audio_codec) : "" }
+                readonly property bool isVideoItem: root.hasSelection && root.item.is_video === true
+
+                DetailRow { visible: detailsCol.isVideoItem; label: "Resolution"; val: root.hasSelection ? (root.safeVal(root.item.resolution) || "…") : "" }
+                DetailRow { visible: detailsCol.isVideoItem; label: "Video Codec"; val: root.hasSelection ? (root.safeVal(root.item.codec) || "…") : "" }
+                DetailRow { visible: detailsCol.isVideoItem; label: "Bit Depth"; val: root.hasSelection ? (root.safeVal(root.item.bit_depth) || "…") : "" }
+                DetailRow { visible: detailsCol.isVideoItem; label: "Color Space"; val: root.hasSelection ? (root.safeVal(root.item.color_profile) || "…") : "" }
+                DetailRow { visible: detailsCol.isVideoItem; label: "Framerate"; val: root.hasSelection ? (root.safeVal(root.item.fps) || "…") : "" }
+                DetailRow { visible: detailsCol.isVideoItem; label: "Bitrate"; val: root.hasSelection ? (root.safeVal(root.item.bitrate) || "…") : "" }
+                DetailRow { visible: detailsCol.isVideoItem; label: "Audio Codec"; val: root.hasSelection ? (root.safeVal(root.item.audio_codec) || "…") : "" }
+
+                // Audio Languages Row (Arabic always first when present)
+                RowLayout {
+                    visible: detailsCol.isVideoItem
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    Text {
+                        Layout.preferredWidth: Math.min(85, root.width * 0.35)
+                        Layout.alignment: Qt.AlignTop
+                        text: "Audio Langs"
+                        color: Theme.textTertiary
+                        font.pixelSize: Theme.fontSizeSmall
+                        elide: Text.ElideRight
+                    }
+
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: 4
+
+                        Repeater {
+                            model: (root.hasSelection && root.item.audio_langs && root.item.audio_langs.length > 0) ? root.item.audio_langs : ["…"]
+                            delegate: Rectangle {
+                                readonly property bool isAr: String(modelData).toLowerCase().startsWith("ar")
+                                implicitWidth: aLangTxt.implicitWidth + 10
+                                implicitHeight: Math.round(18 * Theme.scaleFactor)
+                                radius: Theme.radiusSmall
+                                color: isAr ? "#2810b981" : Theme.bgSurface
+                                border.color: isAr ? "#10b981" : Theme.borderDim
+                                border.width: 1
+
+                                Text {
+                                    id: aLangTxt
+                                    anchors.centerIn: parent
+                                    text: String(modelData)
+                                    color: parent.isAr ? "#34d399" : Theme.textSecondary
+                                    font.pixelSize: Math.round(9 * Theme.scaleFactor)
+                                    font.bold: parent.isAr
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Subtitle Languages Row (Internal + External, Arabic always first when present)
+                RowLayout {
+                    visible: detailsCol.isVideoItem
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    Text {
+                        Layout.preferredWidth: Math.min(85, root.width * 0.35)
+                        Layout.alignment: Qt.AlignTop
+                        text: "Subtitles"
+                        color: Theme.textTertiary
+                        font.pixelSize: Theme.fontSizeSmall
+                        elide: Text.ElideRight
+                    }
+
+                    Flow {
+                        Layout.fillWidth: true
+                        spacing: 4
+
+                        Repeater {
+                            model: (root.hasSelection && root.item.sub_langs && root.item.sub_langs.length > 0) ? root.item.sub_langs : (root.hasSelection && root.safeVal(root.item.resolution) === "…" ? ["…"] : ["none"])
+                            delegate: Rectangle {
+                                readonly property string codeStr: String(modelData)
+                                readonly property bool isAr: codeStr.toLowerCase().startsWith("ar")
+                                readonly property bool isExt: codeStr.indexOf("ext") !== -1
+                                implicitWidth: sLangTxt.implicitWidth + 10
+                                implicitHeight: Math.round(18 * Theme.scaleFactor)
+                                radius: Theme.radiusSmall
+                                color: isAr ? "#2810b981" : (isExt ? "#250078d4" : Theme.bgSurface)
+                                border.color: isAr ? "#10b981" : (isExt ? Theme.accent : Theme.borderDim)
+                                border.width: 1
+
+                                Text {
+                                    id: sLangTxt
+                                    anchors.centerIn: parent
+                                    text: parent.codeStr
+                                    color: parent.isAr ? "#34d399" : (parent.isExt ? "#38bdf8" : Theme.textSecondary)
+                                    font.pixelSize: Math.round(9 * Theme.scaleFactor)
+                                    font.bold: parent.isAr || parent.isExt
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Jellyfin Synopsis / Overview Box
                 Rectangle {

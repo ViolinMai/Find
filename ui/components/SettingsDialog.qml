@@ -16,7 +16,10 @@ Dialog {
     property var hiddenItemsList: backend ? backend.getHiddenSidebarItems() : []
     property var customQAList: backend ? backend.getAllCustomQuickAccess() : []
     property var favoritesList: backend ? backend.getFavorites() : []
+    property var recentFoldersList: backend ? backend.getRecentWatchedFolders() : []
     property var mediaLibsList: backend ? backend.getMediaLibraries() : []
+    property var mediaHubRowsList: backend ? backend.getMediaHubRowConfig() : []
+    property int mediaHubHiddenCount: backend ? backend.getMediaHubHiddenCount() : 0
     property var savedDesktopList: backend ? backend.getSavedDesktopApps() : []
     property var defaultIconsMap: backend ? backend.getDefaultTypeIcons() : ({})
     property int selectedQAIndex: -1
@@ -59,6 +62,9 @@ Dialog {
                 } else if (root.activePickerTarget === "fav_add") {
                     backend.addToFavorites(selected)
                     root.favoritesList = backend.getFavorites()
+                } else if (root.activePickerTarget === "recent_folder_add") {
+                    backend.addRecentWatchedFolder(selected)
+                    root.recentFoldersList = backend.getRecentWatchedFolders()
                 } else if (root.activePickerTarget === "fonts_dir") {
                     backend.setFontsInstallDir(selected)
                 } else if (root.activePickerTarget === "startup_path") {
@@ -80,8 +86,17 @@ Dialog {
         function onMediaLibraryStateChanged() {
             if (backend) root.mediaLibsList = backend.getMediaLibraries()
         }
+        function onMediaHubConfigChanged() {
+            if (backend) {
+                root.mediaHubRowsList = backend.getMediaHubRowConfig()
+                root.mediaHubHiddenCount = backend.getMediaHubHiddenCount()
+            }
+        }
         function onFavoritesUpdated() {
             if (backend) root.favoritesList = backend.getFavorites()
+        }
+        function onRecentFoldersChanged() {
+            if (backend) root.recentFoldersList = backend.getRecentWatchedFolders()
         }
         function onSidebarUpdated() {
             if (backend) root.customQAList = backend.getAllCustomQuickAccess()
@@ -554,6 +569,76 @@ Dialog {
                     }
 
                     SectionCard {
+                        sectionTitle: "🕒 Recently Added Monitored Folders"
+                        sectionSubtitle: "Select specific folders to scan for 'Recently Added'. If no folders are added here, Find scans all standard folders and mounted drives across the system."
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            ActionBtn {
+                                text: "＋ Add Monitored Folder..."
+                                isPrimary: true
+                                onClicked: {
+                                    root.activePickerTarget = "recent_folder_add"
+                                    backend.openInternalPicker("folder", "", "Select Folder to Monitor for Recently Added")
+                                }
+                            }
+                            ActionBtn {
+                                text: "🌐 Reset to All System Drives"
+                                enabled: root.recentFoldersList.length > 0
+                                onClicked: if (backend) backend.clearRecentWatchedFolders()
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+
+                        Text {
+                            visible: root.recentFoldersList.length === 0
+                            text: "Currently monitoring: All System Drives & User Folders (Default)"
+                            color: Theme.textTertiary
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.bold: true
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+                            Repeater {
+                                model: root.recentFoldersList
+                                delegate: Rectangle {
+                                    Layout.fillWidth: true
+                                    height: Math.round(34 * Theme.scaleFactor)
+                                    radius: Theme.radiusSmall
+                                    color: Theme.bgSurface
+                                    border.color: Theme.borderDim
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 8
+                                        spacing: 8
+
+                                        Text { text: "🕒"; font.pixelSize: Theme.fontSizeNormal }
+                                        Text {
+                                            text: modelData
+                                            color: Theme.textPrimary
+                                            font.family: "monospace"
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            horizontalAlignment: Text.AlignLeft
+                                            Layout.fillWidth: true
+                                            elide: Text.ElideMiddle
+                                        }
+                                        ActionBtn {
+                                            text: "✕"
+                                            isDanger: true
+                                            onClicked: if (backend) backend.removeRecentWatchedFolder(modelData)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    SectionCard {
                         sectionTitle: "⚡ Quick Access Locations & Ordering"
                         sectionSubtitle: "Reorder, customize, or add standard Quick Access folders in the sidebar."
 
@@ -902,6 +987,21 @@ Dialog {
 
                         RowLayout {
                             Layout.fillWidth: true
+                            Text {
+                                text: "Auto Fullscreen in MPV when playing Media:"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeNormal
+                                font.bold: true
+                                Layout.fillWidth: true
+                            }
+                            Switch {
+                                checked: backend ? backend.mpvAutoFullscreen : true
+                                onToggled: if (backend) backend.setMpvAutoFullscreen(checked)
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
                             spacing: 8
                             Rectangle {
                                 width: 10; height: 10; radius: 5
@@ -925,6 +1025,92 @@ Dialog {
                             ActionBtn {
                                 text: "⏹ Stop"
                                 onClicked: if (backend) backend.stopMediaDaemon()
+                            }
+                        }
+                    }
+
+                    SectionCard {
+                        sectionTitle: "🎬 Media Hub Rows & Anonymous Mode (Shift+A)"
+                        sectionSubtitle: "Customize the order and visibility of rows inside Media Hub (mediahub://), and control Anonymous playback mode."
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "🕵️ Anonymous Mode (Shift+A) — Play Locally Without Sending Progress to Jellyfin:"
+                                color: Theme.textPrimary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeSmall
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                            }
+                            Switch {
+                                checked: backend ? backend.anonymousMode : false
+                                onToggled: if (backend) backend.setAnonymousMode(checked)
+                            }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Repeater {
+                                model: root.mediaHubRowsList
+                                delegate: Rectangle {
+                                    Layout.fillWidth: true
+                                    height: Math.round(38 * Theme.scaleFactor)
+                                    radius: Theme.radiusSmall
+                                    color: Theme.bgSurface
+                                    border.color: modelData.visible ? Theme.borderDim : "transparent"
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 12
+                                        anchors.rightMargin: 8
+                                        spacing: 8
+
+                                        Switch {
+                                            checked: Boolean(modelData.visible)
+                                            onToggled: if (backend) backend.setMediaHubRowVisible(modelData.id, checked)
+                                        }
+
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: modelData.title
+                                            color: modelData.visible ? Theme.textPrimary : Theme.textTertiary
+                                            font.bold: modelData.visible
+                                            font.pixelSize: Theme.fontSizeNormal
+                                            elide: Text.ElideRight
+                                        }
+
+                                        ActionBtn {
+                                            text: "▲"
+                                            enabled: index > 0
+                                            onClicked: if (backend) backend.moveMediaHubRow(index, index - 1)
+                                        }
+
+                                        ActionBtn {
+                                            text: "▼"
+                                            enabled: index < root.mediaHubRowsList.length - 1
+                                            onClicked: if (backend) backend.moveMediaHubRow(index, index + 1)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Text {
+                                Layout.fillWidth: true
+                                text: "Hidden Continue-Watching / Hub Items: " + root.mediaHubHiddenCount
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                            }
+                            ActionBtn {
+                                text: "👁️ Unhide All Hub Items"
+                                enabled: root.mediaHubHiddenCount > 0
+                                onClicked: if (backend) backend.clearMediaHubHiddenItems()
                             }
                         }
                     }
@@ -1147,6 +1333,11 @@ Dialog {
                                 font.pixelSize: Theme.fontSizeSmall
                                 onEditingFinished: if (backend) backend.setStartupPath(text)
                                 background: Rectangle { color: Theme.bgSurface; radius: 4; border.color: Theme.borderDim }
+                            }
+                            ActionBtn {
+                                text: "🎬 Media Hub"
+                                isPrimary: backend ? (backend.startupPath === "mediahub://") : false
+                                onClicked: if (backend) backend.setStartupPath("mediahub://")
                             }
                             ActionBtn {
                                 text: "⭐ Favorites"

@@ -8,6 +8,7 @@ import shutil
 import hashlib
 import subprocess
 import threading
+import fcntl
 import requests
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -91,15 +92,31 @@ def post_jellyfin_playback_event(jf_meta: dict, action: str, pos_sec: float, dur
     t.start()
 
 
+def get_runtime_dir() -> Path:
+    xdg_run = os.environ.get("XDG_RUNTIME_DIR", "")
+    if xdg_run and os.path.isdir(xdg_run):
+        rt = Path(xdg_run) / "find"
+    else:
+        rt = Path("/tmp") / f"find_runtime_{os.getuid()}"
+    rt.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(rt, 0o700)
+    except OSError:
+        pass
+    return rt
+
+
 def get_paths():
     xdg_config = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
     config_dir = Path(xdg_config) / "find"
     config_dir.mkdir(parents=True, exist_ok=True)
+    rt_dir = get_runtime_dir()
     return {
         "config_dir": config_dir,
         "config_file": config_dir / "config.json",
         "progress_file": config_dir / "media_progress.json",
-        "pid_file": Path("/tmp") / f"find_media_daemon_{os.getuid()}.pid",
+        "runtime_dir": rt_dir,
+        "pid_file": rt_dir / "find_media_daemon.pid",
     }
 
 
@@ -135,13 +152,26 @@ def load_json_safe(path: Path) -> dict:
 
 
 def save_json_atomic(path: Path, data: dict):
-    tmp = path.with_suffix(".tmp")
+    lock_path = path.with_suffix(path.suffix + ".lock")
+    tmp = path.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
+    snapshot = dict(data)
     try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
-        os.replace(tmp, path)
+        with open(lock_path, "w", encoding="utf-8") as lf:
+            fcntl.flock(lf, fcntl.LOCK_EX)
+            try:
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(snapshot, f, indent=2)
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, path)
+            finally:
+                fcntl.flock(lf, fcntl.LOCK_UN)
     except Exception:
-        pass
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def resolve_mpv_path(raw_path: str, fallback_dir: str) -> str:
@@ -272,21 +302,23 @@ def run_daemon_loop():
     sessions = {}
     active_hdr_sockets = set()
 
+    rt_dir = paths["runtime_dir"]
     try:
         while True:
-            # Discover active find_mpv_*.sock files in /tmp
-            tmp_dir = Path("/tmp")
-            meta_files = list(tmp_dir.glob("find_mpv_*.json"))
+            # Discover active find_mpv_*.json files in $XDG_RUNTIME_DIR/find (and /tmp fallback)
+            meta_files = list(rt_dir.glob("find_mpv_*.json")) + list(Path("/tmp").glob("find_mpv_*.json"))
             for mf in meta_files:
                 sock_name = mf.stem + ".sock"
-                sock_path = str(tmp_dir / sock_name)
+                sock_path = str(mf.parent / sock_name)
                 if sock_path not in sessions:
                     meta = load_json_safe(mf)
                     if meta:
                         init_file = os.path.abspath(meta.get("file_path", ""))
                         hdr_mode = bool(meta.get("hdr_mode", False))
                         init_pos = float(meta.get("initial_pos", 0.0) or 0.0)
-                        jf_meta = meta.get("jellyfin") if isinstance(meta.get("jellyfin"), dict) else {}
+                        anon_mode = bool(meta.get("anonymous_mode", False))
+                        seek_already_done = bool(meta.get("initial_seek_done", False))
+                        jf_meta = {} if anon_mode else (meta.get("jellyfin") if isinstance(meta.get("jellyfin"), dict) else {})
                         stream_map = meta.get("stream_to_local") if isinstance(meta.get("stream_to_local"), dict) else {}
                         sessions[sock_path] = {
                             "meta_file": str(mf),
@@ -295,7 +327,8 @@ def run_daemon_loop():
                             "base_dir": os.path.dirname(init_file) if init_file else "",
                             "hdr_mode": hdr_mode,
                             "initial_pos": init_pos,
-                            "initial_seek_done": False,
+                            "anonymous_mode": anon_mode,
+                            "initial_seek_done": seek_already_done,
                             "chapters_injected": False,
                             "jellyfin": jf_meta,
                             "stream_to_local": stream_map,
@@ -334,7 +367,7 @@ def run_daemon_loop():
                             resolved = resolve_mpv_path(cur_mpv_path, st["base_dir"])
 
                         if resolved and os.path.exists(resolved) and resolved != st["active_file"]:
-                            if st["duration"] > 0 and st["last_pos"] > 0:
+                            if not st.get("anonymous_mode") and st["duration"] > 0 and st["last_pos"] > 0:
                                 prev_done = st["eof_reached"] or (st["last_pos"] / st["duration"] >= 0.88)
                                 update_progress_entry(progress_file, st["active_file"], st["last_pos"], st["duration"], prev_done)
                                 if st.get("jellyfin"):
@@ -352,7 +385,7 @@ def run_daemon_loop():
                             jf_map = load_json_safe(jf_map_file)
                             cfg_data = load_json_safe(paths["config_file"])
                             next_jf = jf_map.get(resolved, {})
-                            if next_jf and cfg_data.get("jellyfin_enabled", True) and cfg_data.get("jellyfin_token"):
+                            if not st.get("anonymous_mode") and next_jf and cfg_data.get("jellyfin_enabled", True) and cfg_data.get("jellyfin_token"):
                                 st["jellyfin"] = {
                                     **next_jf,
                                     "api_url": cfg_data.get("jellyfin_url", ""),
@@ -398,6 +431,13 @@ def run_daemon_loop():
 
                             if not st["initial_seek_done"]:
                                 st["initial_seek_done"] = True
+                                # Persist initial_seek_done to meta file so daemon restarts NEVER re-seek an active mpv session!
+                                mf_p = Path(st.get("meta_file", ""))
+                                if mf_p.exists():
+                                    m_obj = load_json_safe(mf_p)
+                                    if m_obj:
+                                        m_obj["initial_seek_done"] = True
+                                        save_json_atomic(mf_p, m_obj)
                                 if st["initial_pos"] > 5.0 and st["initial_pos"] < st["duration"] * 0.95:
                                     send_ipc_cmd(s, ["set_property", "time-pos", st["initial_pos"]], 12)
                                     pos_val = st["initial_pos"]
@@ -412,7 +452,7 @@ def run_daemon_loop():
                             st["eof_reached"] = True
 
                         ext_sub = detect_external_sub(s, st["base_dir"])
-                        if ext_sub and ext_sub != st["last_sub"]:
+                        if not st.get("anonymous_mode") and ext_sub and ext_sub != st["last_sub"]:
                             st["last_sub"] = ext_sub
                             update_progress_entry(
                                 progress_file,
@@ -423,7 +463,7 @@ def run_daemon_loop():
                                 ext_sub=ext_sub
                             )
 
-                        if st["duration"] > 0 and st["last_pos"] > 0:
+                        if not st.get("anonymous_mode") and st["duration"] > 0 and st["last_pos"] > 0:
                             is_done = st["eof_reached"] or (st["last_pos"] / st["duration"] >= 0.90)
                             update_progress_entry(progress_file, st["active_file"], st["last_pos"], st["duration"], is_done)
                             if st.get("jellyfin"):
@@ -447,7 +487,7 @@ def run_daemon_loop():
                 st = sessions.pop(sp, None)
                 if not st:
                     continue
-                if st["duration"] > 0 and st["last_pos"] > 0:
+                if not st.get("anonymous_mode") and st["duration"] > 0 and st["last_pos"] > 0:
                     is_done = st["eof_reached"] or (st["last_pos"] / st["duration"] >= 0.90)
                     update_progress_entry(progress_file, st["active_file"], st["last_pos"], st["duration"], is_done)
                     if st.get("jellyfin"):
@@ -464,7 +504,7 @@ def run_daemon_loop():
                     except OSError:
                         pass
                 pl_path = st.get("playlist_file", "")
-                if pl_path and pl_path.startswith("/tmp/") and os.path.exists(pl_path):
+                if pl_path and os.path.exists(pl_path):
                     try:
                         os.unlink(pl_path)
                     except OSError:

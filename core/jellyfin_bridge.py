@@ -14,6 +14,7 @@ class JellyfinSignals(QObject):
     folderMetadataReady = Signal(str, dict)
     itemDetailsReady = Signal(str, dict)
     connectionTested = Signal(bool, str)
+    mediaHubDataReady = Signal(list)
 
 
 FIELDS = (
@@ -266,6 +267,38 @@ class JellyfinBridge:
         if entry and entry.get("poster") and not os.path.exists(entry["poster"]):
             entry["poster"] = ""
         return entry
+
+    def clear_cache_for_path(self, target_path: str) -> int:
+        if not target_path:
+            return 0
+        norm = os.path.abspath(target_path)
+        prefix = norm.rstrip(os.sep) + os.sep
+        keys_to_remove = [
+            k for k in list(self._path_map.keys())
+            if k == norm or k.startswith(prefix)
+        ]
+        removed = 0
+        for k in keys_to_remove:
+            meta = self._path_map.pop(k, None)
+            removed += 1
+            if isinstance(meta, dict):
+                poster_p = meta.get("poster", "")
+                if poster_p and os.path.exists(poster_p):
+                    try:
+                        os.unlink(poster_p)
+                    except OSError:
+                        pass
+                iid = meta.get("item_id", "")
+                if iid:
+                    cand_poster = self.posters_dir / f"{iid}_rounded.png"
+                    if cand_poster.exists():
+                        try:
+                            cand_poster.unlink()
+                        except OSError:
+                            pass
+        if removed > 0:
+            self.save_cache()
+        return removed
 
     def update_local_cached_progress(self, file_path: str, pos_sec: float, dur_sec: float, watched: bool):
         norm = os.path.abspath(file_path) if file_path else ""
@@ -638,12 +671,13 @@ class JellyfinBridge:
 
                 for loc_abs, loc_name in local_video_files.items():
                     matched_itm = by_exact_path.get(loc_abs) or by_filename.get(loc_name)
-                    if not matched_itm and is_movie_folder:
+                    if not matched_itm:
                         stem_key = self._normalize_match_key(Path(loc_name).stem, strip_season=True)
                         matched_itm = by_clean_title.get(stem_key)
 
                     if matched_itm:
-                        meta = self._extract_item_metadata(matched_itm, fetch_poster=is_movie_folder)
+                        want_poster = is_movie_folder or (str(matched_itm.get("Type") or "") == "Movie")
+                        meta = self._extract_item_metadata(matched_itm, fetch_poster=want_poster)
                         local_prog = self.config_mgr.get_media_progress(loc_abs)
                         local_pos = float(local_prog.get("position", 0.0) or 0.0)
                         local_dur = float(local_prog.get("duration", 0.0) or 0.0)
@@ -728,7 +762,9 @@ class JellyfinBridge:
                             timeout=2.0
                         )
                         if res.status_code == 200:
-                            cached = self._extract_item_metadata(res.json(), fetch_poster=False)
+                            rj = res.json()
+                            is_mov = (str(rj.get("Type") or "") == "Movie")
+                            cached = self._extract_item_metadata(rj, fetch_poster=is_mov)
                             self._path_map[norm_p] = cached
                             self.save_cache()
                     else:
@@ -896,11 +932,27 @@ class JellyfinBridge:
             else:
                 m3u_lines.append(lp)
 
+        xdg_run = os.environ.get("XDG_RUNTIME_DIR", "")
+        if xdg_run and os.path.isdir(xdg_run):
+            rt_dir = Path(xdg_run) / "find"
+        else:
+            rt = Path("/tmp") / f"find_runtime_{os.getuid()}"
+            rt_dir = rt
+        rt_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(rt_dir, 0o700)
+        except OSError:
+            pass
+
         m3u_name = f"{base_id or ('find_pl_' + str(int(time.time())))}.m3u8"
-        m3u_path = os.path.join("/tmp", m3u_name)
+        m3u_path = str(rt_dir / m3u_name)
         try:
             with open(m3u_path, "w", encoding="utf-8") as f:
                 f.write("\n".join(m3u_lines) + "\n")
+            try:
+                os.chmod(m3u_path, 0o600)
+            except OSError:
+                pass
             return m3u_path, start_idx, stream_to_local
         except Exception:
             return clicked_abs, 0, stream_to_local
@@ -930,6 +982,107 @@ class JellyfinBridge:
         cleaned = cls._clean_search_title(raw_name, strip_season=strip_season).lower()
         cleaned = re.sub(r'[^a-z0-9\u0600-\u06ff\u3040-\u30ff\u4e00-\u9fff\s]', ' ', cleaned)
         return re.sub(r'\s+', ' ', cleaned).strip()
+
+
+    def resolve_server_item_to_local_path(self, itm: dict) -> str:
+        srv_p = str(itm.get("Path") or "").strip()
+        if srv_p and os.path.exists(srv_p):
+            return os.path.abspath(srv_p)
+
+        iid = str(itm.get("Id") or "")
+        for loc_p, meta in list(self._path_map.items()):
+            if isinstance(meta, dict) and meta.get("item_id") == iid and os.path.exists(loc_p):
+                return loc_p
+
+        if srv_p:
+            fname = Path(srv_p).name
+            parent_name = Path(srv_p).parent.name.lower()
+            libs = self.config_mgr.get("media_libraries", [])
+            for lib in libs:
+                lp = lib.get("path", "") if isinstance(lib, dict) else str(lib)
+                if not lp or not os.path.isdir(lp):
+                    continue
+                for root_d, _, files in os.walk(lp):
+                    if fname in files:
+                        cand = os.path.join(root_d, fname)
+                        if Path(root_d).name.lower() == parent_name or os.path.exists(cand):
+                            return os.path.abspath(cand)
+        return ""
+
+    def fetch_resume_items_sync(self) -> list:
+        if not self._can_attempt_network():
+            return []
+        uid = self.ensure_user_id()
+        if not uid:
+            return []
+        self._update_headers()
+        out = []
+        try:
+            res = self.session.get(
+                f"{self.api_url}/Users/{uid}/Items/Resume",
+                params={
+                    "Recursive": "true",
+                    "Fields": FIELDS,
+                    "MediaTypes": "Video",
+                    "Limit": 30
+                },
+                timeout=4.0
+            )
+            if res.status_code == 200:
+                for itm in res.json().get("Items", []):
+                    loc_path = self.resolve_server_item_to_local_path(itm)
+                    if not loc_path or not os.path.exists(loc_path):
+                        continue
+                    meta = self._extract_item_metadata(itm, fetch_poster=True)
+                    self._path_map[loc_path] = meta
+                    srv_ts = float(meta.get("server_updated_at", 0.0) or time.time())
+                    local_prog = self.config_mgr.get_media_progress(loc_path)
+                    if srv_ts > float(local_prog.get("updated_at", 0.0) or 0.0) + 2.0:
+                        self.config_mgr.set_media_progress(
+                            loc_path,
+                            meta["position"],
+                            meta["duration"] if meta["duration"] > 0 else 100.0,
+                            watched=meta["watched"],
+                            updated_at=srv_ts
+                        )
+                    out.append((loc_path, meta))
+                if out:
+                    self.save_cache()
+        except Exception:
+            pass
+        return out
+
+    def fetch_next_up_items_sync(self) -> list:
+        if not self._can_attempt_network():
+            return []
+        uid = self.ensure_user_id()
+        if not uid:
+            return []
+        self._update_headers()
+        out = []
+        try:
+            res = self.session.get(
+                f"{self.api_url}/Shows/NextUp",
+                params={
+                    "UserId": uid,
+                    "Fields": FIELDS,
+                    "Limit": 30
+                },
+                timeout=4.0
+            )
+            if res.status_code == 200:
+                for itm in res.json().get("Items", []):
+                    loc_path = self.resolve_server_item_to_local_path(itm)
+                    if not loc_path or not os.path.exists(loc_path):
+                        continue
+                    meta = self._extract_item_metadata(itm, fetch_poster=True)
+                    self._path_map[loc_path] = meta
+                    out.append((loc_path, meta))
+                if out:
+                    self.save_cache()
+        except Exception:
+            pass
+        return out
 
 
 class JellyfinFolderSyncTask(QRunnable):

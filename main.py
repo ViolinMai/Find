@@ -1,30 +1,87 @@
 import sys
 import os
+import json
+import logging
+import traceback
 import argparse
 from urllib.parse import unquote, urlparse
 from pathlib import Path
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
-from PySide6.QtCore import QUrl
+from PySide6.QtCore import QUrl, qInstallMessageHandler
 from PySide6.QtQuick import QQuickWindow
 from PySide6.QtQuickControls2 import QQuickStyle
+from PySide6.QtNetwork import QLocalSocket, QLocalServer
 from core.backend import FileManagerBackend
+
+
+def _setup_logging():
+    xdg_cache = os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))
+    log_dir = Path(xdg_cache) / "find"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "error.log"
+    logging.basicConfig(
+        filename=str(log_file),
+        level=logging.WARNING,
+        format="%(asctime)s [%(levelname)s] %(message)s"
+    )
+
+    def _handle_exception(exc_type, exc_value, exc_tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc_value, exc_tb)
+            return
+        logging.error("Uncaught exception:\n%s", "".join(traceback.format_exception(exc_type, exc_value, exc_tb)))
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+    sys.excepthook = _handle_exception
+
+
+def _get_ipc_server_name() -> str:
+    return f"find_fm_single_instance_{os.getuid()}"
+
+
+def _try_send_to_existing_instance(paths: list, select_mode: bool) -> bool:
+    sock = QLocalSocket()
+    sock.connectToServer(_get_ipc_server_name())
+    if not sock.waitForConnected(250):
+        return False
+    payload = json.dumps({
+        "action": "select" if select_mode else "open",
+        "paths": paths
+    }).encode("utf-8") + b"\n"
+    sock.write(payload)
+    sock.flush()
+    sock.waitForBytesWritten(300)
+    sock.disconnectFromServer()
+    return True
 
 
 def _normalize_cli_target(raw_arg: str) -> str:
     if not raw_arg:
         return ""
     s = str(raw_arg).strip()
-    if s in ("recent://", "trash://"):
+    if s in ("recent://", "trash://", "favorites://", "mediahub://") or s.startswith("analyzer://"):
         return s
+    if s.startswith("trash:///") or s.startswith("trash:/"):
+        return "trash://"
     if s.startswith("file://"):
         parsed = urlparse(s)
         s = unquote(parsed.path) or s[7:]
+    elif "://" in s:
+        return s
     return os.path.abspath(os.path.expanduser(os.path.expandvars(s)))
+
+
+def _qt_message_filter(mode, context, message):
+    if "qt.qpa.wayland.textinput" in message or "disableSurface" in message:
+        return
+    sys.stderr.write(f"{message}\n")
 
 
 def main():
     os.environ["QT_QPA_PLATFORM"] = "wayland;xcb"
+    os.environ["QT_LOGGING_RULES"] = "qt.qpa.wayland.textinput=false;qt.qpa.wayland.textinput.warning=false"
+    qInstallMessageHandler(_qt_message_filter)
 
     QQuickWindow.setDefaultAlphaBuffer(True)
     QQuickStyle.setStyle("Basic")
@@ -41,18 +98,50 @@ def main():
     parser.add_argument("paths", nargs="*", help="Initial path(s) or URI(s)")
 
     args, unknown = parser.parse_known_args()
+    _setup_logging()
+
+    is_picker_launch = bool(args.picker or args.folder or args.save)
+    cleaned_paths = [_normalize_cli_target(p) for p in (args.paths or []) if p]
 
     app = QGuiApplication(sys.argv)
     app.setApplicationName("Find")
     app.setOrganizationName("Find")
     app.setDesktopFileName("find")
 
+    # Single-instance check for normal file manager launches (skip for standalone picker dialogs)
+    if not is_picker_launch:
+        if _try_send_to_existing_instance(cleaned_paths, bool(args.select)):
+            sys.exit(0)
+
     engine = QQmlApplicationEngine()
-    backend = FileManagerBackend(app)
+    backend = FileManagerBackend(app, is_picker_mode=is_picker_launch)
 
-    cleaned_paths = [_normalize_cli_target(p) for p in (args.paths or []) if p]
+    ipc_server = None
+    if not is_picker_launch:
+        srv_name = _get_ipc_server_name()
+        QLocalServer.removeServer(srv_name)
+        ipc_server = QLocalServer(app)
+        if ipc_server.listen(srv_name):
+            def _on_new_ipc_conn():
+                while ipc_server.hasPendingConnections():
+                    client = ipc_server.nextPendingConnection()
+                    if client:
+                        def _read_client(c=client):
+                            try:
+                                raw = bytes(c.readAll()).decode("utf-8", errors="ignore").strip()
+                                for ln in raw.splitlines():
+                                    msg = json.loads(ln)
+                                    p_list = msg.get("paths") or []
+                                    act = msg.get("action", "open")
+                                    backend.handleExternalIpcRequest(p_list, act == "select")
+                            except Exception:
+                                pass
+                            finally:
+                                c.deleteLater()
+                        client.readyRead.connect(_read_client)
+            ipc_server.newConnection.connect(_on_new_ipc_conn)
 
-    if args.picker or args.folder or args.save:
+    if is_picker_launch:
         backend._launched_as_picker = True
         if args.save:
             mode = "save"
@@ -84,10 +173,15 @@ def main():
         backend.openInternalPicker(mode, args.filter, title, suggested_name)
     elif cleaned_paths:
         first_p = cleaned_paths[0]
-        if os.path.isdir(first_p):
+        if args.select and os.path.exists(first_p):
+            parent_d = os.path.dirname(first_p)
+            if os.path.isdir(parent_d):
+                backend.navigateTo(parent_d)
+                backend.selectMultiplePaths(cleaned_paths)
+        elif os.path.isdir(first_p) or first_p in ("recent://", "trash://", "favorites://", "mediahub://") or first_p.startswith("analyzer://"):
             backend.navigateTo(first_p)
             for extra_p in cleaned_paths[1:]:
-                if os.path.isdir(extra_p):
+                if os.path.isdir(extra_p) or extra_p in ("recent://", "trash://", "favorites://", "mediahub://") or extra_p.startswith("analyzer://"):
                     backend.addTab(extra_p)
         elif os.path.exists(first_p):
             parent_d = os.path.dirname(first_p)
@@ -106,6 +200,7 @@ def main():
         sys.exit(-1)
 
     exit_code = app.exec()
+    backend.shutdownCleanup()
     del engine
     sys.exit(exit_code)
 

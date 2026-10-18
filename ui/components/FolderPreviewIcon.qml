@@ -75,6 +75,8 @@ Item {
                 visible: parent.firstItem !== null && (parent.firstItem.kind === "video" || parent.firstItem.kind === "image") && parent.firstItem.thumb !== ""
                 source: visible ? "file://" + parent.firstItem.thumb : ""
                 fillMode: Image.PreserveAspectCrop
+                sourceSize.width: 256
+                sourceSize.height: 256
                 asynchronous: true
                 mipmap: true
             }
@@ -153,6 +155,8 @@ Item {
                         visible: (modelData.kind === "video" || modelData.kind === "image") && modelData.thumb !== ""
                         source: visible ? "file://" + modelData.thumb : ""
                         fillMode: Image.PreserveAspectCrop
+                        sourceSize.width: 160
+                        sourceSize.height: 160
                         asynchronous: true
                         mipmap: true
                     }

@@ -10,9 +10,18 @@ RowLayout {
     property var appWindow: null
     property bool isEditingPath: false
     property bool isSearchActive: false
-    readonly property bool isCompactBar: width < Math.round(680 * Theme.scaleFactor)
-    readonly property bool isNarrowBar: width < Math.round(490 * Theme.scaleFactor)
-    readonly property bool isUltraCompactBar: width < Math.round(370 * Theme.scaleFactor)
+
+    // Strict Priority Visibility Thresholds (Least Important hides first -> Most Important hides last):
+    // Priority Order: 1. Path (Always) > 2. Search > 3. Settings > 4. Refresh > 5. New > 6. Toggle Columns (Sidebar/Preview)
+    readonly property bool showColumnToggles: width >= Math.round(740 * Theme.scaleFactor)
+    readonly property bool showNewBtn: width >= Math.round(580 * Theme.scaleFactor)
+    readonly property bool showRefreshBtn: width >= Math.round(450 * Theme.scaleFactor)
+    readonly property bool showSettingsBtn: width >= Math.round(340 * Theme.scaleFactor)
+    readonly property bool showSearchBtn: width >= Math.round(220 * Theme.scaleFactor)
+
+    readonly property bool isCompactBar: width < Math.round(720 * Theme.scaleFactor)
+    readonly property bool isNarrowBar: !showColumnToggles
+    readonly property bool isUltraCompactBar: !showNewBtn
 
     function focusPathInput() {
         root.isEditingPath = true
@@ -86,6 +95,7 @@ RowLayout {
         Layout.alignment: Qt.AlignVCenter
 
         ToolBtn {
+            visible: root.showColumnToggles
             iconText: "◧"
             isActiveToggle: root.appWindow ? root.appWindow.userShowSidebar : true
             onClicked: {
@@ -102,24 +112,25 @@ RowLayout {
         }
 
         ToolBtn {
+            visible: root.showNewBtn
             iconText: "←"
             isEnabled: backend ? backend.canGoBack : false
             onClicked: if (backend) backend.goBack()
         }
         ToolBtn {
-            visible: !root.isUltraCompactBar
+            visible: root.showColumnToggles
             iconText: "→"
             isEnabled: backend ? backend.canGoForward : false
             onClicked: if (backend) backend.goForward()
         }
         ToolBtn {
-            visible: !root.isUltraCompactBar
+            visible: root.showColumnToggles
             iconText: "↑"
             isEnabled: true
             onClicked: if (backend) backend.goUp()
         }
         ToolBtn {
-            visible: !root.isCompactBar
+            visible: root.showRefreshBtn
             iconText: "⟳"
             isEnabled: true
             onClicked: if (backend) backend.syncJellyfinAndRefresh()
@@ -229,6 +240,8 @@ RowLayout {
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignVCenter
                 visible: root.isEditingPath && !root.isSearchActive
+                focus: visible
+                enabled: visible
                 text: backend ? backend.currentPath : ""
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontSizeNormal
@@ -257,6 +270,8 @@ RowLayout {
                 Layout.fillWidth: true
                 Layout.alignment: Qt.AlignVCenter
                 visible: root.isSearchActive
+                focus: visible
+                enabled: visible
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontSizeNormal
                 verticalAlignment: TextInput.AlignVCenter
@@ -274,57 +289,318 @@ RowLayout {
                 }
             }
 
-            // Search Scope Selector Pills ("Here" vs "Everywhere")
-            RowLayout {
+            // Unified Search Filters Button + Rich Filter Popup
+            Rectangle {
+                id: searchFiltersBtn
                 visible: root.isSearchActive
-                spacing: 4
                 Layout.alignment: Qt.AlignVCenter
+                readonly property int filterCount: backend ? backend.activeSearchFilterCount : 0
+                implicitWidth: filterBtnRow.implicitWidth + Math.round(14 * Theme.scaleFactor)
+                implicitHeight: Math.round(24 * Theme.scaleFactor)
+                radius: Theme.radiusSmall
+                color: (searchFiltersPopup.visible || filterCount > 0) ? Theme.accent : (filterBtnMouse.containsMouse ? Theme.bgHover : Theme.bgCard)
+                border.color: (searchFiltersPopup.visible || filterCount > 0) ? Theme.accentHover : Theme.borderDim
+                border.width: 1
 
-                Rectangle {
-                    readonly property bool isHere: backend ? (backend.searchScope === "here") : true
-                    implicitWidth: hereTxt.implicitWidth + 12
-                    implicitHeight: Math.round(22 * Theme.scaleFactor)
-                    radius: Theme.radiusSmall
-                    color: isHere ? Theme.accent : Theme.bgCard
-                    border.color: isHere ? Theme.accentHover : Theme.borderDim
-                    border.width: 1
+                RowLayout {
+                    id: filterBtnRow
+                    anchors.centerIn: parent
+                    spacing: 5
 
                     Text {
-                        id: hereTxt
-                        anchors.centerIn: parent
-                        text: "📁 Here"
-                        color: parent.isHere ? "#ffffff" : Theme.textSecondary
+                        text: "⚙️ Filters" + (searchFiltersBtn.filterCount > 0 ? (" (" + searchFiltersBtn.filterCount + ")") : " ▾")
+                        color: (searchFiltersPopup.visible || searchFiltersBtn.filterCount > 0) ? "#ffffff" : Theme.textPrimary
                         font.pixelSize: Math.round(9.5 * Theme.scaleFactor)
-                        font.bold: parent.isHere
-                    }
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: if (backend) backend.setSearchScope("here")
+                        font.bold: true
                     }
                 }
 
-                Rectangle {
-                    readonly property bool isEverywhere: backend ? (backend.searchScope === "everywhere") : false
-                    implicitWidth: everyTxt.implicitWidth + 12
-                    implicitHeight: Math.round(22 * Theme.scaleFactor)
-                    radius: Theme.radiusSmall
-                    color: isEverywhere ? Theme.accent : Theme.bgCard
-                    border.color: isEverywhere ? Theme.accentHover : Theme.borderDim
-                    border.width: 1
-
-                    Text {
-                        id: everyTxt
-                        anchors.centerIn: parent
-                        text: "🌐 Everywhere"
-                        color: parent.isEverywhere ? "#ffffff" : Theme.textSecondary
-                        font.pixelSize: Math.round(9.5 * Theme.scaleFactor)
-                        font.bold: parent.isEverywhere
+                MouseArea {
+                    id: filterBtnMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        if (searchFiltersPopup.visible) {
+                            searchFiltersPopup.close()
+                        } else {
+                            searchFiltersPopup.open()
+                        }
                     }
-                    MouseArea {
-                        anchors.fill: parent
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: if (backend) backend.setSearchScope("everywhere")
+                }
+
+                Popup {
+                    id: searchFiltersPopup
+                    y: searchFiltersBtn.height + 6
+                    x: Math.min(0, searchFiltersBtn.width - width)
+                    width: Math.round(350 * Theme.scaleFactor)
+                    padding: Math.round(12 * Theme.scaleFactor)
+                    closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutsideParent
+
+                    background: Rectangle {
+                        color: "#1e1e26"
+                        radius: Theme.radiusLarge
+                        border.color: Theme.accent
+                        border.width: 1
+                    }
+
+                    contentItem: ColumnLayout {
+                        spacing: Math.round(10 * Theme.scaleFactor)
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "🔍 Search Filters & Match Options"
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeNormal
+                                font.bold: true
+                                Layout.fillWidth: true
+                            }
+                            Rectangle {
+                                visible: backend ? (backend.activeSearchFilterCount > 0) : false
+                                implicitWidth: resetFltrTxt.implicitWidth + 12
+                                implicitHeight: Math.round(20 * Theme.scaleFactor)
+                                radius: Theme.radiusSmall
+                                color: resetFltrMouse.containsMouse ? "#35f87171" : Theme.bgCard
+                                border.color: "#55f87171"
+                                Text {
+                                    id: resetFltrTxt
+                                    anchors.centerIn: parent
+                                    text: "↺ Reset"
+                                    color: Theme.textDanger
+                                    font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
+                                    font.bold: true
+                                }
+                                MouseArea {
+                                    id: resetFltrMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        if (backend) backend.resetSearchFilters()
+                                        extFilterInput.text = ""
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.borderDim }
+
+                        // 1. Search Scope
+                        Text {
+                            text: "1. Search Scope (Location)"
+                            color: Theme.textSecondary
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.bold: true
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+
+                            Repeater {
+                                model: [
+                                    { key: "current_only", icon: "📂", label: "Current Folder Only (No Subfolders)" },
+                                    { key: "recursive", icon: "🗂️", label: "Current Folder & Subfolders" },
+                                    { key: "everywhere", icon: "🌐", label: "Everywhere (All Indexed Drives)" }
+                                ]
+                                delegate: Rectangle {
+                                    readonly property bool isChosen: backend ? (backend.searchScope === modelData.key) : (modelData.key === "recursive")
+                                    Layout.fillWidth: true
+                                    height: Math.round(28 * Theme.scaleFactor)
+                                    radius: Theme.radiusSmall
+                                    color: isChosen ? "#300078d4" : (scopeOptMouse.containsMouse ? Theme.bgHover : Theme.bgCard)
+                                    border.color: isChosen ? Theme.accent : Theme.borderDim
+                                    border.width: 1
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+                                        spacing: 8
+                                        Text { text: modelData.icon; font.pixelSize: Theme.fontSizeSmall }
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: modelData.label
+                                            color: parent.parent.isChosen ? Theme.textPrimary : Theme.textSecondary
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            font.bold: parent.parent.isChosen
+                                        }
+                                        Text {
+                                            visible: parent.parent.isChosen
+                                            text: "✔"
+                                            color: Theme.accent
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            font.bold: true
+                                        }
+                                    }
+                                    MouseArea {
+                                        id: scopeOptMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: if (backend) backend.setSearchScope(modelData.key)
+                                    }
+                                }
+                            }
+                        }
+
+                        // 2. Item Type Filter
+                        Text {
+                            text: "2. Target Type"
+                            color: Theme.textSecondary
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.bold: true
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Repeater {
+                                model: [
+                                    { key: "all", label: "All Items" },
+                                    { key: "folders", label: "📁 Folders Only" },
+                                    { key: "files", label: "📄 Files Only" }
+                                ]
+                                delegate: Rectangle {
+                                    readonly property bool isChosen: backend ? (backend.searchTargetType === modelData.key) : (modelData.key === "all")
+                                    Layout.fillWidth: true
+                                    height: Math.round(26 * Theme.scaleFactor)
+                                    radius: Theme.radiusSmall
+                                    color: isChosen ? Theme.accent : (typeOptMouse.containsMouse ? Theme.bgHover : Theme.bgCard)
+                                    border.color: isChosen ? Theme.accentHover : Theme.borderDim
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        color: parent.isChosen ? "#ffffff" : Theme.textSecondary
+                                        font.pixelSize: Math.round(9 * Theme.scaleFactor)
+                                        font.bold: parent.isChosen
+                                    }
+                                    MouseArea {
+                                        id: typeOptMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: if (backend) backend.setSearchTargetType(modelData.key)
+                                    }
+                                }
+                            }
+                        }
+
+                        // 3. Matching Mode
+                        Text {
+                            text: "3. Matching Method"
+                            color: Theme.textSecondary
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.bold: true
+                        }
+
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 5
+                            Repeater {
+                                model: [
+                                    { key: "contains", label: "Contains" },
+                                    { key: "starts_with", label: "Starts With" },
+                                    { key: "ends_with", label: "Ends With" },
+                                    { key: "exact", label: "Exact Name" },
+                                    { key: "regex", label: "Regex (.*)" }
+                                ]
+                                delegate: Rectangle {
+                                    readonly property bool isChosen: backend ? (backend.searchMatchMode === modelData.key) : (modelData.key === "contains")
+                                    implicitWidth: mLbl.implicitWidth + 14
+                                    height: Math.round(25 * Theme.scaleFactor)
+                                    radius: Theme.radiusSmall
+                                    color: isChosen ? Theme.accent : (mOptMouse.containsMouse ? Theme.bgHover : Theme.bgCard)
+                                    border.color: isChosen ? Theme.accentHover : Theme.borderDim
+
+                                    Text {
+                                        id: mLbl
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        color: parent.isChosen ? "#ffffff" : Theme.textSecondary
+                                        font.pixelSize: Math.round(9 * Theme.scaleFactor)
+                                        font.bold: parent.isChosen
+                                    }
+                                    MouseArea {
+                                        id: mOptMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: if (backend) backend.setSearchMatchMode(modelData.key)
+                                    }
+                                }
+                            }
+                        }
+
+                        // 4. File Extensions Filter
+                        Text {
+                            text: "4. Specific File Extension(s)"
+                            color: Theme.textSecondary
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.bold: true
+                        }
+
+                        TextField {
+                            id: extFilterInput
+                            Layout.fillWidth: true
+                            text: backend ? backend.searchExtFilter : ""
+                            placeholderText: "e.g. mkv, mp4, py, rs, zip (Empty = All)"
+                            color: Theme.textPrimary
+                            font.family: "monospace"
+                            font.pixelSize: Theme.fontSizeSmall
+                            selectByMouse: true
+                            onTextChanged: if (backend) backend.setSearchExtFilter(text)
+                            background: Rectangle {
+                                implicitHeight: Math.round(28 * Theme.scaleFactor)
+                                color: Theme.bgSurface
+                                radius: Theme.radiusSmall
+                                border.color: extFilterInput.activeFocus ? Theme.accent : Theme.borderDim
+                            }
+                        }
+
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 4
+                            Repeater {
+                                model: [
+                                    { label: "🎬 Video", exts: "mkv,mp4,webm,avi,mov" },
+                                    { label: "🖼️ Images", exts: "png,jpg,jpeg,webp,gif,svg" },
+                                    { label: "🎵 Audio", exts: "mp3,flac,wav,ogg,m4a" },
+                                    { label: "💻 Code", exts: "py,rs,qml,json,sh,c,cpp" },
+                                    { label: "📦 Archives", exts: "zip,7z,rar,tar,gz,xz" }
+                                ]
+                                delegate: Rectangle {
+                                    readonly property bool isPresetActive: extFilterInput.text === modelData.exts
+                                    implicitWidth: prTxt.implicitWidth + 10
+                                    height: Math.round(22 * Theme.scaleFactor)
+                                    radius: Theme.radiusSmall
+                                    color: isPresetActive ? "#350078d4" : Theme.bgSurface
+                                    border.color: isPresetActive ? Theme.accent : Theme.borderDim
+
+                                    Text {
+                                        id: prTxt
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        color: parent.isPresetActive ? Theme.textPrimary : Theme.textTertiary
+                                        font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
+                                        font.bold: parent.isPresetActive
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            if (extFilterInput.text === modelData.exts) {
+                                                extFilterInput.text = ""
+                                            } else {
+                                                extFilterInput.text = modelData.exts
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -361,12 +637,13 @@ RowLayout {
         Layout.alignment: Qt.AlignVCenter
 
         ToolBtn {
+            visible: root.showSearchBtn
             iconText: root.isSearchActive ? "✕" : "🔍"
             onClicked: root.toggleSearch()
         }
 
         ToolBtn {
-            visible: !root.isUltraCompactBar
+            visible: root.showNewBtn
             iconText: "＋"
             btnText: "New"
             onClicked: newMenu.popup()
@@ -419,7 +696,7 @@ RowLayout {
         }
 
         ToolBtn {
-            visible: !root.isNarrowBar
+            visible: root.showColumnToggles
             iconText: "⇅"
             btnText: "Sort"
             onClicked: sortMenu.popup()
@@ -451,6 +728,7 @@ RowLayout {
 
         ToolBtn {
             id: viewModeBtn
+            visible: root.showNewBtn
             iconText: (backend && backend.viewMode === "details") ? "☰" : "☵"
             onClicked: if (backend) backend.setViewMode(backend.viewMode === "details" ? "grid" : "details")
             onRightClicked: layoutSettingsMenu.popup(viewModeBtn, 0, viewModeBtn.height)
@@ -553,7 +831,7 @@ RowLayout {
         }
 
         ToolBtn {
-            visible: !root.isNarrowBar
+            visible: root.showColumnToggles
             iconText: "◨"
             isActiveToggle: root.appWindow ? root.appWindow.effectiveShowPreview : false
             onClicked: {
@@ -601,6 +879,54 @@ RowLayout {
                 hoverEnabled: true
                 cursorShape: Qt.PointingHandCursor
                 onClicked: if (backend) backend.resumeMediaFolder(backend.currentPath)
+            }
+        }
+
+        // Anonymous Mode Indicator & Toggle Pill (Shift+A)
+        Rectangle {
+            visible: backend ? (backend.anonymousMode || backend.isMediaLibraryView || backend.isMediaHubView) : false
+            implicitHeight: Math.round(28 * Theme.scaleFactor)
+            implicitWidth: anonRow.implicitWidth + 14
+            radius: Theme.radiusMedium
+            color: (backend && backend.anonymousMode) ? "#35f59e0b" : Theme.bgCard
+            border.color: (backend && backend.anonymousMode) ? "#f59e0b" : Theme.borderDim
+            border.width: 1
+            Layout.alignment: Qt.AlignVCenter
+
+            RowLayout {
+                id: anonRow
+                anchors.centerIn: parent
+                spacing: 5
+
+                Text {
+                    text: (backend && backend.anonymousMode) ? "🕵️ ANON: ON" : "🕵️ ANON"
+                    color: (backend && backend.anonymousMode) ? "#fbbf24" : Theme.textSecondary
+                    font.pixelSize: Theme.fontSizeSmall
+                    font.bold: true
+                }
+
+                Rectangle {
+                    visible: !root.isUltraCompactBar
+                    implicitWidth: anonKeyTxt.implicitWidth + 8
+                    implicitHeight: Math.round(18 * Theme.scaleFactor)
+                    radius: Theme.radiusSmall
+                    color: (backend && backend.anonymousMode) ? "#f59e0b" : Theme.bgSurface
+
+                    Text {
+                        id: anonKeyTxt
+                        anchors.centerIn: parent
+                        text: "Shift+A"
+                        color: (backend && backend.anonymousMode) ? "#18181c" : Theme.textTertiary
+                        font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
+                        font.bold: true
+                    }
+                }
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                onClicked: if (backend) backend.toggleAnonymousMode()
             }
         }
 
@@ -653,14 +979,14 @@ RowLayout {
         }
 
         ToolBtn {
-            visible: !root.isNarrowBar
+            visible: root.showSettingsBtn
             iconText: "⚙️"
             onClicked: settingsDialog.open()
         }
 
-        // Compact Overflow Menu Button (Appears automatically on narrow Hyprland tiles so icons never overlap)
+        // Compact Overflow Menu Button (Appears automatically as items hide in reverse priority order)
         ToolBtn {
-            visible: root.isNarrowBar
+            visible: !root.showColumnToggles
             iconText: "⋯"
             onClicked: overflowBarMenu.popup()
 
@@ -668,23 +994,43 @@ RowLayout {
                 id: overflowBarMenu
 
                 StyledMenuItem {
-                    visible: root.isUltraCompactBar
+                    visible: !root.showRefreshBtn
+                    iconGlyph: "⟳"
+                    text: "Refresh & Sync Jellyfin (Ctrl+R)"
+                    onTriggered: if (backend) backend.syncJellyfinAndRefresh()
+                }
+                StyledMenuItem {
+                    visible: !root.showNewBtn
                     iconGlyph: "＋"
                     text: "New Item..."
                     onTriggered: newMenu.popup()
                 }
                 StyledMenuItem {
-                    visible: root.isUltraCompactBar
-                    iconGlyph: "↑"
-                    text: "Go Up Folder"
-                    onTriggered: if (backend) backend.goUp()
+                    visible: !root.showColumnToggles
+                    iconGlyph: "◧"
+                    text: "Toggle Quick Access Sidebar"
+                    checkable: true
+                    checked: root.appWindow ? root.appWindow.userShowSidebar : true
+                    onTriggered: if (root.appWindow) root.appWindow.userShowSidebar = !root.appWindow.userShowSidebar
                 }
                 StyledMenuItem {
-                    iconGlyph: "⇅"
-                    text: "Sort By..."
-                    onTriggered: sortMenu.popup()
+                    visible: !root.showColumnToggles
+                    iconGlyph: "📏"
+                    text: "Icon-Only Quick Access Rail"
+                    shortcutText: "Ctrl+I"
+                    checkable: true
+                    checked: root.appWindow ? root.appWindow.isSidebarCompactRail : false
+                    onTriggered: {
+                        if (!backend || !root.appWindow) return
+                        if (root.appWindow.isSidebarCompactRail) {
+                            backend.setSidebarMode("full")
+                        } else {
+                            backend.setSidebarMode("rail")
+                        }
+                    }
                 }
                 StyledMenuItem {
+                    visible: !root.showColumnToggles
                     iconGlyph: "◨"
                     text: "Toggle Details Preview"
                     checkable: true
@@ -692,9 +1038,29 @@ RowLayout {
                     onTriggered: if (root.appWindow) root.appWindow.userShowPreview = !root.appWindow.userShowPreview
                 }
                 StyledMenuItem {
+                    visible: !root.showColumnToggles
+                    iconGlyph: "↑"
+                    text: "Go Up Folder"
+                    onTriggered: if (backend) backend.goUp()
+                }
+                StyledMenuItem {
+                    visible: !root.showColumnToggles
+                    iconGlyph: "⇅"
+                    text: "Sort By..."
+                    onTriggered: sortMenu.popup()
+                }
+                StyledMenuItem {
                     iconGlyph: "📋"
                     text: "Copy Current Path"
                     onTriggered: if (backend) backend.copyToClipboard(backend.currentPath)
+                }
+                StyledMenuItem {
+                    iconGlyph: "🕵️"
+                    text: "Anonymous Mode (Local Only)"
+                    shortcutText: "Shift+A"
+                    checkable: true
+                    checked: backend ? backend.anonymousMode : false
+                    onTriggered: if (backend) backend.toggleAnonymousMode()
                 }
                 StyledMenuItem {
                     iconGlyph: "⟳"

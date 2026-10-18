@@ -29,11 +29,16 @@ Menu {
     }
 
     contentItem: ListView {
-        implicitHeight: contentHeight
+        implicitHeight: Math.min(contentHeight, Overlay.overlay ? Math.max(220, Overlay.overlay.height - 48) : 520)
         model: control.contentModel
-        interactive: false
+        interactive: contentHeight > implicitHeight
+        boundsBehavior: Flickable.StopAtBounds
         clip: true
         currentIndex: control.currentIndex
+
+        ScrollBar.vertical: ScrollBar {
+            policy: ScrollBar.AsNeeded
+        }
 
         HoverHandler {
             onHoveredChanged: {

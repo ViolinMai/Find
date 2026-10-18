@@ -12,6 +12,7 @@ Rectangle {
     readonly property bool showModifiedCol: width >= Math.round(420 * Theme.scaleFactor)
     readonly property bool showSizeCol: width >= Math.round(290 * Theme.scaleFactor)
     property string hoveredSubfolderPath: ""
+    readonly property bool hasOpenModal: permDeleteDialog.visible || desktopMakerModal.visible || propertiesModal.visible || dolphinMenu.visible || dolphinMenu.hasDialogOpen || backgroundMenu.visible
 
     function extractDropUrls(drop) {
         var urls = []
@@ -55,10 +56,131 @@ Rectangle {
         id: desktopMakerModal
     }
 
+    PropertiesDialog {
+        id: propertiesModal
+    }
+
+    function openPropertiesForSelected() {
+        if (!backend) return
+        var p = (backend.selectedItem && backend.selectedItem.path) ? backend.selectedItem.path : backend.currentPath
+        propertiesModal.openForPath(p)
+    }
+
+    function promptPermanentDelete(targetPath, isEmptyAll) {
+        permDeleteDialog.targetPath = targetPath || ""
+        permDeleteDialog.emptyAllMode = Boolean(isEmptyAll)
+        permDeleteDialog.open()
+    }
+
+    Dialog {
+        id: permDeleteDialog
+        title: "Confirm Permanent Deletion"
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: Math.min(Math.round(420 * Theme.scaleFactor), root.width - 24)
+
+        property string targetPath: ""
+        property bool emptyAllMode: false
+
+        background: Rectangle {
+            color: Theme.bgSurface
+            border.color: Theme.textDanger
+            border.width: 1
+            radius: Theme.radiusLarge
+        }
+
+        header: Rectangle {
+            height: Math.round(42 * Theme.scaleFactor)
+            color: Theme.bgCard
+            radius: Theme.radiusLarge
+            Text {
+                anchors.left: parent.left
+                anchors.leftMargin: 16
+                anchors.verticalCenter: parent.verticalCenter
+                text: permDeleteDialog.emptyAllMode ? "🔥 Empty Entire Trash?" : "🔥 Permanently Delete Item(s)?"
+                color: Theme.textDanger
+                font.pixelSize: Theme.fontSizeMedium
+                font.bold: true
+            }
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 12
+
+            Text {
+                Layout.fillWidth: true
+                text: permDeleteDialog.emptyAllMode
+                      ? ("Are you sure you want to permanently erase all " + (backend ? backend.trashItemCount : 0) + " item(s) (" + (backend ? backend.trashTotalSize : "0 B") + ") in the Trash?\n\nThis action cannot be undone!")
+                      : "Are you sure you want to permanently delete the selected item(s)?\n\nThis action cannot be undone!"
+                color: Theme.textSecondary
+                font.pixelSize: Theme.fontSizeNormal
+                wrapMode: Text.WordWrap
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                Item { Layout.fillWidth: true }
+
+                Button {
+                    text: "Cancel"
+                    onClicked: permDeleteDialog.close()
+                    contentItem: Text {
+                        text: parent.text
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSizeNormal
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: Math.round(80 * Theme.scaleFactor)
+                        implicitHeight: Math.round(32 * Theme.scaleFactor)
+                        color: parent.hovered ? Theme.bgHover : "transparent"
+                        border.color: Theme.borderDim
+                        radius: Theme.radiusSmall
+                    }
+                }
+
+                Button {
+                    text: "🔥 Delete Forever"
+                    onClicked: {
+                        if (backend) {
+                            if (permDeleteDialog.emptyAllMode) {
+                                backend.emptyTrash()
+                            } else {
+                                backend.deletePermanently(permDeleteDialog.targetPath)
+                            }
+                        }
+                        permDeleteDialog.close()
+                    }
+                    contentItem: Text {
+                        text: parent.text
+                        color: "#ffffff"
+                        font.bold: true
+                        font.pixelSize: Theme.fontSizeNormal
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: Math.round(145 * Theme.scaleFactor)
+                        implicitHeight: Math.round(32 * Theme.scaleFactor)
+                        color: parent.hovered ? "#dc2626" : "#b91c1c"
+                        radius: Theme.radiusSmall
+                    }
+                }
+            }
+        }
+    }
+
     DolphinContextMenu {
         id: dolphinMenu
         onRequestDesktopMaker: function(execPath) {
             desktopMakerModal.openForExecutable(execPath)
+        }
+        onRequestPermanentDelete: function(tPath) {
+            root.promptPermanentDelete(tPath, false)
+        }
+        onRequestProperties: function(tPath) {
+            propertiesModal.openForPath(tPath)
         }
     }
 
@@ -83,7 +205,7 @@ Rectangle {
             iconGlyph: "📋"
             text: "Paste Here"
             shortcutText: "Ctrl+V"
-            enabled: backend ? (backend.getClipboardPath() !== "" && backend.currentPath !== "recent://" && backend.currentPath !== "trash://") : false
+            enabled: backend ? ((backend.hasClipboardItems || backend.getClipboardPath() !== "") && backend.currentPath !== "recent://" && backend.currentPath !== "trash://" && backend.currentPath !== "mediahub://" && backend.currentPath !== "favorites://") : false
             onTriggered: {
                 if (root.appWindow) {
                     root.appWindow.triggerPasteInCurrentFolder()
@@ -139,6 +261,15 @@ Rectangle {
             text: "Sync Jellyfin & Refresh"
             shortcutText: "Ctrl+R"
             onTriggered: if (backend) backend.syncJellyfinAndRefresh()
+        }
+        MenuSeparator {
+            contentItem: Rectangle { implicitHeight: 1; color: Theme.borderDim }
+        }
+        StyledMenuItem {
+            iconGlyph: "ℹ️"
+            text: "Folder Properties & Permissions"
+            shortcutText: "Alt+Enter"
+            onTriggered: propertiesModal.openForPath(backend ? backend.currentPath : "")
         }
     }
 
@@ -283,7 +414,7 @@ Rectangle {
                     target: null
                     orientation: Qt.Vertical
                     onWheel: function(event) {
-                        var step = (event.angleDelta.y / 120.0) * Math.round(240 * Theme.scaleFactor)
+                        var step = (event.angleDelta.y / 120.0) * Math.round(920 * Theme.scaleFactor)
                         var maxY = Math.max(0, searchListView.contentHeight - searchListView.height)
                         searchListView.contentY = Math.max(0, Math.min(maxY, searchListView.contentY - step))
                         event.accepted = true
@@ -335,6 +466,7 @@ Rectangle {
                                 color: Theme.textPrimary
                                 font.pixelSize: Theme.fontSizeNormal
                                 font.bold: true
+                                horizontalAlignment: Text.AlignLeft
                                 elide: Text.ElideRight
                                 Layout.fillWidth: true
                             }
@@ -342,6 +474,7 @@ Rectangle {
                                 text: modelData.path
                                 color: Theme.textTertiary
                                 font.pixelSize: Theme.fontSizeSmall
+                                horizontalAlignment: Text.AlignLeft
                                 elide: Text.ElideMiddle
                                 Layout.fillWidth: true
                             }
@@ -411,12 +544,164 @@ Rectangle {
                 anchors.fill: parent
                 spacing: 0
 
+                // Storage Analyzer Action Banner (Shows total analyzed folder size + descending usage breakdown)
+                Rectangle {
+                    visible: backend ? backend.isStorageAnalyzerView : false
+                    Layout.fillWidth: true
+                    height: Math.round(46 * Theme.scaleFactor)
+                    color: "#16202a"
+                    border.color: "#4538bdf8"
+                    border.width: 1
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 16
+                        anchors.rightMargin: 16
+                        spacing: 10
+
+                        Text {
+                            text: "📊  Storage Analyzer  •  Total Used: " + (backend ? backend.analyzerTotalSize : "0 B") + "  •  " + (backend ? backend.analyzerItemCount : 0) + " items (Sorted Largest First)"
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontSizeNormal
+                            font.bold: true
+                            horizontalAlignment: Text.AlignLeft
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                        }
+
+                        Button {
+                            text: "↑ Up Folder"
+                            onClicked: if (backend) backend.goUp()
+                            contentItem: Text {
+                                text: parent.text
+                                color: Theme.textPrimary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeSmall
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+                            background: Rectangle {
+                                implicitWidth: Math.round(95 * Theme.scaleFactor)
+                                implicitHeight: Math.round(28 * Theme.scaleFactor)
+                                radius: Theme.radiusSmall
+                                color: parent.hovered ? Theme.bgHover : Theme.bgSurface
+                                border.color: Theme.borderDim
+                            }
+                        }
+
+                        Button {
+                            text: "📂 Open Normal View"
+                            onClicked: {
+                                if (!backend) return
+                                var raw = backend.currentPath.replace("analyzer://", "")
+                                backend.navigateTo(raw)
+                            }
+                            contentItem: Text {
+                                text: parent.text
+                                color: "#ffffff"
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeSmall
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+                            background: Rectangle {
+                                implicitWidth: Math.round(135 * Theme.scaleFactor)
+                                implicitHeight: Math.round(28 * Theme.scaleFactor)
+                                radius: Theme.radiusSmall
+                                color: parent.hovered ? Theme.accentHover : Theme.accent
+                            }
+                        }
+                    }
+                }
+
+                // Trash Management Action Banner (Shows total Trash size + Restore + Permanent Delete)
+                Rectangle {
+                    visible: backend ? backend.isTrashView : false
+                    Layout.fillWidth: true
+                    height: Math.round(46 * Theme.scaleFactor)
+                    color: "#1f181b"
+                    border.color: "#45f87171"
+                    border.width: 1
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 16
+                        anchors.rightMargin: 16
+                        spacing: 10
+
+                        Text {
+                            text: "🗑️  TrashTotal Size: " + (backend ? backend.trashTotalSize : "0 B") + "  •  " + (backend ? backend.trashItemCount : 0) + " item(s)"
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontSizeNormal
+                            font.bold: true
+                            elide: Text.ElideRight
+                            Layout.fillWidth: true
+                        }
+
+                        Button {
+                            text: "↩ Restore Selected"
+                            enabled: backend ? (backend.selectedPaths.length > 0 || (backend.selectedItem && backend.selectedItem.path !== undefined && backend.selectedItem.path !== "")) : false
+                            onClicked: if (backend) backend.restoreFromTrash("")
+                            contentItem: Text {
+                                text: parent.text
+                                color: parent.enabled ? "#ffffff" : Theme.textTertiary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeSmall
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+                            background: Rectangle {
+                                implicitWidth: Math.round(135 * Theme.scaleFactor)
+                                implicitHeight: Math.round(30 * Theme.scaleFactor)
+                                radius: Theme.radiusSmall
+                                color: parent.enabled ? (parent.hovered ? Theme.accentHover : Theme.accent) : Theme.bgCard
+                            }
+                        }
+
+                        Button {
+                            text: "🔥 Delete Selected"
+                            enabled: backend ? (backend.selectedPaths.length > 0 || (backend.selectedItem && backend.selectedItem.path !== undefined && backend.selectedItem.path !== "")) : false
+                            onClicked: root.promptPermanentDelete("", false)
+                            contentItem: Text {
+                                text: parent.text
+                                color: parent.enabled ? "#ffffff" : Theme.textTertiary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeSmall
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+                            background: Rectangle {
+                                implicitWidth: Math.round(135 * Theme.scaleFactor)
+                                implicitHeight: Math.round(30 * Theme.scaleFactor)
+                                radius: Theme.radiusSmall
+                                color: parent.enabled ? (parent.hovered ? "#dc2626" : "#b91c1c") : Theme.bgCard
+                            }
+                        }
+
+                        Button {
+                            text: "🧹 Empty Trash"
+                            enabled: backend ? (backend.trashItemCount > 0) : false
+                            onClicked: root.promptPermanentDelete("", true)
+                            contentItem: Text {
+                                text: parent.text
+                                color: parent.enabled ? Theme.textDanger : Theme.textTertiary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeSmall
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+                            background: Rectangle {
+                                implicitWidth: Math.round(115 * Theme.scaleFactor)
+                                implicitHeight: Math.round(30 * Theme.scaleFactor)
+                                radius: Theme.radiusSmall
+                                color: parent.hovered ? "#25f87171" : Theme.bgSurface
+                                border.color: parent.enabled ? "#66f87171" : Theme.borderDim
+                            }
+                        }
+                    }
+                }
+
                 // Table Header
                 Rectangle {
                     Layout.fillWidth: true
                     height: Math.round(32 * Theme.scaleFactor)
                     color: Theme.bgSurface
-                    visible: backend ? backend.viewMode === "details" : true
+                    visible: backend ? (backend.viewMode === "details" && !backend.isMediaHubView) : true
 
                     Rectangle {
                         anchors.bottom: parent.bottom
@@ -487,21 +772,588 @@ Rectangle {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
 
+                // 0. Media Hub Multi-Row Smart View (mediahub://)
+                Flickable {
+                    id: mediaHubFlick
+                    anchors.fill: parent
+                    visible: backend ? backend.isMediaHubView : false
+                    contentWidth: width
+                    contentHeight: hubMainCol.implicitHeight + Math.round(36 * Theme.scaleFactor)
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+
+                    WheelHandler {
+                        target: null
+                        orientation: Qt.Vertical
+                        onWheel: function(event) {
+                            var step = (event.angleDelta.y / 120.0) * Math.round(960 * Theme.scaleFactor)
+                            var maxY = Math.max(0, mediaHubFlick.contentHeight - mediaHubFlick.height)
+                            mediaHubFlick.contentY = Math.max(0, Math.min(maxY, mediaHubFlick.contentY - step))
+                            event.accepted = true
+                        }
+                    }
+
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+                    ColumnLayout {
+                        id: hubMainCol
+                        width: mediaHubFlick.width - Math.round(28 * Theme.scaleFactor)
+                        x: Math.round(14 * Theme.scaleFactor)
+                        y: Math.round(12 * Theme.scaleFactor)
+                        spacing: Math.round(22 * Theme.scaleFactor)
+
+                        // Media Hub Top Banner
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: Math.round(58 * Theme.scaleFactor)
+                            radius: Theme.radiusLarge
+                            gradient: Gradient {
+                                GradientStop { position: 0.0; color: "#280078d4" }
+                                GradientStop { position: 1.0; color: "#141e293b" }
+                            }
+                            border.color: (backend && backend.anonymousMode) ? "#f59e0b" : "#450078d4"
+                            border.width: 1
+
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 16
+                                anchors.rightMargin: 16
+                                spacing: 12
+
+                                Text {
+                                    text: (backend && backend.anonymousMode) ? "🕵️" : "🎬"
+                                    font.pixelSize: Math.round(24 * Theme.scaleFactor)
+                                }
+
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 2
+                                    RowLayout {
+                                        spacing: 8
+                                        Text {
+                                            text: "Media Hub"
+                                            color: Theme.textPrimary
+                                            font.pixelSize: Theme.fontSizeTitle
+                                            font.bold: true
+                                        }
+                                        Rectangle {
+                                            visible: backend ? backend.anonymousMode : false
+                                            implicitWidth: anonHubBadge.implicitWidth + 10
+                                            implicitHeight: Math.round(18 * Theme.scaleFactor)
+                                            radius: Theme.radiusSmall
+                                            color: "#33f59e0b"
+                                            border.color: "#f59e0b"
+                                            Text {
+                                                id: anonHubBadge
+                                                anchors.centerIn: parent
+                                                text: "ANONYMOUS MODE ACTIVE (Shift+A)"
+                                                color: "#fbbf24"
+                                                font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
+                                                font.bold: true
+                                            }
+                                        }
+                                    }
+                                    Text {
+                                        text: "Smart links directly connected to your local media files & Jellyfin progress"
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        elide: Text.ElideRight
+                                        Layout.fillWidth: true
+                                    }
+                                }
+
+                                Button {
+                                    text: "🔄 Sync Hub"
+                                    onClicked: if (backend) backend.syncJellyfinAndRefresh()
+                                    contentItem: Text {
+                                        text: parent.text
+                                        color: "#ffffff"
+                                        font.bold: true
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        horizontalAlignment: Text.AlignHCenter
+                                    }
+                                    background: Rectangle {
+                                        implicitWidth: Math.round(92 * Theme.scaleFactor)
+                                        implicitHeight: Math.round(30 * Theme.scaleFactor)
+                                        radius: Theme.radiusMedium
+                                        color: parent.hovered ? Theme.accentHover : Theme.accent
+                                    }
+                                }
+                            }
+                        }
+
+                        // Empty State when no media libraries are configured or all rows are empty
+                        Rectangle {
+                            visible: (!backend || !backend.mediaHubSections || backend.mediaHubSections.length === 0)
+                            Layout.fillWidth: true
+                            implicitHeight: Math.round(140 * Theme.scaleFactor)
+                            radius: Theme.radiusLarge
+                            color: Theme.bgCard
+                            border.color: Theme.borderDim
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: "No visible Media Hub rows enabled. You can enable or reorder rows in Settings → Media Library & HDR."
+                                color: Theme.textTertiary
+                                font.pixelSize: Theme.fontSizeNormal
+                            }
+                        }
+
+                        // Dynamic Configurable Rows (Continue Watching / Recently Added / Next Up)
+                        Repeater {
+                            model: backend ? backend.mediaHubSections : []
+                            delegate: ColumnLayout {
+                                id: sectionBlock
+                                Layout.fillWidth: true
+                                spacing: Math.round(10 * Theme.scaleFactor)
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+
+                                    Text {
+                                        text: modelData.title
+                                        color: Theme.textPrimary
+                                        font.pixelSize: Theme.fontSizeTitle
+                                        font.bold: true
+                                    }
+
+                                    Rectangle {
+                                        implicitWidth: cntTxt.implicitWidth + 10
+                                        implicitHeight: Math.round(18 * Theme.scaleFactor)
+                                        radius: Theme.radiusSmall
+                                        color: Theme.bgCard
+                                        border.color: Theme.borderDim
+                                        Text {
+                                            id: cntTxt
+                                            anchors.centerIn: parent
+                                            text: modelData.items ? String(modelData.items.length) : "0"
+                                            color: Theme.textSecondary
+                                            font.pixelSize: Math.round(9 * Theme.scaleFactor)
+                                            font.bold: true
+                                        }
+                                    }
+
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: modelData.subtitle || ""
+                                        color: Theme.textTertiary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        elide: Text.ElideRight
+                                    }
+                                }
+
+                                Rectangle {
+                                    visible: !modelData.items || modelData.items.length === 0
+                                    Layout.fillWidth: true
+                                    height: Math.round(78 * Theme.scaleFactor)
+                                    radius: Theme.radiusMedium
+                                    color: Theme.bgSurface
+                                    border.color: Theme.borderDim
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "No items in this row right now."
+                                        color: Theme.textTertiary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                    }
+                                }
+
+                                ListView {
+                                    id: rowHorizList
+                                    visible: modelData.items && modelData.items.length > 0
+                                    Layout.fillWidth: true
+                                    height: Math.round(238 * Theme.scaleFactor)
+                                    orientation: ListView.Horizontal
+                                    spacing: Math.round(12 * Theme.scaleFactor)
+                                    clip: true
+                                    boundsBehavior: Flickable.StopAtBounds
+                                    model: modelData.items || []
+
+                                    WheelHandler {
+                                        target: null
+                                        orientation: Qt.Horizontal
+                                        onWheel: function(event) {
+                                            var delta = event.angleDelta.x !== 0 ? event.angleDelta.x : event.angleDelta.y
+                                            var step = (delta / 120.0) * Math.round(840 * Theme.scaleFactor)
+                                            var maxX = Math.max(0, rowHorizList.contentWidth - rowHorizList.width)
+                                            rowHorizList.contentX = Math.max(0, Math.min(maxX, rowHorizList.contentX - step))
+                                            event.accepted = true
+                                        }
+                                    }
+
+                                    delegate: Rectangle {
+                                        id: hubCard
+                                        readonly property var cardItem: modelData
+                                        width: Math.round(154 * Theme.scaleFactor)
+                                        height: Math.round(236 * Theme.scaleFactor)
+                                        radius: Theme.radiusLarge
+                                        readonly property bool isCardSel: {
+                                            if (!backend || !cardItem || !cardItem.path) return false
+                                            var sList = backend.selectedPaths
+                                            if (sList && sList.indexOf(cardItem.path) !== -1) return true
+                                            return (backend.selectedItem && backend.selectedItem.path === cardItem.path) ? true : false
+                                        }
+                                        // Floating Poster Preview style: transparent background, no heavy box frame!
+                                        color: isCardSel ? "#240078d4" : (hubCardMouse.containsMouse ? "#12ffffff" : "transparent")
+                                        border.color: isCardSel ? Theme.accent : "transparent"
+                                        border.width: isCardSel ? 1 : 0
+
+                                        ColumnLayout {
+                                            anchors.fill: parent
+                                            anchors.margins: 4
+                                            spacing: 6
+
+                                            // Floating Poster / Thumbnail Viewport (Hugs painted image with ultra-thin border & smooth corners)
+                                            Item {
+                                                id: posterViewport
+                                                Layout.fillWidth: true
+                                                Layout.fillHeight: true
+
+                                                readonly property string artSource: {
+                                                    if (modelData.poster && modelData.poster !== "") return "file://" + modelData.poster
+                                                    if (modelData.thumb && modelData.thumb !== "") return "file://" + modelData.thumb
+                                                    if (modelData.folder_previews && modelData.folder_previews.length > 0 && modelData.folder_previews[0].thumb !== "") {
+                                                        return "file://" + modelData.folder_previews[0].thumb
+                                                    }
+                                                    return ""
+                                                }
+
+                                                Image {
+                                                    id: hubPosterImg
+                                                    anchors.centerIn: parent
+                                                    width: parent.width
+                                                    height: parent.height
+                                                    visible: posterViewport.artSource !== ""
+                                                    source: posterViewport.artSource
+                                                    fillMode: Image.PreserveAspectFit
+                                                    asynchronous: true
+                                                    smooth: true
+                                                    mipmap: true
+                                                }
+
+                                                // Fallback Icon Card only when no poster/thumb exists
+                                                Rectangle {
+                                                    visible: posterViewport.artSource === ""
+                                                    width: parent.width * 0.84
+                                                    height: parent.height * 0.92
+                                                    anchors.centerIn: parent
+                                                    radius: Math.round(10 * Theme.scaleFactor)
+                                                    color: Theme.bgSurface
+                                                    border.color: "#26ffffff"
+                                                    border.width: 1
+
+                                                    Text {
+                                                        anchors.centerIn: parent
+                                                        text: modelData.is_dir ? "📺" : "🎬"
+                                                        font.pixelSize: Math.round(34 * Theme.scaleFactor)
+                                                    }
+                                                }
+
+                                                // Tightly hugs the actual fitted poster dimensions
+                                                Rectangle {
+                                                    id: posterOverlayFrame
+                                                    anchors.centerIn: hubPosterImg
+                                                    width: hubPosterImg.paintedWidth > 0 ? hubPosterImg.paintedWidth : ( parent.width * 0.86 )
+                                                    height: hubPosterImg.paintedHeight > 0 ? hubPosterImg.paintedHeight : ( parent.height * 0.94 )
+                                                    radius: Math.round(10 * Theme.scaleFactor)
+                                                    color: "transparent"
+                                                    border.color: hubCard.isCardSel ? Theme.accent : (hubCardMouse.containsMouse ? "#45ffffff" : "#1affffff")
+                                                    border.width: 1
+
+                                                    // Top-Left Smart Episode / Range Badge (e.g. "EP 5-15 added", "EP 04 • 62%")
+                                                    Rectangle {
+                                                        visible: modelData.badge !== undefined && modelData.badge !== ""
+                                                        anchors.left: parent.left
+                                                        anchors.top: parent.top
+                                                        anchors.margins: 6
+                                                        implicitWidth: Math.min(parent.width - 12, badgeLbl.implicitWidth + 12)
+                                                        implicitHeight: Math.round(19 * Theme.scaleFactor)
+                                                        radius: height / 2
+                                                        color: "#dd0f172a"
+                                                        border.color: "#6638bdf8"
+                                                        border.width: 1
+
+                                                        Text {
+                                                            id: badgeLbl
+                                                            anchors.centerIn: parent
+                                                            width: parent.width - 8
+                                                            text: modelData.badge || ""
+                                                            color: "#38bdf8"
+                                                            font.pixelSize: Math.round(8.2 * Theme.scaleFactor)
+                                                            font.bold: true
+                                                            elide: Text.ElideRight
+                                                            horizontalAlignment: Text.AlignHCenter
+                                                        }
+                                                    }
+
+                                                    // Top-Right HDR Badge
+                                                    Rectangle {
+                                                        visible: modelData.is_hdr === true
+                                                        anchors.right: parent.right
+                                                        anchors.top: parent.top
+                                                        anchors.margins: 6
+                                                        implicitWidth: hubHdrTxt.implicitWidth + 8
+                                                        implicitHeight: Math.round(15 * Theme.scaleFactor)
+                                                        radius: Math.round(3 * Theme.scaleFactor)
+                                                        color: "#d91e293b"
+                                                        border.color: "#e2e8f0"
+                                                        border.width: 1
+
+                                                        Text {
+                                                            id: hubHdrTxt
+                                                            anchors.centerIn: parent
+                                                            text: "HDR"
+                                                            color: "#f8fafc"
+                                                            font.pixelSize: Math.round(7.5 * Theme.scaleFactor)
+                                                            font.bold: true
+                                                        }
+                                                    }
+
+                                                    // Sleek Pill-Rounded Progress Bar floating cleanly near bottom of Poster
+                                                    Rectangle {
+                                                        visible: modelData.progress !== undefined && modelData.progress > 0.005
+                                                        anchors.left: parent.left
+                                                        anchors.right: parent.right
+                                                        anchors.bottom: parent.bottom
+                                                        anchors.leftMargin: 8
+                                                        anchors.rightMargin: 8
+                                                        anchors.bottomMargin: 7
+                                                        height: Math.round(5.5 * Theme.scaleFactor)
+                                                        radius: height / 2
+                                                        color: "#8809090b"
+                                                        border.color: "#28ffffff"
+                                                        border.width: 1
+                                                        clip: true
+
+                                                        Rectangle {
+                                                            width: Math.max(parent.height, parent.width * Math.min(1.0, Math.max(0.0, modelData.progress)))
+                                                            height: parent.height
+                                                            radius: height / 2
+                                                            gradient: Gradient {
+                                                                orientation: Gradient.Horizontal
+                                                                GradientStop { position: 0.0; color: modelData.is_watched ? "#10b981" : "#0078d4" }
+                                                                GradientStop { position: 1.0; color: modelData.is_watched ? "#34d399" : "#38bdf8" }
+                                                            }
+                                                            Behavior on width { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            // Title & Episode/Batch Subtitle
+                                            ColumnLayout {
+                                                Layout.fillWidth: true
+                                                spacing: 1
+
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    text: modelData.display_title || modelData.name
+                                                    color: Theme.textPrimary
+                                                    font.pixelSize: Theme.fontSizeSmall
+                                                    font.bold: true
+                                                    horizontalAlignment: Text.AlignHCenter
+                                                    elide: Text.ElideRight
+                                                }
+
+                                                Text {
+                                                    Layout.fillWidth: true
+                                                    text: modelData.subtitle || modelData.name
+                                                    color: Theme.textTertiary
+                                                    font.pixelSize: Math.round(8.8 * Theme.scaleFactor)
+                                                    horizontalAlignment: Text.AlignHCenter
+                                                    elide: Text.ElideMiddle
+                                                }
+                                            }
+                                        }
+
+                                        MouseArea {
+                                            id: hubCardMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
+                                            cursorShape: Qt.PointingHandCursor
+
+                                            onPressed: function(mouse) {
+                                                if (!backend || !hubCard.cardItem) return
+                                                var swapped = backend.swapMouseButtons
+                                                var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
+                                                if (isPrimary && mouse.modifiers === Qt.NoModifier && !hubCard.isCardSel) {
+                                                    backend.selectItem(
+                                                        hubCard.cardItem.path || "",
+                                                        hubCard.cardItem.name || "",
+                                                        Boolean(hubCard.cardItem.is_dir),
+                                                        hubCard.cardItem.size || "",
+                                                        hubCard.cardItem.modified || "",
+                                                        hubCard.cardItem.type || "",
+                                                        0
+                                                    )
+                                                }
+                                            }
+
+                                            onClicked: function(mouse) {
+                                                if (!backend || !hubCard.cardItem) return
+                                                var itemObj = hubCard.cardItem
+                                                if (mouse.button === Qt.MiddleButton) {
+                                                    if (itemObj.is_dir) {
+                                                        backend.addTab(itemObj.path)
+                                                    } else {
+                                                        backend.goToParentFolder(itemObj.path)
+                                                    }
+                                                    return
+                                                }
+                                                var swapped = backend.swapMouseButtons
+                                                var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
+                                                var isSecondary = swapped ? (mouse.button === Qt.LeftButton) : (mouse.button === Qt.RightButton)
+
+                                                backend.selectItem(
+                                                    itemObj.path || "",
+                                                    itemObj.name || "",
+                                                    Boolean(itemObj.is_dir),
+                                                    itemObj.size || "",
+                                                    itemObj.modified || "",
+                                                    itemObj.type || "",
+                                                    mouse.modifiers
+                                                )
+
+                                                if (isSecondary) {
+                                                    dolphinMenu.targetPath = itemObj.path || ""
+                                                    dolphinMenu.targetName = itemObj.name || ""
+                                                    dolphinMenu.isDir = Boolean(itemObj.is_dir)
+                                                    dolphinMenu.popupSafe(hubCard, mouse.x, mouse.y)
+                                                }
+                                            }
+
+                                            onDoubleClicked: function(mouse) {
+                                                if (!backend || !hubCard.cardItem) return
+                                                var swapped = backend.swapMouseButtons
+                                                var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
+                                                if (isPrimary) {
+                                                    backend.openEntry(hubCard.cardItem.path)
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // 1. Details List View
                 ListView {
                     id: fileListView
                     anchors.fill: parent
-                    visible: backend ? backend.viewMode === "details" : true
+                    visible: backend ? (backend.viewMode === "details" && !backend.isMediaHubView) : true
                     model: visible && backend ? backend.files : null
                     clip: true
                     interactive: true
-                    flickableDirection: Flickable.HorizontalAndVerticalFlick
-                    contentWidth: Math.max(width, Math.round(260 * Theme.scaleFactor))
-                    boundsBehavior: Flickable.DragOverBounds
+                    flickableDirection: Flickable.VerticalFlick
+                    contentWidth: width
+                    boundsBehavior: Flickable.StopAtBounds
                     pixelAligned: true
-                    flickDeceleration: 3200
-                    maximumFlickVelocity: 9500
+                    flickDeceleration: 4500
+                    maximumFlickVelocity: 14000
                     focus: true
+
+                    // Rubber-Band Marquee Selection + Empty Space Click Handler for ListView
+                    Rectangle {
+                        id: listRubberBand
+                        parent: fileListView.contentItem
+                        visible: false
+                        z: 999
+                        color: "#280078d4"
+                        border.color: Theme.accent
+                        border.width: 1
+                        radius: 4
+                    }
+
+                    MouseArea {
+                        id: listBgMarqueeArea
+                        anchors.fill: parent
+                        z: -1
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        preventStealing: true
+
+                        property real startContentX: 0
+                        property real startContentY: 0
+                        property bool isMarqueeActive: false
+
+                        onPressed: function(mouse) {
+                            if (!backend) return
+                            var swapped = backend.swapMouseButtons
+                            var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
+                            if (isPrimary) {
+                                startContentX = mouse.x + fileListView.contentX
+                                startContentY = mouse.y + fileListView.contentY
+                                isMarqueeActive = false
+                                if (!(mouse.modifiers & Qt.ControlModifier)) {
+                                    backend.clearSelection()
+                                }
+                            }
+                        }
+
+                        onPositionChanged: function(mouse) {
+                            if (!pressed || !backend) return
+                            var swapped = backend.swapMouseButtons
+                            var primaryBtn = swapped ? Qt.RightButton : Qt.LeftButton
+                            if (!(mouse.buttons & primaryBtn)) return
+
+                            var curX = mouse.x + fileListView.contentX
+                            var curY = mouse.y + fileListView.contentY
+                            if (!isMarqueeActive && (Math.abs(curX - startContentX) > 6 || Math.abs(curY - startContentY) > 6)) {
+                                isMarqueeActive = true
+                                listRubberBand.visible = true
+                            }
+                            if (isMarqueeActive) {
+                                if (mouse.y > fileListView.height - 24) {
+                                    fileListView.contentY = Math.min(Math.max(0, fileListView.contentHeight - fileListView.height), fileListView.contentY + 14)
+                                } else if (mouse.y < 24) {
+                                    fileListView.contentY = Math.max(0, fileListView.contentY - 14)
+                                }
+                                curY = mouse.y + fileListView.contentY
+                                var rx = Math.min(startContentX, curX)
+                                var ry = Math.min(startContentY, curY)
+                                var rw = Math.abs(curX - startContentX)
+                                var rh = Math.abs(curY - startContentY)
+                                listRubberBand.x = rx
+                                listRubberBand.y = ry
+                                listRubberBand.width = rw
+                                listRubberBand.height = rh
+
+                                var total = fileListView.count
+                                if (total > 0) {
+                                    var avgH = fileListView.contentHeight / total
+                                    var firstIdx = Math.max(0, Math.floor(ry / Math.max(1, avgH)))
+                                    var lastIdx = Math.min(total - 1, Math.floor((ry + rh) / Math.max(1, avgH)))
+                                    var indices = []
+                                    for (var i = firstIdx; i <= lastIdx; i++) {
+                                        indices.push(i)
+                                    }
+                                    backend.setRubberBandSelection(indices, Boolean(mouse.modifiers & Qt.ControlModifier))
+                                }
+                            }
+                        }
+
+                        onReleased: function(mouse) {
+                            if (isMarqueeActive) {
+                                isMarqueeActive = false
+                                listRubberBand.visible = false
+                                return
+                            }
+                            if (!backend) return
+                            var swapped = backend.swapMouseButtons
+                            var isSecondary = swapped ? (mouse.button === Qt.LeftButton) : (mouse.button === Qt.RightButton)
+                            if (isSecondary) {
+                                backgroundMenu.popup()
+                            }
+                        }
+
+                        onCanceled: {
+                            isMarqueeActive = false
+                            listRubberBand.visible = false
+                        }
+                    }
 
                     WheelHandler {
                         id: listFastWheel
@@ -509,7 +1361,7 @@ Rectangle {
                         orientation: Qt.Vertical
                         onWheel: function(event) {
                             fileListView.cancelFlick()
-                            var step = (event.angleDelta.y / 120.0) * Math.round(240 * Theme.scaleFactor)
+                            var step = (event.angleDelta.y / 120.0) * Math.round(960 * Theme.scaleFactor)
                             var maxY = Math.max(0, fileListView.contentHeight - fileListView.height)
                             fileListView.contentY = Math.max(0, Math.min(maxY, fileListView.contentY - step))
                             event.accepted = true
@@ -520,22 +1372,21 @@ Rectangle {
                         active: true
                         policy: ScrollBar.AsNeeded
                     }
-                    ScrollBar.horizontal: ScrollBar {
-                        active: true
-                        policy: ScrollBar.AsNeeded
-                    }
 
                     delegate: Item {
                         id: rowContainer
-                        width: Math.max(fileListView.width, fileListView.contentWidth)
+                        width: fileListView.width
                         readonly property bool isSeriesFolderWithPoster: (backend ? (backend.isMediaLibraryView && !backend.isMovieFolderView && backend.showSeriesPosters) : false) && model.is_dir && model.poster !== undefined && model.poster !== ""
                         readonly property bool isMovieRow: ((backend ? backend.isMovieFolderView : false) && model.is_movie_item && (model.type === "Video" || (model.is_dir && model.poster !== ""))) || isSeriesFolderWithPoster
+                        readonly property bool isAnalyzerRow: backend ? backend.isStorageAnalyzerView : false
                         readonly property bool isMediaVideoRow: ((backend ? backend.isMediaLibraryView : false) && !model.is_dir && model.type === "Video") || isMovieRow
                         readonly property bool showMovieSeparator: isMovieRow
-                        height: Math.round((isMovieRow ? 124 : (isMediaVideoRow ? 72 : 38)) * Theme.scaleFactor)
+                        height: Math.round((isMovieRow ? 124 : (isMediaVideoRow ? 72 : (isAnalyzerRow ? 48 : 38))) * Theme.scaleFactor)
 
                         readonly property string itemPath: model.path
                         readonly property bool itemIsDir: model.is_dir
+                        readonly property bool isHiddenEntry: model.name !== undefined && model.name.startsWith(".")
+                        opacity: isHiddenEntry ? 0.52 : 1.0
 
                         Component.onCompleted: {
                             if (!backend) return
@@ -669,6 +1520,7 @@ Rectangle {
                                                     color: (rowContainer.isMediaVideoRow && model.is_watched) ? Theme.textSecondary : Theme.textPrimary
                                                     font.pixelSize: rowContainer.isMovieRow ? Theme.fontSizeMedium : Theme.fontSizeNormal
                                                     font.bold: rowDelegate.isSelected || rowContainer.isMediaVideoRow
+                                                    horizontalAlignment: Text.AlignLeft
                                                     elide: Text.ElideRight
                                                 }
 
@@ -699,6 +1551,7 @@ Rectangle {
                                                 text: model.name
                                                 color: Theme.textTertiary
                                                 font.pixelSize: Math.round(9.5 * Theme.scaleFactor)
+                                                horizontalAlignment: Text.AlignLeft
                                                 elide: Text.ElideMiddle
                                             }
 
@@ -709,6 +1562,7 @@ Rectangle {
                                                 text: model.overview || ""
                                                 color: Theme.textSecondary
                                                 font.pixelSize: Theme.fontSizeSmall
+                                                horizontalAlignment: Text.AlignLeft
                                                 maximumLineCount: 2
                                                 wrapMode: Text.WordWrap
                                                 elide: Text.ElideRight
@@ -804,6 +1658,39 @@ Rectangle {
                                             color: model.is_watched ? "#10b981" : Theme.accent
                                         }
                                     }
+
+                                    // Storage Analyzer Visual Usage Bar & Percentage
+                                    RowLayout {
+                                        visible: rowContainer.isAnalyzerRow
+                                        Layout.fillWidth: true
+                                        spacing: 8
+
+                                        Rectangle {
+                                            Layout.fillWidth: true
+                                            height: Math.round(5 * Theme.scaleFactor)
+                                            radius: height / 2
+                                            color: "#22ffffff"
+                                            clip: true
+
+                                            Rectangle {
+                                                width: parent.width * Math.min(1.0, Math.max(0.015, model.size_ratio !== undefined ? model.size_ratio : 0.0))
+                                                height: parent.height
+                                                radius: parent.radius
+                                                color: (model.size_ratio !== undefined && model.size_ratio > 0.50)
+                                                       ? "#f87171"
+                                                       : ((model.size_ratio !== undefined && model.size_ratio > 0.20) ? "#f59e0b" : "#38bdf8")
+                                            }
+                                        }
+
+                                        Text {
+                                            text: model.percent_str !== undefined ? model.percent_str : ""
+                                            color: Theme.textSecondary
+                                            font.pixelSize: Math.round(9 * Theme.scaleFactor)
+                                            font.bold: true
+                                            Layout.preferredWidth: Math.round(42 * Theme.scaleFactor)
+                                            horizontalAlignment: Text.AlignRight
+                                        }
+                                    }
                                 }
 
                                 Text {
@@ -860,7 +1747,6 @@ Rectangle {
 
                                     var swapped = backend.swapMouseButtons
                                     var primaryBtn = swapped ? Qt.RightButton : Qt.LeftButton
-                                    var dragBtn = swapped ? Qt.LeftButton : Qt.RightButton
 
                                     if ((mouse.buttons & primaryBtn) && backend.currentPath === "favorites://") {
                                         if (!isReorderingFav && Math.abs(dy) > 8) {
@@ -873,7 +1759,7 @@ Rectangle {
                                                 backend.moveFavoriteItem(index, targetIdx)
                                             }
                                         }
-                                    } else if (mouse.buttons & dragBtn) {
+                                    } else if (mouse.buttons & primaryBtn) {
                                         if (!isHoldingDrag && (Math.abs(dx) > 7 || Math.abs(dy) > 7)) {
                                             isHoldingDrag = true
                                             if (!rowDelegate.isSelected) {
@@ -937,16 +1823,123 @@ Rectangle {
                 GridView {
                     id: fileGridView
                     anchors.fill: parent
-                    visible: backend ? backend.viewMode === "grid" : false
+                    visible: backend ? (backend.viewMode === "grid" && !backend.isMediaHubView) : false
                     model: visible && backend ? backend.files : null
                     clip: true
                     interactive: true
-                    flickableDirection: Flickable.HorizontalAndVerticalFlick
-                    boundsBehavior: Flickable.DragOverBounds
+                    flickableDirection: Flickable.VerticalFlick
+                    contentWidth: width
+                    boundsBehavior: Flickable.StopAtBounds
                     pixelAligned: true
-                    flickDeceleration: 3200
-                    maximumFlickVelocity: 9500
+                    flickDeceleration: 4500
+                    maximumFlickVelocity: 14000
                     focus: true
+
+                    // Rubber-Band Marquee Selection + Empty Space Click Handler for GridView
+                    Rectangle {
+                        id: gridRubberBand
+                        parent: fileGridView.contentItem
+                        visible: false
+                        z: 999
+                        color: "#280078d4"
+                        border.color: Theme.accent
+                        border.width: 1
+                        radius: 4
+                    }
+
+                    MouseArea {
+                        id: gridBgMarqueeArea
+                        anchors.fill: parent
+                        z: -1
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        preventStealing: true
+
+                        property real startContentX: 0
+                        property real startContentY: 0
+                        property bool isMarqueeActive: false
+
+                        onPressed: function(mouse) {
+                            if (!backend) return
+                            var swapped = backend.swapMouseButtons
+                            var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
+                            if (isPrimary) {
+                                startContentX = mouse.x + fileGridView.contentX
+                                startContentY = mouse.y + fileGridView.contentY
+                                isMarqueeActive = false
+                                if (!(mouse.modifiers & Qt.ControlModifier)) {
+                                    backend.clearSelection()
+                                }
+                            }
+                        }
+
+                        onPositionChanged: function(mouse) {
+                            if (!pressed || !backend) return
+                            var swapped = backend.swapMouseButtons
+                            var primaryBtn = swapped ? Qt.RightButton : Qt.LeftButton
+                            if (!(mouse.buttons & primaryBtn)) return
+
+                            var curX = mouse.x + fileGridView.contentX
+                            var curY = mouse.y + fileGridView.contentY
+                            if (!isMarqueeActive && (Math.abs(curX - startContentX) > 6 || Math.abs(curY - startContentY) > 6)) {
+                                isMarqueeActive = true
+                                gridRubberBand.visible = true
+                            }
+                            if (isMarqueeActive) {
+                                if (mouse.y > fileGridView.height - 24) {
+                                    fileGridView.contentY = Math.min(Math.max(0, fileGridView.contentHeight - fileGridView.height), fileGridView.contentY + 16)
+                                } else if (mouse.y < 24) {
+                                    fileGridView.contentY = Math.max(0, fileGridView.contentY - 16)
+                                }
+                                curY = mouse.y + fileGridView.contentY
+                                var rx = Math.min(startContentX, curX)
+                                var ry = Math.min(startContentY, curY)
+                                var rw = Math.abs(curX - startContentX)
+                                var rh = Math.abs(curY - startContentY)
+                                gridRubberBand.x = rx
+                                gridRubberBand.y = ry
+                                gridRubberBand.width = rw
+                                gridRubberBand.height = rh
+
+                                var cols = Math.max(1, fileGridView.targetCols)
+                                var cw = Math.max(1, fileGridView.cellWidth)
+                                var ch = Math.max(1, fileGridView.cellHeight)
+                                var cStart = Math.max(0, Math.floor(rx / cw))
+                                var cEnd = Math.min(cols - 1, Math.floor((rx + rw) / cw))
+                                var rStart = Math.max(0, Math.floor(ry / ch))
+                                var rEnd = Math.floor((ry + rh) / ch)
+                                var total = fileGridView.count
+                                var indices = []
+                                for (var r = rStart; r <= rEnd; r++) {
+                                    for (var c = cStart; c <= cEnd; c++) {
+                                        var idx = r * cols + c
+                                        if (idx >= 0 && idx < total) {
+                                            indices.push(idx)
+                                        }
+                                    }
+                                }
+                                backend.setRubberBandSelection(indices, Boolean(mouse.modifiers & Qt.ControlModifier))
+                            }
+                        }
+
+                        onReleased: function(mouse) {
+                            if (isMarqueeActive) {
+                                isMarqueeActive = false
+                                gridRubberBand.visible = false
+                                return
+                            }
+                            if (!backend) return
+                            var swapped = backend.swapMouseButtons
+                            var isSecondary = swapped ? (mouse.button === Qt.LeftButton) : (mouse.button === Qt.RightButton)
+                            if (isSecondary) {
+                                backgroundMenu.popup()
+                            }
+                        }
+
+                        onCanceled: {
+                            isMarqueeActive = false
+                            gridRubberBand.visible = false
+                        }
+                    }
 
                     WheelHandler {
                         id: gridFastWheel
@@ -954,7 +1947,7 @@ Rectangle {
                         orientation: Qt.Vertical
                         onWheel: function(event) {
                             fileGridView.cancelFlick()
-                            var step = (event.angleDelta.y / 120.0) * Math.round(270 * Theme.scaleFactor)
+                            var step = (event.angleDelta.y / 120.0) * Math.round(1040 * Theme.scaleFactor)
                             var maxY = Math.max(0, fileGridView.contentHeight - fileGridView.height)
                             fileGridView.contentY = Math.max(0, Math.min(maxY, fileGridView.contentY - step))
                             event.accepted = true
@@ -983,6 +1976,8 @@ Rectangle {
 
                         readonly property string itemPath: model.path
                         readonly property bool itemIsDir: model.is_dir
+                        readonly property bool isHiddenEntry: model.name !== undefined && model.name.startsWith(".")
+                        opacity: isHiddenEntry ? 0.52 : 1.0
                         readonly property bool isSelected: {
                             if (!backend) return false
                             var sList = backend.selectedPaths
@@ -1197,7 +2192,6 @@ Rectangle {
 
                                     var swapped = backend.swapMouseButtons
                                     var primaryBtn = swapped ? Qt.RightButton : Qt.LeftButton
-                                    var dragBtn = swapped ? Qt.LeftButton : Qt.RightButton
 
                                     if ((mouse.buttons & primaryBtn) && backend.currentPath === "favorites://") {
                                         if (!isReorderingFav && (Math.abs(dx) > 8 || Math.abs(dy) > 8)) {
@@ -1210,7 +2204,7 @@ Rectangle {
                                                 backend.moveFavoriteItem(index, targetGridIdx)
                                             }
                                         }
-                                    } else if (mouse.buttons & dragBtn) {
+                                    } else if (mouse.buttons & primaryBtn) {
                                         if (!isHoldingDrag && (Math.abs(dx) > 7 || Math.abs(dy) > 7)) {
                                             isHoldingDrag = true
                                             if (!gridContainer.isSelected) {
@@ -1269,6 +2263,39 @@ Rectangle {
                         }
                     }
                 }
+                    // Loading Overlay for Recently Added (recent://) or Storage Analyzer (analyzer://)
+                    Rectangle {
+                        anchors.fill: parent
+                        visible: backend ? ((backend.currentPath === "recent://" && backend.isLoadingRecent) || (backend.isStorageAnalyzerView && backend.isAnalyzingStorage)) : false
+                        color: Theme.bgBase
+                        z: 50
+
+                        ColumnLayout {
+                            anchors.centerIn: parent
+                            spacing: 12
+
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: "⏳"
+                                font.pixelSize: Math.round(34 * Theme.scaleFactor)
+                            }
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: (backend && backend.isStorageAnalyzerView) ? "📊 Analyzing Disk Usage..." : "Loading Recently Added Files..."
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeTitle
+                                font.bold: true
+                            }
+                            Text {
+                                Layout.alignment: Qt.AlignHCenter
+                                text: (backend && backend.isStorageAnalyzerView)
+                                      ? "Calculating recursive folder sizes and sorting largest first"
+                                      : "Scanning monitored folders for the latest files"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                            }
+                        }
+                    }
                 }
             }
         }

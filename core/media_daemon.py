@@ -301,10 +301,33 @@ def run_daemon_loop():
 
     sessions = {}
     active_hdr_sockets = set()
+    last_airing_daemon_check_ts = 0.0
+
+    # Import ConfigManager & AiringTracker so the background daemon sends OS notifications even when Find is closed!
+    airing_tracker_instance = None
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        from core.config import ConfigManager
+        from core.airing_tracker import AiringTracker
+        airing_tracker_instance = AiringTracker(ConfigManager())
+    except Exception:
+        airing_tracker_instance = None
 
     rt_dir = paths["runtime_dir"]
     try:
         while True:
+            now_loop_ts = time.time()
+            if airing_tracker_instance is not None and (now_loop_ts - last_airing_daemon_check_ts) >= 60.0:
+                last_airing_daemon_check_ts = now_loop_ts
+                def _bg_airing_check(tracker=airing_tracker_instance):
+                    try:
+                        tracker.config_mgr._config = tracker.config_mgr._load()
+                        tracker.sync_mal_cache_sync(force=False)
+                        tracker.sync_anilist_schedules_sync(force=False)
+                        tracker.check_and_advance_airing_timers_sync(send_os_notification=True)
+                    except Exception:
+                        pass
+                threading.Thread(target=_bg_airing_check, daemon=True).start()
             # Discover active find_mpv_*.json files in $XDG_RUNTIME_DIR/find (and /tmp fallback)
             meta_files = list(rt_dir.glob("find_mpv_*.json")) + list(Path("/tmp").glob("find_mpv_*.json"))
             for mf in meta_files:

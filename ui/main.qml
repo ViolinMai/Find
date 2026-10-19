@@ -69,6 +69,10 @@ ApplicationWindow {
     property var topDrivesModel: backend ? backend.getDrives() : []
     property string activeToastText: ""
 
+    SettingsDialog {
+        id: settingsDialog
+    }
+
     readonly property bool isTextInputFocused: root.activeFocusItem && (
         root.activeFocusItem.toString().indexOf("TextInput") !== -1 ||
         root.activeFocusItem.toString().indexOf("TextField") !== -1 ||

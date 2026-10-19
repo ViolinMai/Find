@@ -17,6 +17,8 @@ class ConfigManager:
         "sort_ascending": True,
         "max_cache_mb": 500,
         "scale_factor": 1.35,
+        "accent_color": "#0078d4",
+        "recent_accent_colors": ["#0078d4", "#8b5cf6", "#10b981", "#f59e0b", "#ec4899"],
         "transparent_blur": False,
         "show_hidden": False,
         "swap_mouse_buttons": False,
@@ -38,10 +40,17 @@ class ConfigManager:
         "jellyfin_stream_mode": False,
         "show_series_posters": True,
         "anonymous_mode": False,
+        "mal_username": "CriticalweebR18",
+        "mal_client_id": "",
+        "mal_access_token": "",
+        "airing_links": {},
+        "airing_local_eps": {},
+        "airing_ignored_ids": [],
         "media_hub_rows": [
             {"id": "continue_watching", "title": "Continue Watching", "visible": True},
             {"id": "recently_added", "title": "Recently Added Episodes", "visible": True},
-            {"id": "next_up", "title": "Next Up", "visible": True}
+            {"id": "next_up", "title": "Next Up", "visible": True},
+            {"id": "airing", "title": "Airing Weekly Tracker", "visible": True}
         ],
         "media_hub_hidden": {},
         "media_libraries": [],

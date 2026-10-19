@@ -18,7 +18,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Slot, Property, Signal, QRunnable, QThreadPool, QFileSystemWatcher, QTimer, QUrl, Qt
 from PySide6.QtGui import QGuiApplication, QDrag, QPixmap, QPainter, QColor, QFont
 from PySide6.QtCore import QMimeData
-from core.models import FileListModel
+from core.models import FileListModel, MediaHubSectionModel
 from core.config import ConfigManager
 from core.thumbnails import ThumbnailManager, IMAGE_EXTS, VIDEO_EXTS
 
@@ -29,6 +29,7 @@ from core.search import SearchManager
 from core.picker_context import PickerContext
 from core.portal_service import SystemIntegrationBridge, install_desktop_and_set_default, is_default_file_manager
 from core.jellyfin_bridge import JellyfinBridge, JellyfinSignals, JellyfinFolderSyncTask, post_jellyfin_playback_event
+from core.airing_tracker import AiringTracker
 
 import pwd
 import grp
@@ -419,20 +420,29 @@ class MpvSessionMonitorTask(QRunnable):
 
     def _query_ipc_property(self, sock, prop_name: str, req_id: int):
         cmd = json.dumps({"command": ["get_property", prop_name], "request_id": req_id}) + "\n"
-        sock.sendall(cmd.encode("utf-8"))
+        try:
+            sock.sendall(cmd.encode("utf-8"))
+        except Exception:
+            return None
         buf = b""
-        while b"\n" not in buf:
-            chunk = sock.recv(4096)
-            if not chunk:
-                break
-            buf += chunk
-        for line in buf.decode("utf-8", errors="ignore").splitlines():
+        deadline = time.time() + 0.55
+        while time.time() < deadline:
             try:
-                msg = json.loads(line)
-                if msg.get("request_id") == req_id and msg.get("error") == "success":
-                    return msg.get("data")
+                chunk = sock.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+                for line in buf.decode("utf-8", errors="ignore").splitlines():
+                    try:
+                        msg = json.loads(line)
+                        if msg.get("request_id") == req_id:
+                            if msg.get("error") == "success":
+                                return msg.get("data")
+                            return None
+                    except Exception:
+                        pass
             except Exception:
-                pass
+                break
         return None
 
     def _read_mpv_watch_later_pos(self, target_path: str) -> float:
@@ -1721,7 +1731,18 @@ class MediaHubBuilderTask(QRunnable):
                     target_p = first_ev["show_path"]
                     sub_d = f"{len(batch)} episodes added ({badge_s.replace(' added', '')})"
 
-            p_info = self.backend.config_mgr.get_media_progress(target_p) if not os.path.isdir(target_p) else {}
+            batch_watched = True
+            batch_prog_sum = 0.0
+            for bev in batch:
+                bp_info = self.backend.config_mgr.get_media_progress(bev["file_path"])
+                b_w = bool(bp_info.get("watched", False))
+                b_pr = float(bp_info.get("progress", 0.0) or 0.0)
+                if not b_w and b_pr < 0.90:
+                    batch_watched = False
+                batch_prog_sum += (1.0 if b_w else b_pr)
+            avg_batch_prog = batch_prog_sum / max(1, len(batch))
+
+            p_info = self.backend.config_mgr.get_media_progress(target_p) if not os.path.isdir(target_p) else {"progress": avg_batch_prog, "position": 0.0}
             if _is_hidden_item(target_p, float(p_info.get("progress", 0.0)), float(p_info.get("position", 0.0))):
                 continue
 
@@ -1729,16 +1750,29 @@ class MediaHubBuilderTask(QRunnable):
                 target_p,
                 badge_text=badge_s,
                 subtitle_text=sub_d,
-                override_poster=poster_p
+                override_poster=poster_p,
+                override_prog=1.0 if batch_watched else avg_batch_prog,
+                override_watched=batch_watched
             )
             if show_title:
                 card["display_title"] = show_title
+            card["is_recently_added_card"] = True
             recently_added_items.append(card)
             if len(recently_added_items) >= 25:
                 break
 
         if dirty_hidden:
             self.backend.config_mgr.set("media_hub_hidden", hidden_map)
+
+        # 4. Airing Weekly Tracker (100% Instant Local Read — Never blocks Media Hub on network I/O!)
+        airing_items = []
+        try:
+            self.backend.airing_tracker.check_and_advance_airing_timers_sync(send_os_notification=True)
+            airing_items = self.backend._build_airing_hub_items()
+            if self.backend.airing_tracker.needs_background_sync():
+                self.backend._trigger_background_airing_sync(force=False)
+        except Exception:
+            pass
 
         row_map = {
             "continue_watching": {
@@ -1758,6 +1792,12 @@ class MediaHubBuilderTask(QRunnable):
                 "title": "⏭️  Next Up",
                 "subtitle": "Next unwatched episodes ready to play",
                 "items": next_up_items
+            },
+            "airing": {
+                "id": "airing",
+                "title": "📡  Airing Weekly Tracker",
+                "subtitle": f"Live airing schedule & episode progress ({self.backend.airing_tracker.mal_username})",
+                "items": airing_items
             }
         }
 
@@ -1825,12 +1865,14 @@ class FileManagerBackend(QObject):
     pickerCompleted = Signal(list)
 
     scaleFactorChanged = Signal()
+    themeColorChanged = Signal()
 
     def __init__(self, parent=None, is_picker_mode: bool = False):
         super().__init__(parent)
         self._launched_as_picker = bool(is_picker_mode)
         self.config_mgr = ConfigManager()
         self.jf_bridge = JellyfinBridge(self.config_mgr)
+        self.airing_tracker = AiringTracker(self.config_mgr)
         self.jf_signals = JellyfinSignals()
         self.jf_signals.folderMetadataReady.connect(self._on_jellyfin_folder_metadata_ready)
         self.picker_ctx = PickerContext(self)
@@ -1933,6 +1975,7 @@ class FileManagerBackend(QObject):
         self._last_drives_ts = 0.0
 
         self.file_model = FileListModel(self)
+        self.media_hub_model = MediaHubSectionModel(self)
         self.sys_bridge = SystemIntegrationBridge(self, self) if not self._launched_as_picker else None
 
         # Separate high-priority directory pool from heavy background size/transfer workers
@@ -2000,6 +2043,11 @@ class FileManagerBackend(QObject):
             self.jf_auto_sync_timer.timeout.connect(self._on_auto_jellyfin_poll)
             self.jf_auto_sync_timer.start()
 
+            self.airing_timer = QTimer(self)
+            self.airing_timer.setInterval(60000)
+            self.airing_timer.timeout.connect(self._on_airing_minute_tick)
+            self.airing_timer.start()
+
         self.thumb_mgr = ThumbnailManager(self.config_mgr.cache_dir, self)
         self.thumb_mgr.thumbnailReady.connect(self._on_thumbnail_ready)
         self.thumb_mgr.folderPreviewReady.connect(self._on_folder_preview_ready)
@@ -2022,6 +2070,41 @@ class FileManagerBackend(QObject):
         clamped = round(min(2.2, max(0.85, float(val))), 2)
         self.config_mgr.set("scale_factor", clamped)
         self.scaleFactorChanged.emit()
+
+    @Property(str, notify=themeColorChanged)
+    def accentColor(self) -> str:
+        return str(self.config_mgr.get("accent_color", "#0078d4") or "#0078d4")
+
+    @Property(str, notify=themeColorChanged)
+    def accentHoverColor(self) -> str:
+        c = QColor(self.accentColor)
+        if c.isValid():
+            return c.lighter(118).name()
+        return "#1a88e0"
+
+    @Property(list, notify=themeColorChanged)
+    def recentAccentColors(self) -> list:
+        raw = self.config_mgr.get("recent_accent_colors", [])
+        if not isinstance(raw, list) or not raw:
+            return ["#0078d4", "#8b5cf6", "#10b981", "#f59e0b", "#ec4899"]
+        return [str(x) for x in raw[:5] if str(x).startswith("#")]
+
+    @Slot(str)
+    def setAccentColor(self, hex_color: str):
+        clean = str(hex_color or "").strip()
+        if not clean.startswith("#"):
+            clean = "#" + clean
+        c = QColor(clean)
+        if not c.isValid():
+            self.toastMessage.emit("⚠️ Invalid color code")
+            return
+        norm_hex = c.name().lower()
+        self.config_mgr.set("accent_color", norm_hex)
+
+        recent = [x.lower() for x in self.recentAccentColors if x.lower() != norm_hex]
+        recent.insert(0, norm_hex)
+        self.config_mgr.set("recent_accent_colors", recent[:5])
+        self.themeColorChanged.emit()
 
     @Slot(list, bool)
     def handleExternalIpcRequest(self, paths_list: list, select_mode: bool = False):
@@ -2571,6 +2654,10 @@ class FileManagerBackend(QObject):
     def mediaHubSections(self) -> list:
         return self._media_hub_sections
 
+    @Property(QObject, constant=True)
+    def mediaHubModel(self):
+        return self.media_hub_model
+
     @Property(bool, notify=mediaHubDataChanged)
     def isLoadingMediaHub(self) -> bool:
         return self._is_loading_media_hub
@@ -2582,13 +2669,14 @@ class FileManagerBackend(QObject):
             {"id": "continue_watching", "title": "Continue Watching", "visible": True},
             {"id": "recently_added", "title": "Recently Added Episodes", "visible": True},
             {"id": "next_up", "title": "Next Up", "visible": True},
+            {"id": "airing", "title": "Airing Weekly Tracker", "visible": True},
         ]
         if not isinstance(raw, list) or not raw:
             return defaults
         seen = set()
         out = []
         for item in raw:
-            if isinstance(item, dict) and item.get("id") in ("continue_watching", "recently_added", "next_up"):
+            if isinstance(item, dict) and item.get("id") in ("continue_watching", "recently_added", "next_up", "airing"):
                 rid = item["id"]
                 if rid not in seen:
                     seen.add(rid)
@@ -2657,15 +2745,25 @@ class FileManagerBackend(QObject):
 
     @Slot()
     def refreshMediaHub(self):
-        self._is_loading_media_hub = True
-        self.mediaHubDataChanged.emit()
+        # Do NOT emit mediaHubDataChanged before MediaHubBuilderTask finishes, to prevent QML full-window redraw flashing!
+        if not self._media_hub_sections and not self._is_loading_media_hub:
+            self._is_loading_media_hub = True
+            self.mediaHubDataChanged.emit()
         task = MediaHubBuilderTask(self, self.signals)
         self.thread_pool.start(task)
 
     def _on_media_hub_sections_ready(self, sections: list):
-        self._media_hub_sections = sections
+        was_loading = self._is_loading_media_hub
         self._is_loading_media_hub = False
-        self.mediaHubDataChanged.emit()
+        old_len = len(self._media_hub_sections)
+        self._media_hub_sections = sections
+
+        # Update persistent QAbstractListModels in-place (Zero delegate destruction, zero poster flashing!)
+        self.media_hub_model.sync_sections(sections)
+
+        if was_loading or old_len != len(sections):
+            self.mediaHubDataChanged.emit()
+
         if str(self._current_path) == "mediahub://":
             flat_entries = []
             seen = set()
@@ -2675,7 +2773,7 @@ class FileManagerBackend(QObject):
                     if p and p not in seen:
                         seen.add(p)
                         flat_entries.append(itm)
-            self.file_model.set_entries(flat_entries)
+            self.file_model.set_entries(flat_entries, context_key="mediahub://")
 
     def _load_media_hub_directory(self):
         self._current_path = "mediahub://"
@@ -2809,6 +2907,10 @@ class FileManagerBackend(QObject):
             if not self._anonymous_mode:
                 self.jf_bridge.mark_watched_async(fp, watched, QThreadPool.globalInstance())
 
+        for fp in targets:
+            if fp and os.path.exists(fp) and not os.path.isdir(fp):
+                p_info = self.config_mgr.get_media_progress(fp)
+                self.media_hub_model.update_progress_in_place(fp, float(p_info.get("progress", 0.0)), bool(p_info.get("watched", False)))
         action_lbl = "Marked as Watched" if watched else "Reset watch progress"
         self.toastMessage.emit(f"✔ {action_lbl} ({len(targets)} item{'s' if len(targets) > 1 else ''})")
         if str(self._current_path) == "mediahub://":
@@ -2820,7 +2922,6 @@ class FileManagerBackend(QObject):
             return
         cur_p = str(self._current_path)
         if cur_p == "mediahub://":
-            self.refreshMediaHub()
             return
         if cur_p in ("recent://", "trash://", "favorites://") or not os.path.isdir(cur_p):
             return
@@ -2899,6 +3000,8 @@ class FileManagerBackend(QObject):
         return msg
 
     def _on_jellyfin_folder_metadata_ready(self, folder_path: str, meta_map: dict):
+        for fpath, meta in meta_map.items():
+            self.media_hub_model.update_jellyfin_in_place(fpath, meta)
         if str(self._current_path) != folder_path:
             return
         for fpath, meta in meta_map.items():
@@ -2930,6 +3033,7 @@ class FileManagerBackend(QObject):
         updated = self.config_mgr.set_media_progress(file_path_str, pos, duration, watched=is_done)
         self.jf_bridge.update_local_cached_progress(file_path_str, pos, duration, updated["watched"])
         self.file_model.update_media_progress(file_path_str, updated["progress"], updated["watched"])
+        self.media_hub_model.update_progress_in_place(file_path_str, updated["progress"], updated["watched"])
 
     def _on_mpv_external_sub_detected(self, file_path_str: str, sub_path_str: str):
         if self._anonymous_mode:
@@ -3143,29 +3247,30 @@ class FileManagerBackend(QObject):
                 cmd.append(f"--playlist={playlist_m3u_or_file}")
                 cmd.append(f"--playlist-start={start_idx}")
             else:
+                if initial_pos > 5.0:
+                    cmd.append(f"--start={initial_pos:.2f}")
                 cmd.append(playlist_m3u_or_file)
 
             self._ensure_media_daemon_running()
 
-            if self._is_daemon_process_alive():
+            try:
+                with open(meta_path, "w", encoding="utf-8") as mf:
+                    json.dump({
+                        "file_path": abs_clicked,
+                        "playlist_file": playlist_m3u_or_file if str(playlist_m3u_or_file).endswith(".m3u8") else "",
+                        "hdr_mode": bool(use_hdr),
+                        "initial_pos": initial_pos,
+                        "initial_seek_done": False,
+                        "anonymous_mode": bool(self._anonymous_mode),
+                        "jellyfin": {} if self._anonymous_mode else jf_session_meta,
+                        "stream_to_local": stream_to_local
+                    }, mf)
                 try:
-                    with open(meta_path, "w", encoding="utf-8") as mf:
-                        json.dump({
-                            "file_path": abs_clicked,
-                            "playlist_file": playlist_m3u_or_file if str(playlist_m3u_or_file).endswith(".m3u8") else "",
-                            "hdr_mode": bool(use_hdr),
-                            "initial_pos": initial_pos,
-                            "initial_seek_done": False,
-                            "anonymous_mode": bool(self._anonymous_mode),
-                            "jellyfin": {} if self._anonymous_mode else jf_session_meta,
-                            "stream_to_local": stream_to_local
-                        }, mf)
-                    try:
-                        os.chmod(meta_path, 0o600)
-                    except OSError:
-                        pass
-                except Exception:
+                    os.chmod(meta_path, 0o600)
+                except OSError:
                     pass
+            except Exception:
+                pass
 
             proc = subprocess.Popen(
                 cmd,
@@ -3174,21 +3279,21 @@ class FileManagerBackend(QObject):
                 stderr=subprocess.DEVNULL
             )
 
-            if not self._is_daemon_process_alive():
-                if use_hdr:
-                    self._active_hdr_pids.add(int(proc.pid))
-                monitor = MpvSessionMonitorTask(
-                    abs_clicked,
-                    sock_path,
-                    proc,
-                    bool(use_hdr),
-                    initial_pos,
-                    self.config_mgr.get_media_progress,
-                    self.signals,
-                    jf_session_meta,
-                    stream_to_local
-                )
-                QThreadPool.globalInstance().start(monitor)
+            # Always run the in-app MPV session monitor alongside the daemon so progress & resume never fail!
+            if use_hdr:
+                self._active_hdr_pids.add(int(proc.pid))
+            monitor = MpvSessionMonitorTask(
+                abs_clicked,
+                sock_path,
+                proc,
+                bool(use_hdr),
+                initial_pos,
+                self.config_mgr.get_media_progress,
+                self.signals,
+                jf_session_meta,
+                stream_to_local
+            )
+            QThreadPool.globalInstance().start(monitor)
 
         QThreadPool.globalInstance().start(_worker)
 
@@ -3571,12 +3676,14 @@ class FileManagerBackend(QObject):
 
     def _on_thumbnail_ready(self, file_path, thumb_path):
         self.file_model.update_thumbnail(file_path, thumb_path)
+        self.media_hub_model.update_thumbnail_in_place(file_path, thumb_path)
         if self._selected_item.get("path") == file_path:
             self._selected_item["thumb"] = thumb_path
             self.selectedItemChanged.emit()
 
     def _on_folder_preview_ready(self, folder_path, previews):
         self.file_model.update_folder_previews(folder_path, previews)
+        self.media_hub_model.update_folder_previews_in_place(folder_path, previews)
         if self._selected_item.get("path") == folder_path:
             self._selected_item["folder_previews"] = previews
             self.selectedItemChanged.emit()
@@ -3737,12 +3844,15 @@ class FileManagerBackend(QObject):
                 pass
 
         self._sort_entries(entries)
-        self._selected_item = {}
-        self._selected_paths = []
-        self._last_selected_row = -1
-        self.selectedItemChanged.emit()
-        self.selectedPathsChanged.emit()
-        self.file_model.set_entries(entries)
+        self.file_model.set_entries(entries, context_key="trash://")
+        surviving = [p for p in self._selected_paths if self.file_model.get_row_for_path(p) >= 0]
+        if surviving != self._selected_paths:
+            self._selected_paths = surviving
+            if not surviving:
+                self._selected_item = {}
+                self._last_selected_row = -1
+            self.selectedItemChanged.emit()
+            self.selectedPathsChanged.emit()
 
         self._trash_item_count = len(entries)
         self._trash_total_size_str = "Calculating..." if entries else "0 B"
@@ -3815,13 +3925,16 @@ class FileManagerBackend(QObject):
                 "is_hdr": False
             })
 
-        # Keep exact user drag-to-order sequence in favorites://
-        self._selected_item = {}
-        self._selected_paths = []
-        self._last_selected_row = -1
-        self.selectedItemChanged.emit()
-        self.selectedPathsChanged.emit()
-        self.file_model.set_entries(entries)
+        # Keep exact user drag-to-order sequence in favorites:// with in-place diffing
+        self.file_model.set_entries(entries, context_key="favorites://")
+        surviving = [p for p in self._selected_paths if self.file_model.get_row_for_path(p) >= 0]
+        if surviving != self._selected_paths:
+            self._selected_paths = surviving
+            if not surviving:
+                self._selected_item = {}
+                self._last_selected_row = -1
+            self.selectedItemChanged.emit()
+            self.selectedPathsChanged.emit()
 
     def _load_storage_analyzer_directory(self, analyzer_uri: str):
         real_dir = analyzer_uri[11:].strip() if analyzer_uri.startswith("analyzer://") else analyzer_uri
@@ -3877,7 +3990,7 @@ class FileManagerBackend(QObject):
         self._analyzer_total_size_str = self._format_size(max(0, int(total_bytes)))
         self._analyzer_item_count = len(entries)
         self.analyzerStateChanged.emit()
-        self.file_model.set_entries(entries)
+        self.file_model.set_entries(entries, context_key=f"analyzer://{target_dir}")
 
     def load_directory(self, target_path_str: str):
         if target_path_str.startswith("analyzer://"):
@@ -4118,10 +4231,8 @@ class FileManagerBackend(QObject):
         else:
             self._sort_entries(entries)
 
-        self._selected_item = {}
-        self._selected_paths = []
-        self._last_selected_row = -1
-        self.file_model.set_entries(entries)
+        is_same_dir = (self.file_model._current_context_key == path_loaded)
+        self.file_model.set_entries(entries, context_key=path_loaded)
 
         if self._pending_highlight_paths:
             to_sel = [p for p in self._pending_highlight_paths if self.file_model.get_row_for_path(p) >= 0]
@@ -4133,8 +4244,29 @@ class FileManagerBackend(QObject):
                 if ent:
                     self._last_selected_row = first_r
                     self._selected_item = dict(ent)
-        self.selectedItemChanged.emit()
-        self.selectedPathsChanged.emit()
+            self.selectedItemChanged.emit()
+            self.selectedPathsChanged.emit()
+        elif is_same_dir and self._selected_paths:
+            surviving = [p for p in self._selected_paths if self.file_model.get_row_for_path(p) >= 0]
+            if surviving != self._selected_paths:
+                self._selected_paths = surviving
+                if surviving:
+                    first_r = self.file_model.get_row_for_path(surviving[0])
+                    ent = self.file_model.get_entry_at(first_r)
+                    self._last_selected_row = first_r
+                    if ent and len(surviving) == 1:
+                        self._selected_item = dict(ent)
+                else:
+                    self._selected_item = {}
+                    self._last_selected_row = -1
+                self.selectedItemChanged.emit()
+                self.selectedPathsChanged.emit()
+        elif not is_same_dir:
+            self._selected_item = {}
+            self._selected_paths = []
+            self._last_selected_row = -1
+            self.selectedItemChanged.emit()
+            self.selectedPathsChanged.emit()
 
     def _load_recent_directory(self):
         self._current_path = "recent://"
@@ -4204,7 +4336,7 @@ class FileManagerBackend(QObject):
         self.isLoadingRecentChanged.emit()
         if str(self._current_path) != "recent://":
             return
-        self.file_model.set_entries(entries)
+        self.file_model.set_entries(entries, context_key="recent://")
 
     def _on_trash_size_ready(self, total_bytes: int, item_count: int):
         self._trash_total_size_str = self._format_size(max(0, int(total_bytes)))
@@ -4268,8 +4400,388 @@ class FileManagerBackend(QObject):
     def requestFolderPreview(self, folder_path_str: str):
         self.thumb_mgr.request_folder_preview(folder_path_str, self._show_hidden)
 
+    def _trigger_background_airing_sync(self, force: bool = False):
+        if getattr(self.airing_tracker, "_sync_in_progress", False):
+            return
+        self.airing_tracker._sync_in_progress = True
+
+        def _bg_worker():
+            try:
+                mal_changed = self.airing_tracker.sync_mal_cache_sync(force=force)
+                ani_changed = self.airing_tracker.sync_anilist_schedules_sync(force=force)
+                aired = self.airing_tracker.check_and_advance_airing_timers_sync(send_os_notification=True)
+                if (mal_changed or ani_changed or aired or force) and str(self._current_path) == "mediahub://":
+                    self.refreshMediaHub()
+            except Exception:
+                pass
+            finally:
+                self.airing_tracker._sync_in_progress = False
+
+        QThreadPool.globalInstance().start(_bg_worker)
+
+    def _on_airing_minute_tick(self):
+        # Fast local timer check + trigger background sync only if 30m/6h TTL expired
+        try:
+            aired = self.airing_tracker.check_and_advance_airing_timers_sync(send_os_notification=True)
+            if str(self._current_path) == "mediahub://":
+                self.refreshMediaHub()
+            if self.airing_tracker.needs_background_sync():
+                self._trigger_background_airing_sync(force=False)
+        except Exception:
+            pass
+
+    def _get_highest_watched_ep_in_folder(self, folder_path: str) -> int:
+        if not folder_path or not os.path.isdir(folder_path):
+            return 0
+        highest = 0
+        stack = [(os.path.abspath(folder_path), 0)]
+        visited = 0
+        while stack and visited < 15:
+            curr_d, depth = stack.pop(0)
+            visited += 1
+            try:
+                with os.scandir(curr_d) as it:
+                    for entry in it:
+                        if entry.name.startswith("."):
+                            continue
+                        if entry.is_dir(follow_symlinks=True) and depth < 2:
+                            stack.append((entry.path, depth + 1))
+                        elif entry.is_file(follow_symlinks=True) and Path(entry.name).suffix.lower() in VIDEO_EXTS:
+                            p_info = self.config_mgr.get_media_progress(entry.path)
+                            if p_info.get("watched", False) or float(p_info.get("progress", 0.0) or 0.0) >= 0.90:
+                                _, ep_val = self._parse_episode_info(entry.name)
+                                if ep_val is not None and int(ep_val) > highest:
+                                    highest = int(ep_val)
+            except OSError:
+                pass
+        return highest
+
+    def _build_airing_hub_items(self) -> list:
+        """
+        100% Local & Instant Builder:
+        - Reads local anime_cache.json and schedules.json without any network requests.
+        - Uses ONLY explicit user links (no false-positive auto-linking).
+        - Calculates episode progress strictly from local watched episodes (linked folder + manual +/- counter), NOT from MAL watched count.
+        - Automatically marks and removes anime from Airing once finished (just like the Discord bot).
+        """
+        cache = self.airing_tracker._load_json(self.airing_tracker.cache_file)
+        schedules = self.airing_tracker._load_json(self.airing_tracker.schedules_file)
+        user_items = cache.get(self.airing_tracker.mal_username, {})
+        ignored_ids = set(str(x) for x in (self.config_mgr.get("airing_ignored_ids", []) or []))
+        links_map = dict(self.config_mgr.get("airing_links", {}) or {})
+        local_ep_map = dict(self.config_mgr.get("airing_local_eps", {}) or {})
+        dirty_schedules = False
+
+        items_out = []
+        now_ts = time.time()
+
+        for aid, udata in user_items.items():
+            aid_str = str(aid)
+            if aid_str.startswith("manga_") or aid_str in ignored_ids:
+                continue
+            if udata.get("status") not in ("watching", "plan_to_watch"):
+                continue
+
+            sched = schedules.get(aid_str, {})
+            if sched and sched.get("status") == "finished":
+                continue
+            if not sched and udata.get("airing_status", "currently_airing") != "currently_airing":
+                continue
+
+            title = str(sched.get("title") or udata.get("title") or f"Anime #{aid_str}")
+            poster_local = self.airing_tracker.get_cached_poster_path(aid_str)
+
+            # Strictly explicit manual link only — never auto-link!
+            linked_path = str(links_map.get(aid_str, "") or "")
+            if linked_path and not os.path.exists(linked_path):
+                linked_path = ""
+
+            folder_watched_eps = self._get_highest_watched_ep_in_folder(linked_path) if linked_path else 0
+            if aid_str in local_ep_map:
+                effective_watched = max(int(local_ep_map.get(aid_str, 0) or 0), folder_watched_eps)
+            else:
+                effective_watched = folder_watched_eps
+
+            next_ep = int(sched.get("next_ep", 0) or 0)
+            next_air_ts = float(sched.get("next_air_timestamp", 0) or 0)
+            total_eps = int(sched.get("total_eps") or udata.get("total_episodes") or 0)
+            latest_aired_ep = max(0, next_ep - 1) if next_ep > 0 else effective_watched
+
+            # Auto-remove from Airing if the user completed all episodes of the show
+            if total_eps > 0 and effective_watched >= total_eps:
+                if aid_str in schedules and schedules[aid_str].get("status") != "finished":
+                    schedules[aid_str]["status"] = "finished"
+                    dirty_schedules = True
+                continue
+
+            behind_count = max(0, latest_aired_ep - effective_watched)
+            if latest_aired_ep == 0:
+                status_label = f"📡 Ep 1 Soon • Watched {effective_watched}"
+                is_going_tight = True
+            elif behind_count == 0:
+                status_label = f"🔥 Going tight! (Ep {effective_watched})"
+                is_going_tight = True
+            elif behind_count == 1:
+                status_label = f"⏳ You are 1 episode behind... (Ep {effective_watched}/{latest_aired_ep})"
+                is_going_tight = False
+            else:
+                status_label = f"⏳ You are {behind_count} episodes behind... (Ep {effective_watched}/{latest_aired_ep})"
+                is_going_tight = False
+
+            if next_air_ts > now_ts:
+                rem_sec = int(next_air_ts - now_ts)
+                days, rem = divmod(rem_sec, 86400)
+                hours, rem = divmod(rem, 3600)
+                mins = rem // 60
+                if days > 0:
+                    air_badge = f"EP {next_ep} in {days}d {hours}h"
+                elif hours > 0:
+                    air_badge = f"EP {next_ep} in {hours}h {mins}m"
+                else:
+                    air_badge = f"EP {next_ep} in {mins}m"
+            elif next_ep > 0:
+                air_badge = f"EP {next_ep} Airing"
+            else:
+                air_badge = f"Watched {effective_watched}"
+
+            denom = total_eps if total_eps > 0 else max(1, latest_aired_ep)
+            prog_ratio = min(1.0, max(0.0, float(effective_watched) / float(denom))) if denom > 0 else 0.0
+
+            card_path = linked_path if linked_path else f"airing://{aid_str}"
+            items_out.append({
+                "name": title,
+                "display_title": title,
+                "subtitle": status_label,
+                "badge": air_badge,
+                "path": card_path,
+                "is_dir": True if linked_path else False,
+                "size": f"Local: Ep {effective_watched} / {total_eps if total_eps > 0 else '?'}",
+                "modified": str(sched.get("last_sync") or udata.get("updated_at") or ""),
+                "created": "",
+                "icon": "📡",
+                "type": "Airing Anime",
+                "raw_size": 0,
+                "raw_mod": next_air_ts if next_air_ts > 0 else 9999999999.0,
+                "raw_created": 0,
+                "thumb": poster_local,
+                "folder_previews": [],
+                "episode_num": str(latest_aired_ep) if latest_aired_ep > 0 else "",
+                "progress": round(prog_ratio, 4),
+                "is_watched": False,
+                "is_new": behind_count > 0,
+                "is_movie_item": True,
+                "is_hdr": False,
+                "episode_title": f"{title} ({status_label})",
+                "overview": (
+                    f"Tracking Status: {status_label}\n"
+                    f"Local Watched Progress: {effective_watched} / {total_eps if total_eps > 0 else '?'} episodes\n"
+                    f"Latest Aired Episode: EP {latest_aired_ep}\n"
+                    f"Linked Media Hub Folder: {linked_path if linked_path else 'Not linked (Right-click -> Link with Media Hub Work)'}"
+                ),
+                "rating": str(udata.get("score", "")) if udata.get("score") else "",
+                "poster": poster_local,
+                "is_airing_card": True,
+                "airing_id": aid_str,
+                "linked_path": linked_path,
+                "local_watched_eps": effective_watched,
+                "behind_count": behind_count,
+                "is_going_tight": is_going_tight
+            })
+
+        if dirty_schedules:
+            self.airing_tracker._save_json(self.airing_tracker.schedules_file, schedules)
+
+        items_out.sort(key=lambda x: (0 if x.get("raw_mod", 0) > now_ts else 1, x.get("raw_mod", 0)))
+        return items_out
+
+    @Property(str, notify=mediaHubConfigChanged)
+    def malUsername(self) -> str:
+        return self.airing_tracker.mal_username
+
+    @Property(str, notify=mediaHubConfigChanged)
+    def malClientId(self) -> str:
+        return self.airing_tracker.mal_client_id
+
+    @Property(str, notify=mediaHubConfigChanged)
+    def malAccessToken(self) -> str:
+        return self.airing_tracker.mal_access_token
+
+    @Slot(str, str, str)
+    def saveAiringConfig(self, username: str, client_id: str, access_token: str):
+        self.config_mgr.set("mal_username", username.strip() or "CriticalweebR18")
+        self.config_mgr.set("mal_client_id", client_id.strip())
+        self.config_mgr.set("mal_access_token", access_token.strip())
+        self.mediaHubConfigChanged.emit()
+        self.toastMessage.emit("✔ Saved Airing Tracker settings — Syncing MAL & AniList...")
+        self.forceSyncAiringNow()
+
+    @Slot()
+    def forceSyncAiringNow(self):
+        self.toastMessage.emit("🔄 Syncing MAL & AniList Airing schedules in background...")
+        self._trigger_background_airing_sync(force=True)
+
+    @Slot(str, int)
+    def adjustAiringEpisode(self, airing_id: str, delta: int):
+        clean_id = str(airing_id).replace("airing://", "").strip()
+        if not clean_id:
+            return
+        local_ep_map = dict(self.config_mgr.get("airing_local_eps", {}) or {})
+        links_map = dict(self.config_mgr.get("airing_links", {}) or {})
+        linked_path = str(links_map.get(clean_id, "") or "")
+        folder_eps = self._get_highest_watched_ep_in_folder(linked_path) if (linked_path and os.path.exists(linked_path)) else 0
+
+        cur_val = int(local_ep_map.get(clean_id, folder_eps) or 0)
+        new_val = max(0, cur_val + int(delta))
+
+        schedules = self.airing_tracker._load_json(self.airing_tracker.schedules_file)
+        cache = self.airing_tracker._load_json(self.airing_tracker.cache_file).get(self.airing_tracker.mal_username, {})
+        sched = schedules.get(clean_id, {})
+        udata = cache.get(clean_id, {})
+        total_eps = int(sched.get("total_eps") or udata.get("total_episodes") or 0)
+        if total_eps > 0:
+            new_val = min(total_eps, new_val)
+
+        local_ep_map[clean_id] = new_val
+        self.config_mgr.set("airing_local_eps", local_ep_map)
+
+        # Also mark/unmark matching episode inside linked local folder if present!
+        if linked_path and os.path.isdir(linked_path):
+            target_ep_to_toggle = new_val if delta > 0 else (cur_val if delta < 0 else -1)
+            mark_watched_state = True if delta > 0 else False
+            if target_ep_to_toggle > 0:
+                try:
+                    for root_d, _, files in os.walk(linked_path):
+                        for fn in files:
+                            if Path(fn).suffix.lower() in VIDEO_EXTS and not fn.startswith("."):
+                                _, ep_v = self._parse_episode_info(fn)
+                                if ep_v is not None and int(ep_v) == target_ep_to_toggle:
+                                    fp = os.path.join(root_d, fn)
+                                    cur_p = self.config_mgr.get_media_progress(fp)
+                                    dur = cur_p.get("duration", 100.0) or 100.0
+                                    self.config_mgr.set_media_progress(fp, 0.0, dur, watched=mark_watched_state)
+                except Exception:
+                    pass
+
+        title = str(sched.get("title") or udata.get("title") or f"Anime #{clean_id}")
+        if total_eps > 0 and new_val >= total_eps:
+            if clean_id in schedules:
+                schedules[clean_id]["status"] = "finished"
+                self.airing_tracker._save_json(self.airing_tracker.schedules_file, schedules)
+            self.toastMessage.emit(f"🏁 Completed '{title}' (Ep {new_val}/{total_eps}) — Removed from Airing!")
+        else:
+            self.toastMessage.emit(f"📺 {title}: Local Progress set to Episode {new_val}")
+
+        if str(self._current_path) == "mediahub://":
+            self.refreshMediaHub()
+
+    @Slot()
+    def clearAllAiringLinks(self):
+        self.config_mgr.set("airing_links", {})
+        self.mediaHubConfigChanged.emit()
+        self.toastMessage.emit("⛓️‍💥 Cleared all Airing folder links")
+        if str(self._current_path) == "mediahub://":
+            self.refreshMediaHub()
+
+    @Slot(str)
+    def ignoreAiringItem(self, airing_id: str):
+        clean_id = str(airing_id).replace("airing://", "").strip()
+        if not clean_id:
+            return
+        ignored = list(self.config_mgr.get("airing_ignored_ids", []) or [])
+        if clean_id not in ignored:
+            ignored.append(clean_id)
+            self.config_mgr.set("airing_ignored_ids", ignored)
+            self.mediaHubConfigChanged.emit()
+            self.toastMessage.emit("🚫 Ignored anime from Airing tab (Can be restored in Settings)")
+            if str(self._current_path) == "mediahub://":
+                self.refreshMediaHub()
+
+    @Slot(str)
+    def restoreIgnoredAiringItem(self, airing_id: str):
+        clean_id = str(airing_id).strip()
+        ignored = [str(x) for x in (self.config_mgr.get("airing_ignored_ids", []) or []) if str(x) != clean_id]
+        self.config_mgr.set("airing_ignored_ids", ignored)
+        self.mediaHubConfigChanged.emit()
+        self.toastMessage.emit("✔ Restored anime to Airing tab")
+        if str(self._current_path) == "mediahub://":
+            self.refreshMediaHub()
+
+    @Slot()
+    def clearAllIgnoredAiringItems(self):
+        self.config_mgr.set("airing_ignored_ids", [])
+        self.mediaHubConfigChanged.emit()
+        self.toastMessage.emit("✔ Restored all ignored Airing items")
+        if str(self._current_path) == "mediahub://":
+            self.refreshMediaHub()
+
+    @Slot(result=list)
+    def getIgnoredAiringItems(self) -> list:
+        ignored = [str(x) for x in (self.config_mgr.get("airing_ignored_ids", []) or [])]
+        if not ignored:
+            return []
+        cache = self.airing_tracker._load_json(self.airing_tracker.cache_file).get(self.airing_tracker.mal_username, {})
+        schedules = self.airing_tracker._load_json(self.airing_tracker.schedules_file)
+        out = []
+        for aid in ignored:
+            t = (schedules.get(aid) or {}).get("title") or (cache.get(aid) or {}).get("title") or f"Anime ID #{aid}"
+            out.append({"id": aid, "title": t})
+        return out
+
+    @Slot(result=list)
+    def getMediaHubLinkCandidates(self) -> list:
+        candidates = []
+        seen = set()
+        for lib in self.getMediaLibraries():
+            lp = lib.get("path", "")
+            if not lp or not os.path.isdir(lp):
+                continue
+            try:
+                with os.scandir(lp) as it:
+                    for entry in it:
+                        if entry.is_dir() and not entry.name.startswith("."):
+                            ap = os.path.abspath(entry.path)
+                            if ap not in seen:
+                                seen.add(ap)
+                                candidates.append({"name": entry.name, "path": ap, "lib_name": lib.get("name", "")})
+            except OSError:
+                pass
+        candidates.sort(key=lambda x: x["name"].lower())
+        return candidates
+
+    @Slot(str, str)
+    def linkAiringToMediaFolder(self, airing_id: str, folder_path: str):
+        clean_id = str(airing_id).replace("airing://", "").strip()
+        if not clean_id:
+            return
+        links = dict(self.config_mgr.get("airing_links", {}) or {})
+        if not folder_path or not folder_path.strip():
+            links.pop(clean_id, None)
+            self.config_mgr.set("airing_links", links)
+            self.toastMessage.emit("🔗 Unlinked local folder from Airing entry")
+        else:
+            norm_p = os.path.abspath(os.path.expanduser(folder_path.strip()))
+            if os.path.exists(norm_p):
+                links[clean_id] = norm_p
+                self.config_mgr.set("airing_links", links)
+                self.toastMessage.emit(f"🔗 Linked Airing anime to '{Path(norm_p).name}'")
+        self.mediaHubConfigChanged.emit()
+        if str(self._current_path) == "mediahub://":
+            self.refreshMediaHub()
+
     @Slot(str)
     def openEntry(self, file_path_str: str):
+        if file_path_str.startswith("airing://"):
+            aid = file_path_str.replace("airing://", "").strip()
+            links = dict(self.config_mgr.get("airing_links", {}) or {})
+            linked_p = links.get(aid, "")
+            if linked_p and os.path.exists(linked_p):
+                if os.path.isdir(linked_p) and self.canResumeFolder(linked_p):
+                    self.resumeMediaFolder(linked_p)
+                else:
+                    self.openEntry(linked_p)
+            else:
+                self.toastMessage.emit("🔗 Right-click this Airing card -> 'Link with Media Hub Work' to link its local folder")
+            return
         if file_path_str in ("recent://", "trash://", "favorites://", "mediahub://") or file_path_str.startswith("analyzer://"):
             self.navigateTo(file_path_str)
             return

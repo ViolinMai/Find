@@ -12,7 +12,7 @@ Rectangle {
     readonly property bool showModifiedCol: width >= Math.round(420 * Theme.scaleFactor)
     readonly property bool showSizeCol: width >= Math.round(290 * Theme.scaleFactor)
     property string hoveredSubfolderPath: ""
-    readonly property bool hasOpenModal: permDeleteDialog.visible || desktopMakerModal.visible || propertiesModal.visible || dolphinMenu.visible || dolphinMenu.hasDialogOpen || backgroundMenu.visible
+    readonly property bool hasOpenModal: permDeleteDialog.visible || airingLinkDialog.visible || desktopMakerModal.visible || propertiesModal.visible || dolphinMenu.visible || dolphinMenu.hasDialogOpen || backgroundMenu.visible
 
     function extractDropUrls(drop) {
         var urls = []
@@ -171,6 +171,211 @@ Rectangle {
         }
     }
 
+    Dialog {
+        id: airingLinkDialog
+        title: "Link Airing Anime with Media Hub Work"
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: Math.min(Math.round(520 * Theme.scaleFactor), root.width - 24)
+        height: Math.min(Math.round(440 * Theme.scaleFactor), root.height - 24)
+
+        property string targetAiringId: ""
+        property string targetAiringTitle: ""
+        property var candidatesList: []
+
+        function openForAiring(aid, title) {
+            targetAiringId = aid
+            targetAiringTitle = title
+            linkFilterField.text = ""
+            candidatesList = backend ? backend.getMediaHubLinkCandidates() : []
+            airingLinkDialog.open()
+            linkFilterField.forceActiveFocus()
+        }
+
+        Connections {
+            target: backend
+            function onPickerCompleted(paths) {
+                if (paths.length > 0 && airingLinkDialog.browsingCustomLink) {
+                    airingLinkDialog.browsingCustomLink = false
+                    backend.linkAiringToMediaFolder(airingLinkDialog.targetAiringId, paths[0])
+                    airingLinkDialog.close()
+                }
+            }
+        }
+
+        property bool browsingCustomLink: false
+
+        background: Rectangle {
+            color: Theme.bgSurface
+            border.color: Theme.accent
+            border.width: 1
+            radius: Theme.radiusLarge
+        }
+
+        header: Rectangle {
+            height: Math.round(44 * Theme.scaleFactor)
+            color: Theme.bgCard
+            radius: Theme.radiusLarge
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 16
+                anchors.rightMargin: 16
+                Text {
+                    Layout.fillWidth: true
+                    text: "🔗 Link '" + airingLinkDialog.targetAiringTitle + "' with Local Work"
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSizeMedium
+                    font.bold: true
+                    elide: Text.ElideRight
+                }
+            }
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 10
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                TextField {
+                    id: linkFilterField
+                    Layout.fillWidth: true
+                    placeholderText: "🔍 Search your Media Hub works..."
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSizeNormal
+                    selectByMouse: true
+                    background: Rectangle {
+                        implicitHeight: Math.round(32 * Theme.scaleFactor)
+                        color: Theme.bgCard
+                        radius: Theme.radiusSmall
+                        border.color: linkFilterField.activeFocus ? Theme.accent : Theme.borderDim
+                    }
+                }
+                Button {
+                    text: "📂 Browse Folder..."
+                    onClicked: {
+                        airingLinkDialog.browsingCustomLink = true
+                        if (backend) backend.openInternalPicker("folder", "", "Select Local Anime Folder to Link")
+                    }
+                    contentItem: Text {
+                        text: parent.text
+                        color: Theme.textPrimary
+                        font.bold: true
+                        font.pixelSize: Theme.fontSizeSmall
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: Math.round(130 * Theme.scaleFactor)
+                        implicitHeight: Math.round(32 * Theme.scaleFactor)
+                        color: parent.hovered ? Theme.bgHover : Theme.bgCard
+                        border.color: Theme.borderDim
+                        radius: Theme.radiusSmall
+                    }
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                color: Theme.bgBase
+                radius: Theme.radiusMedium
+                border.color: Theme.borderDim
+                clip: true
+
+                ListView {
+                    anchors.fill: parent
+                    anchors.margins: 6
+                    spacing: 4
+                    clip: true
+                    model: {
+                        var q = linkFilterField.text.trim().toLowerCase()
+                        var all = airingLinkDialog.candidatesList || []
+                        if (q === "") return all
+                        var filtered = []
+                        for (var i = 0; i < all.length; i++) {
+                            if (all[i].name.toLowerCase().indexOf(q) !== -1 || all[i].path.toLowerCase().indexOf(q) !== -1) {
+                                filtered.push(all[i])
+                            }
+                        }
+                        return filtered
+                    }
+
+                    delegate: Rectangle {
+                        width: ListView.view.width
+                        height: Math.round(40 * Theme.scaleFactor)
+                        radius: Theme.radiusSmall
+                        color: candMouse.containsMouse ? Theme.bgHover : Theme.bgCard
+                        border.color: candMouse.containsMouse ? Theme.accent : Theme.borderDim
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 12
+                            spacing: 10
+                            Text { text: "📺"; font.pixelSize: Theme.fontSizeMedium }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 1
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.name
+                                    color: Theme.textPrimary
+                                    font.bold: true
+                                    font.pixelSize: Theme.fontSizeNormal
+                                    elide: Text.ElideRight
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.path
+                                    color: Theme.textTertiary
+                                    font.family: "monospace"
+                                    font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
+                                    elide: Text.ElideMiddle
+                                }
+                            }
+                        }
+
+                        MouseArea {
+                            id: candMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (backend) {
+                                    backend.linkAiringToMediaFolder(airingLinkDialog.targetAiringId, modelData.path)
+                                }
+                                airingLinkDialog.close()
+                            }
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "Cancel"
+                    onClicked: airingLinkDialog.close()
+                    contentItem: Text {
+                        text: parent.text
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSizeNormal
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: Math.round(85 * Theme.scaleFactor)
+                        implicitHeight: Math.round(32 * Theme.scaleFactor)
+                        color: parent.hovered ? Theme.bgHover : "transparent"
+                        border.color: Theme.borderDim
+                        radius: Theme.radiusSmall
+                    }
+                }
+            }
+        }
+    }
+
     DolphinContextMenu {
         id: dolphinMenu
         onRequestDesktopMaker: function(execPath) {
@@ -181,6 +386,9 @@ Rectangle {
         }
         onRequestProperties: function(tPath) {
             propertiesModal.openForPath(tPath)
+        }
+        onRequestAiringLinkModal: function(aid, aTitle) {
+            airingLinkDialog.openForAiring(aid, aTitle)
         }
     }
 
@@ -899,20 +1107,26 @@ Rectangle {
                             }
                         }
 
-                        // Dynamic Configurable Rows (Continue Watching / Recently Added / Next Up)
+                        // Persistent Damage-Tracked Media Hub Sections (Zero Flashing, Preserves Scroll & Delegates!)
                         Repeater {
-                            model: backend ? backend.mediaHubSections : []
+                            model: backend ? backend.mediaHubModel : null
                             delegate: ColumnLayout {
                                 id: sectionBlock
                                 Layout.fillWidth: true
                                 spacing: Math.round(10 * Theme.scaleFactor)
+
+                                required property string section_id
+                                required property string title
+                                required property string subtitle
+                                required property int item_count
+                                required property var cards_model
 
                                 RowLayout {
                                     Layout.fillWidth: true
                                     spacing: 10
 
                                     Text {
-                                        text: modelData.title
+                                        text: sectionBlock.title
                                         color: Theme.textPrimary
                                         font.pixelSize: Theme.fontSizeTitle
                                         font.bold: true
@@ -927,7 +1141,7 @@ Rectangle {
                                         Text {
                                             id: cntTxt
                                             anchors.centerIn: parent
-                                            text: modelData.items ? String(modelData.items.length) : "0"
+                                            text: String(sectionBlock.item_count)
                                             color: Theme.textSecondary
                                             font.pixelSize: Math.round(9 * Theme.scaleFactor)
                                             font.bold: true
@@ -936,7 +1150,7 @@ Rectangle {
 
                                     Text {
                                         Layout.fillWidth: true
-                                        text: modelData.subtitle || ""
+                                        text: sectionBlock.subtitle || ""
                                         color: Theme.textTertiary
                                         font.pixelSize: Theme.fontSizeSmall
                                         elide: Text.ElideRight
@@ -944,7 +1158,7 @@ Rectangle {
                                 }
 
                                 Rectangle {
-                                    visible: !modelData.items || modelData.items.length === 0
+                                    visible: sectionBlock.item_count === 0
                                     Layout.fillWidth: true
                                     height: Math.round(78 * Theme.scaleFactor)
                                     radius: Theme.radiusMedium
@@ -961,14 +1175,15 @@ Rectangle {
 
                                 ListView {
                                     id: rowHorizList
-                                    visible: modelData.items && modelData.items.length > 0
+                                    visible: sectionBlock.item_count > 0
                                     Layout.fillWidth: true
                                     height: Math.round(238 * Theme.scaleFactor)
                                     orientation: ListView.Horizontal
                                     spacing: Math.round(12 * Theme.scaleFactor)
                                     clip: true
                                     boundsBehavior: Flickable.StopAtBounds
-                                    model: modelData.items || []
+                                    reuseItems: false
+                                    model: sectionBlock.cards_model
 
                                     WheelHandler {
                                         target: null
@@ -984,15 +1199,14 @@ Rectangle {
 
                                     delegate: Rectangle {
                                         id: hubCard
-                                        readonly property var cardItem: modelData
                                         width: Math.round(154 * Theme.scaleFactor)
                                         height: Math.round(236 * Theme.scaleFactor)
                                         radius: Theme.radiusLarge
                                         readonly property bool isCardSel: {
-                                            if (!backend || !cardItem || !cardItem.path) return false
+                                            if (!backend || !model.path) return false
                                             var sList = backend.selectedPaths
-                                            if (sList && sList.indexOf(cardItem.path) !== -1) return true
-                                            return (backend.selectedItem && backend.selectedItem.path === cardItem.path) ? true : false
+                                            if (sList && sList.indexOf(model.path) !== -1) return true
+                                            return (backend.selectedItem && backend.selectedItem.path === model.path) ? true : false
                                         }
                                         // Floating Poster Preview style: transparent background, no heavy box frame!
                                         color: isCardSel ? "#240078d4" : (hubCardMouse.containsMouse ? "#12ffffff" : "transparent")
@@ -1010,31 +1224,23 @@ Rectangle {
                                                 Layout.fillWidth: true
                                                 Layout.fillHeight: true
 
-                                                readonly property string artSource: {
-                                                    if (modelData.poster && modelData.poster !== "") return "file://" + modelData.poster
-                                                    if (modelData.thumb && modelData.thumb !== "") return "file://" + modelData.thumb
-                                                    if (modelData.folder_previews && modelData.folder_previews.length > 0 && modelData.folder_previews[0].thumb !== "") {
-                                                        return "file://" + modelData.folder_previews[0].thumb
-                                                    }
-                                                    return ""
-                                                }
-
                                                 Image {
                                                     id: hubPosterImg
                                                     anchors.centerIn: parent
                                                     width: parent.width
                                                     height: parent.height
-                                                    visible: posterViewport.artSource !== ""
-                                                    source: posterViewport.artSource
+                                                    visible: model.art_source !== ""
+                                                    source: model.art_source
                                                     fillMode: Image.PreserveAspectFit
                                                     asynchronous: true
+                                                    cache: true
                                                     smooth: true
                                                     mipmap: true
                                                 }
 
                                                 // Fallback Icon Card only when no poster/thumb exists
                                                 Rectangle {
-                                                    visible: posterViewport.artSource === ""
+                                                    visible: model.art_source === ""
                                                     width: parent.width * 0.84
                                                     height: parent.height * 0.92
                                                     anchors.centerIn: parent
@@ -1045,7 +1251,7 @@ Rectangle {
 
                                                     Text {
                                                         anchors.centerIn: parent
-                                                        text: modelData.is_dir ? "📺" : "🎬"
+                                                        text: model.is_dir ? "📺" : "🎬"
                                                         font.pixelSize: Math.round(34 * Theme.scaleFactor)
                                                     }
                                                 }
@@ -1063,7 +1269,7 @@ Rectangle {
 
                                                     // Top-Left Smart Episode / Range Badge (e.g. "EP 5-15 added", "EP 04 • 62%")
                                                     Rectangle {
-                                                        visible: modelData.badge !== undefined && modelData.badge !== ""
+                                                        visible: model.badge !== undefined && model.badge !== ""
                                                         anchors.left: parent.left
                                                         anchors.top: parent.top
                                                         anchors.margins: 6
@@ -1071,15 +1277,15 @@ Rectangle {
                                                         implicitHeight: Math.round(19 * Theme.scaleFactor)
                                                         radius: height / 2
                                                         color: "#dd0f172a"
-                                                        border.color: "#6638bdf8"
+                                                        border.color: Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.4)
                                                         border.width: 1
 
                                                         Text {
                                                             id: badgeLbl
                                                             anchors.centerIn: parent
                                                             width: parent.width - 8
-                                                            text: modelData.badge || ""
-                                                            color: "#38bdf8"
+                                                            text: model.badge || ""
+                                                            color: Theme.accent
                                                             font.pixelSize: Math.round(8.2 * Theme.scaleFactor)
                                                             font.bold: true
                                                             elide: Text.ElideRight
@@ -1089,7 +1295,7 @@ Rectangle {
 
                                                     // Top-Right HDR Badge
                                                     Rectangle {
-                                                        visible: modelData.is_hdr === true
+                                                        visible: model.is_hdr === true
                                                         anchors.right: parent.right
                                                         anchors.top: parent.top
                                                         anchors.margins: 6
@@ -1110,9 +1316,142 @@ Rectangle {
                                                         }
                                                     }
 
+                                                    // Dimmed Overlay + Elegant White "WATCHED" Typography when a Recently Added Card is completed!
+                                                    Rectangle {
+                                                        visible: model.is_recently_added_card === true && model.is_watched === true
+                                                        anchors.fill: parent
+                                                        radius: parent.radius
+                                                        color: "#aa09090d"
+
+                                                        Rectangle {
+                                                            anchors.centerIn: parent
+                                                            implicitWidth: watchedTypography.implicitWidth + Math.round(20 * Theme.scaleFactor)
+                                                            implicitHeight: Math.round(28 * Theme.scaleFactor)
+                                                            radius: Math.round(6 * Theme.scaleFactor)
+                                                            color: "#40000000"
+                                                            border.color: "#ccffffff"
+                                                            border.width: 1.2
+
+                                                            Text {
+                                                                id: watchedTypography
+                                                                anchors.centerIn: parent
+                                                                text: "WATCHED"
+                                                                color: "#ffffff"
+                                                                font.pixelSize: Math.round(11 * Theme.scaleFactor)
+                                                                font.bold: true
+                                                                font.letterSpacing: 2.4
+                                                            }
+                                                        }
+                                                    }
+
+                                                    // Airing Linked Indicator Pill (Bottom-Left)
+                                                    Rectangle {
+                                                        visible: model.is_airing_card === true && model.linked_path !== undefined && model.linked_path !== ""
+                                                        anchors.left: parent.left
+                                                        anchors.bottom: parent.bottom
+                                                        anchors.leftMargin: 6
+                                                        anchors.bottomMargin: 15
+                                                        implicitWidth: linkedBadgeTxt.implicitWidth + 10
+                                                        implicitHeight: Math.round(16 * Theme.scaleFactor)
+                                                        radius: height / 2
+                                                        color: "#d9064e3b"
+                                                        border.color: "#10b981"
+                                                        border.width: 1
+
+                                                        Text {
+                                                            id: linkedBadgeTxt
+                                                            anchors.centerIn: parent
+                                                            text: "🔗 Linked"
+                                                            color: "#6ee7b7"
+                                                            font.pixelSize: Math.round(7.5 * Theme.scaleFactor)
+                                                            font.bold: true
+                                                        }
+                                                    }
+
+                                                    // Quick Increment (+1) & Decrement (-1) Episode Stepper Pill on Airing Cards (Bottom-Right)
+                                                    Rectangle {
+                                                        visible: model.is_airing_card === true && (hubCardMouse.containsMouse || decEpMouse.containsMouse || incEpMouse.containsMouse || hubCard.isCardSel)
+                                                        anchors.right: parent.right
+                                                        anchors.bottom: parent.bottom
+                                                        anchors.rightMargin: 6
+                                                        anchors.bottomMargin: 14
+                                                        z: 20
+                                                        width: Math.round(68 * Theme.scaleFactor)
+                                                        height: Math.round(22 * Theme.scaleFactor)
+                                                        radius: height / 2
+                                                        color: "#e6111827"
+                                                        border.color: "#8838bdf8"
+                                                        border.width: 1
+
+                                                        RowLayout {
+                                                            anchors.fill: parent
+                                                            anchors.leftMargin: 2
+                                                            anchors.rightMargin: 2
+                                                            spacing: 0
+
+                                                            Rectangle {
+                                                                Layout.fillWidth: true
+                                                                Layout.fillHeight: true
+                                                                radius: height / 2
+                                                                color: decEpMouse.containsMouse ? "#45f87171" : "transparent"
+                                                                Text {
+                                                                    anchors.centerIn: parent
+                                                                    text: "−"
+                                                                    color: "#f8fafc"
+                                                                    font.pixelSize: Math.round(11 * Theme.scaleFactor)
+                                                                    font.bold: true
+                                                                }
+                                                                MouseArea {
+                                                                    id: decEpMouse
+                                                                    anchors.fill: parent
+                                                                    hoverEnabled: true
+                                                                    cursorShape: Qt.PointingHandCursor
+                                                                    onClicked: {
+                                                                        if (backend && model.airing_id) {
+                                                                            backend.adjustAiringEpisode(model.airing_id, -1)
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+
+                                                            Rectangle {
+                                                                width: 1
+                                                                Layout.fillHeight: true
+                                                                Layout.topMargin: 4
+                                                                Layout.bottomMargin: 4
+                                                                color: "#35ffffff"
+                                                            }
+
+                                                            Rectangle {
+                                                                Layout.fillWidth: true
+                                                                Layout.fillHeight: true
+                                                                radius: height / 2
+                                                                color: incEpMouse.containsMouse ? "#4510b981" : "transparent"
+                                                                Text {
+                                                                    anchors.centerIn: parent
+                                                                    text: "＋"
+                                                                    color: "#34d399"
+                                                                    font.pixelSize: Math.round(10 * Theme.scaleFactor)
+                                                                    font.bold: true
+                                                                }
+                                                                MouseArea {
+                                                                    id: incEpMouse
+                                                                    anchors.fill: parent
+                                                                    hoverEnabled: true
+                                                                    cursorShape: Qt.PointingHandCursor
+                                                                    onClicked: {
+                                                                        if (backend && model.airing_id) {
+                                                                            backend.adjustAiringEpisode(model.airing_id, 1)
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+
                                                     // Sleek Pill-Rounded Progress Bar floating cleanly near bottom of Poster
                                                     Rectangle {
-                                                        visible: modelData.progress !== undefined && modelData.progress > 0.005
+                                                        visible: model.progress !== undefined && model.progress > 0.005
                                                         anchors.left: parent.left
                                                         anchors.right: parent.right
                                                         anchors.bottom: parent.bottom
@@ -1127,13 +1466,13 @@ Rectangle {
                                                         clip: true
 
                                                         Rectangle {
-                                                            width: Math.max(parent.height, parent.width * Math.min(1.0, Math.max(0.0, modelData.progress)))
+                                                            width: Math.max(parent.height, parent.width * Math.min(1.0, Math.max(0.0, model.progress)))
                                                             height: parent.height
                                                             radius: height / 2
                                                             gradient: Gradient {
                                                                 orientation: Gradient.Horizontal
-                                                                GradientStop { position: 0.0; color: modelData.is_watched ? "#10b981" : "#0078d4" }
-                                                                GradientStop { position: 1.0; color: modelData.is_watched ? "#34d399" : "#38bdf8" }
+                                                                GradientStop { position: 0.0; color: model.is_watched ? "#10b981" : Theme.accent }
+                                                                GradientStop { position: 1.0; color: model.is_watched ? "#34d399" : Theme.accent }
                                                             }
                                                             Behavior on width { NumberAnimation { duration: 140; easing.type: Easing.OutCubic } }
                                                         }
@@ -1148,7 +1487,7 @@ Rectangle {
 
                                                 Text {
                                                     Layout.fillWidth: true
-                                                    text: modelData.display_title || modelData.name
+                                                    text: model.display_title || model.name
                                                     color: Theme.textPrimary
                                                     font.pixelSize: Theme.fontSizeSmall
                                                     font.bold: true
@@ -1158,8 +1497,11 @@ Rectangle {
 
                                                 Text {
                                                     Layout.fillWidth: true
-                                                    text: modelData.subtitle || modelData.name
-                                                    color: Theme.textTertiary
+                                                    text: model.subtitle || model.name
+                                                    color: model.is_airing_card === true
+                                                           ? (model.is_going_tight === true ? "#34d399" : "#fbbf24")
+                                                           : Theme.textTertiary
+                                                    font.bold: model.is_airing_card === true
                                                     font.pixelSize: Math.round(8.8 * Theme.scaleFactor)
                                                     horizontalAlignment: Text.AlignHCenter
                                                     elide: Text.ElideMiddle
@@ -1175,30 +1517,29 @@ Rectangle {
                                             cursorShape: Qt.PointingHandCursor
 
                                             onPressed: function(mouse) {
-                                                if (!backend || !hubCard.cardItem) return
+                                                if (!backend || !model.path) return
                                                 var swapped = backend.swapMouseButtons
                                                 var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
                                                 if (isPrimary && mouse.modifiers === Qt.NoModifier && !hubCard.isCardSel) {
                                                     backend.selectItem(
-                                                        hubCard.cardItem.path || "",
-                                                        hubCard.cardItem.name || "",
-                                                        Boolean(hubCard.cardItem.is_dir),
-                                                        hubCard.cardItem.size || "",
-                                                        hubCard.cardItem.modified || "",
-                                                        hubCard.cardItem.type || "",
+                                                        model.path || "",
+                                                        model.name || "",
+                                                        Boolean(model.is_dir),
+                                                        model.size || "",
+                                                        model.modified || "",
+                                                        model.type || "",
                                                         0
                                                     )
                                                 }
                                             }
 
                                             onClicked: function(mouse) {
-                                                if (!backend || !hubCard.cardItem) return
-                                                var itemObj = hubCard.cardItem
+                                                if (!backend || !model.path) return
                                                 if (mouse.button === Qt.MiddleButton) {
-                                                    if (itemObj.is_dir) {
-                                                        backend.addTab(itemObj.path)
-                                                    } else {
-                                                        backend.goToParentFolder(itemObj.path)
+                                                    if (model.is_dir) {
+                                                        backend.addTab(model.path)
+                                                    } else if (!model.is_airing_card) {
+                                                        backend.goToParentFolder(model.path)
                                                     }
                                                     return
                                                 }
@@ -1207,29 +1548,32 @@ Rectangle {
                                                 var isSecondary = swapped ? (mouse.button === Qt.LeftButton) : (mouse.button === Qt.RightButton)
 
                                                 backend.selectItem(
-                                                    itemObj.path || "",
-                                                    itemObj.name || "",
-                                                    Boolean(itemObj.is_dir),
-                                                    itemObj.size || "",
-                                                    itemObj.modified || "",
-                                                    itemObj.type || "",
+                                                    model.path || "",
+                                                    model.name || "",
+                                                    Boolean(model.is_dir),
+                                                    model.size || "",
+                                                    model.modified || "",
+                                                    model.type || "",
                                                     mouse.modifiers
                                                 )
 
                                                 if (isSecondary) {
-                                                    dolphinMenu.targetPath = itemObj.path || ""
-                                                    dolphinMenu.targetName = itemObj.name || ""
-                                                    dolphinMenu.isDir = Boolean(itemObj.is_dir)
+                                                    dolphinMenu.targetPath = model.path || ""
+                                                    dolphinMenu.targetName = model.name || ""
+                                                    dolphinMenu.isDir = Boolean(model.is_dir)
+                                                    dolphinMenu.isAiringItem = Boolean(model.is_airing_card)
+                                                    dolphinMenu.airingId = model.airing_id || ""
+                                                    dolphinMenu.airingLinkedPath = model.linked_path || ""
                                                     dolphinMenu.popupSafe(hubCard, mouse.x, mouse.y)
                                                 }
                                             }
 
                                             onDoubleClicked: function(mouse) {
-                                                if (!backend || !hubCard.cardItem) return
+                                                if (!backend || !model.path) return
                                                 var swapped = backend.swapMouseButtons
                                                 var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
                                                 if (isPrimary) {
-                                                    backend.openEntry(hubCard.cardItem.path)
+                                                    backend.openEntry(model.path)
                                                 }
                                             }
                                         }
@@ -1479,8 +1823,8 @@ Rectangle {
                                     implicitWidth: Math.max(Math.round(32 * Theme.scaleFactor), epNumTxt.implicitWidth + 12)
                                     implicitHeight: Math.round(22 * Theme.scaleFactor)
                                     radius: Theme.radiusSmall
-                                    color: model.is_watched ? "#1f10b981" : "#260078d4"
-                                    border.color: model.is_watched ? "#4010b981" : "#550078d4"
+                                    color: model.is_watched ? "#1f10b981" : Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.15)
+                                    border.color: model.is_watched ? "#4010b981" : Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.35)
                                     border.width: 1
                                     Layout.alignment: Qt.AlignVCenter
 
@@ -1488,7 +1832,7 @@ Rectangle {
                                         id: epNumTxt
                                         anchors.centerIn: parent
                                         text: model.episode_num
-                                        color: model.is_watched ? "#34d399" : "#38bdf8"
+                                        color: model.is_watched ? "#34d399" : Theme.accent
                                         font.pixelSize: Theme.fontSizeSmall
                                         font.bold: true
                                     }
@@ -1795,6 +2139,9 @@ Rectangle {
                                             dolphinMenu.targetPath = model.path
                                             dolphinMenu.targetName = model.name
                                             dolphinMenu.isDir = model.is_dir
+                                            dolphinMenu.isAiringItem = false
+                                            dolphinMenu.airingId = ""
+                                            dolphinMenu.airingLinkedPath = ""
                                             dolphinMenu.popupSafe(itemArea, mouse.x, mouse.y)
                                         }
                                         isHoldingDrag = false
@@ -2240,6 +2587,9 @@ Rectangle {
                                             dolphinMenu.targetPath = model.path
                                             dolphinMenu.targetName = model.name
                                             dolphinMenu.isDir = model.is_dir
+                                            dolphinMenu.isAiringItem = false
+                                            dolphinMenu.airingId = ""
+                                            dolphinMenu.airingLinkedPath = ""
                                             dolphinMenu.popupSafe(gridMouseArea, mouse.x, mouse.y)
                                         }
                                         isHoldingDrag = false

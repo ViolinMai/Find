@@ -8,9 +8,6 @@ import textwrap
 import tempfile
 
 USAGE = """
-================================================================================
-MAI ADVANCED SYNC & PATCH MANAGER (v5.0 - Top-Level + Inline + QML Smart Engine)
-================================================================================
 Block formats in 'patch.txt'   (every block must end with '### END'):
 
 1) Full file replacement / creation:

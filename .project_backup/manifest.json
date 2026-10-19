@@ -1,9 +1,6 @@
 {
   "modified": [
-    "main.py",
-    "core/backend.py",
-    "ui/components/AddressBar.qml",
-    "ui/components/PreviewPanel.qml"
+    "ui/components/FileView.qml"
   ],
   "created": []
 }

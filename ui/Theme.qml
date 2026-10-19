@@ -14,7 +14,7 @@ QtObject {
     readonly property color bgHover: "#32323b"
     readonly property color bgSelected: "#383844"
     readonly property color borderDim: "#34343e"
-    readonly property color borderFocus: "#0078d4"
+    readonly property color borderFocus: accent
 
     // Text colors (Full opacity)
     readonly property color textPrimary: "#f8fafc"
@@ -22,9 +22,9 @@ QtObject {
     readonly property color textTertiary: "#71717a"
     readonly property color textDanger: "#f87171"
 
-    // Accents
-    readonly property color accent: "#0078d4"
-    readonly property color accentHover: "#1a88e0"
+    // Accents (Dynamically bound to user's chosen theme color)
+    readonly property color accent: (typeof backend !== "undefined" && backend && backend.accentColor) ? backend.accentColor : "#0078d4"
+    readonly property color accentHover: (typeof backend !== "undefined" && backend && backend.accentHoverColor) ? backend.accentHoverColor : "#1a88e0"
 
     // Metrics
     readonly property int radiusSmall: Math.round(4 * scaleFactor)

@@ -20,11 +20,16 @@ Dialog {
     property var mediaLibsList: backend ? backend.getMediaLibraries() : []
     property var mediaHubRowsList: backend ? backend.getMediaHubRowConfig() : []
     property int mediaHubHiddenCount: backend ? backend.getMediaHubHiddenCount() : 0
+    property var ignoredAiringList: backend ? backend.getIgnoredAiringItems() : []
     property var savedDesktopList: backend ? backend.getSavedDesktopApps() : []
     property var defaultIconsMap: backend ? backend.getDefaultTypeIcons() : ({})
     property int selectedQAIndex: -1
     property string activePickerTarget: ""
     property string activeIconKeyTarget: ""
+    property bool showCustomColorPicker: false
+    property real pickerHue: 0.58
+    property real pickerSat: 0.85
+    property real pickerVal: 0.90
 
     IconBrowserDialog {
         id: settingsIconBrowser
@@ -90,6 +95,7 @@ Dialog {
             if (backend) {
                 root.mediaHubRowsList = backend.getMediaHubRowConfig()
                 root.mediaHubHiddenCount = backend.getMediaHubHiddenCount()
+                root.ignoredAiringList = backend.getIgnoredAiringItems()
             }
         }
         function onFavoritesUpdated() {
@@ -350,6 +356,303 @@ Dialog {
                     x: 14
                     y: 14
                     spacing: 14
+
+                    SectionCard {
+                        sectionTitle: "🎨 Theme Accent Color & Custom Color Picker"
+                        sectionSubtitle: "Choose any custom accent color for Find. Your last 5 chosen colors are automatically saved for 1-click switching."
+
+                        // Row 1: Current Active Color + HEX Input + Toggle Color Picker Button
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 10
+
+                            Rectangle {
+                                width: Math.round(34 * Theme.scaleFactor)
+                                height: Math.round(34 * Theme.scaleFactor)
+                                radius: Theme.radiusMedium
+                                color: Theme.accent
+                                border.color: "#ffffff"
+                                border.width: 1.5
+                            }
+
+                            ColumnLayout {
+                                spacing: 1
+                                Text {
+                                    text: "Active Theme Color"
+                                    color: Theme.textPrimary
+                                    font.bold: true
+                                    font.pixelSize: Theme.fontSizeNormal
+                                }
+                                Text {
+                                    text: backend ? backend.accentColor.toUpperCase() : "#0078D4"
+                                    color: Theme.textTertiary
+                                    font.family: "monospace"
+                                    font.pixelSize: Theme.fontSizeSmall
+                                }
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            TextField {
+                                id: customHexInput
+                                implicitWidth: Math.round(105 * Theme.scaleFactor)
+                                text: backend ? backend.accentColor : "#0078d4"
+                                placeholderText: "#RRGGBB"
+                                color: Theme.textPrimary
+                                font.family: "monospace"
+                                font.pixelSize: Theme.fontSizeNormal
+                                selectByMouse: true
+                                onAccepted: {
+                                    if (backend && text.trim() !== "") {
+                                        backend.setAccentColor(text.trim())
+                                    }
+                                }
+                                background: Rectangle {
+                                    implicitHeight: Math.round(30 * Theme.scaleFactor)
+                                    color: Theme.bgSurface
+                                    radius: Theme.radiusSmall
+                                    border.color: customHexInput.activeFocus ? Theme.accent : Theme.borderDim
+                                }
+                            }
+
+                            ActionBtn {
+                                text: "✔ Apply HEX"
+                                isPrimary: true
+                                onClicked: {
+                                    if (backend && customHexInput.text.trim() !== "") {
+                                        backend.setAccentColor(customHexInput.text.trim())
+                                    }
+                                }
+                            }
+
+                            ActionBtn {
+                                text: root.showCustomColorPicker ? "▲ Hide Color Picker" : "🌈 Open Color Picker"
+                                onClicked: root.showCustomColorPicker = !root.showCustomColorPicker
+                            }
+                        }
+
+                        // Interactive HSV Color Picker Panel
+                        Rectangle {
+                            visible: root.showCustomColorPicker
+                            Layout.fillWidth: true
+                            implicitHeight: hsvPickerCol.implicitHeight + 20
+                            radius: Theme.radiusMedium
+                            color: Theme.bgSurface
+                            border.color: Theme.accent
+                            border.width: 1
+
+                            ColumnLayout {
+                                id: hsvPickerCol
+                                anchors.fill: parent
+                                anchors.margins: 10
+                                spacing: 10
+
+                                readonly property color livePreviewColor: Qt.hsva(root.pickerHue, root.pickerSat, root.pickerVal, 1.0)
+
+                                // 2D Hue/Saturation Spectrum Canvas
+                                Rectangle {
+                                    id: spectrumBox
+                                    Layout.fillWidth: true
+                                    height: Math.round(125 * Theme.scaleFactor)
+                                    radius: Theme.radiusSmall
+                                    border.color: Theme.borderDim
+                                    clip: true
+
+                                    gradient: Gradient {
+                                        orientation: Gradient.Horizontal
+                                        GradientStop { position: 0.00; color: "#ff0000" }
+                                        GradientStop { position: 0.17; color: "#ffff00" }
+                                        GradientStop { position: 0.33; color: "#00ff00" }
+                                        GradientStop { position: 0.50; color: "#00ffff" }
+                                        GradientStop { position: 0.67; color: "#0000ff" }
+                                        GradientStop { position: 0.83; color: "#ff00ff" }
+                                        GradientStop { position: 1.00; color: "#ff0000" }
+                                    }
+
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        gradient: Gradient {
+                                            orientation: Gradient.Vertical
+                                            GradientStop { position: 0.0; color: "#00ffffff" }
+                                            GradientStop { position: 1.0; color: "#ffffffff" }
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        anchors.fill: parent
+                                        color: "#000000"
+                                        opacity: 1.0 - root.pickerVal
+                                    }
+
+                                    // Crosshair Indicator
+                                    Rectangle {
+                                        x: Math.max(0, Math.min(spectrumBox.width - width, root.pickerHue * spectrumBox.width - width / 2))
+                                        y: Math.max(0, Math.min(spectrumBox.height - height, (1.0 - root.pickerSat) * spectrumBox.height - height / 2))
+                                        width: Math.round(16 * Theme.scaleFactor)
+                                        height: width
+                                        radius: width / 2
+                                        color: hsvPickerCol.livePreviewColor
+                                        border.color: "#ffffff"
+                                        border.width: 2
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.CrossCursor
+                                        function updateFromMouse(mx, my) {
+                                            root.pickerHue = Math.max(0.0, Math.min(0.999, mx / Math.max(1, spectrumBox.width)))
+                                            root.pickerSat = Math.max(0.0, Math.min(1.0, 1.0 - (my / Math.max(1, spectrumBox.height))))
+                                            customHexInput.text = Qt.hsva(root.pickerHue, root.pickerSat, root.pickerVal, 1.0).toString()
+                                        }
+                                        onPressed: function(mouse) { updateFromMouse(mouse.x, mouse.y) }
+                                        onPositionChanged: function(mouse) {
+                                            if (pressed) updateFromMouse(mouse.x, mouse.y)
+                                        }
+                                    }
+                                }
+
+                                // Brightness / Value Slider
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+                                    Text {
+                                        text: "Brightness:"
+                                        color: Theme.textSecondary
+                                        font.pixelSize: Theme.fontSizeSmall
+                                        font.bold: true
+                                    }
+                                    Slider {
+                                        Layout.fillWidth: true
+                                        from: 0.15
+                                        to: 1.0
+                                        value: root.pickerVal
+                                        onMoved: {
+                                            root.pickerVal = value
+                                            customHexInput.text = Qt.hsva(root.pickerHue, root.pickerSat, root.pickerVal, 1.0).toString()
+                                        }
+                                    }
+                                    Rectangle {
+                                        width: Math.round(28 * Theme.scaleFactor)
+                                        height: Math.round(28 * Theme.scaleFactor)
+                                        radius: Theme.radiusSmall
+                                        color: hsvPickerCol.livePreviewColor
+                                        border.color: "#ffffff"
+                                        border.width: 1
+                                    }
+                                    ActionBtn {
+                                        text: "✨ Apply Picked Color"
+                                        isPrimary: true
+                                        onClicked: {
+                                            var cHex = hsvPickerCol.livePreviewColor.toString()
+                                            customHexInput.text = cHex
+                                            if (backend) backend.setAccentColor(cHex)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Row 2: Last 5 Saved Colors (Recent History)
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Text {
+                                text: "🕒 Your Last 5 Saved Colors (Click to switch):"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                                font.bold: true
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+
+                                Repeater {
+                                    model: backend ? backend.recentAccentColors : []
+                                    delegate: Rectangle {
+                                        readonly property bool isCurrentColor: (backend ? backend.accentColor.toLowerCase() : "") === String(modelData).toLowerCase()
+                                        implicitWidth: swatchRow.implicitWidth + 16
+                                        height: Math.round(30 * Theme.scaleFactor)
+                                        radius: Theme.radiusMedium
+                                        color: swatchMouse.containsMouse ? Theme.bgHover : Theme.bgSurface
+                                        border.color: isCurrentColor ? modelData : Theme.borderDim
+                                        border.width: isCurrentColor ? 2 : 1
+
+                                        RowLayout {
+                                            id: swatchRow
+                                            anchors.centerIn: parent
+                                            spacing: 6
+
+                                            Rectangle {
+                                                width: Math.round(16 * Theme.scaleFactor)
+                                                height: Math.round(16 * Theme.scaleFactor)
+                                                radius: width / 2
+                                                color: modelData
+                                                border.color: "#66ffffff"
+                                                border.width: 1
+                                            }
+
+                                            Text {
+                                                text: String(modelData).toUpperCase()
+                                                color: parent.parent.isCurrentColor ? Theme.textPrimary : Theme.textSecondary
+                                                font.family: "monospace"
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                font.bold: parent.parent.isCurrentColor
+                                            }
+                                        }
+
+                                        MouseArea {
+                                            id: swatchMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: {
+                                                customHexInput.text = modelData
+                                                if (backend) backend.setAccentColor(modelData)
+                                            }
+                                        }
+                                    }
+                                }
+                                Item { Layout.fillWidth: true }
+                            }
+                        }
+
+                        // Row 3: Curated Preset Palette
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Text {
+                                text: "Presets:"
+                                color: Theme.textTertiary
+                                font.pixelSize: Theme.fontSizeSmall
+                                font.bold: true
+                            }
+
+                            Repeater {
+                                model: ["#0078d4", "#38bdf8", "#8b5cf6", "#ec4899", "#ef4444", "#f59e0b", "#10b981", "#14b8a6", "#6366f1"]
+                                delegate: Rectangle {
+                                    width: Math.round(22 * Theme.scaleFactor)
+                                    height: Math.round(22 * Theme.scaleFactor)
+                                    radius: width / 2
+                                    color: modelData
+                                    border.color: (backend && backend.accentColor.toLowerCase() === modelData) ? "#ffffff" : "#40ffffff"
+                                    border.width: (backend && backend.accentColor.toLowerCase() === modelData) ? 2 : 1
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            customHexInput.text = modelData
+                                            if (backend) backend.setAccentColor(modelData)
+                                        }
+                                    }
+                                }
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+                    }
 
                     SectionCard {
                         sectionTitle: "Visual Layout & Grid Presentation"
@@ -1116,6 +1419,141 @@ Dialog {
                     }
 
                     SectionCard {
+                        sectionTitle: "📡 Weekly Airing Tracker (CriticalweebR18 MAL + AniList)"
+                        sectionSubtitle: "Syncs MAL list every 30m and AniList schedules every 6h with rate-limit protection, caches posters locally, and sends desktop notifications via the daemon."
+
+                        GridLayout {
+                            columns: 2
+                            Layout.fillWidth: true
+                            rowSpacing: 8
+                            columnSpacing: 10
+
+                            Text { text: "MAL Username:"; color: Theme.textSecondary; font.bold: true }
+                            TextField {
+                                id: malUserInput
+                                Layout.fillWidth: true
+                                text: backend ? backend.malUsername : "CriticalweebR18"
+                                placeholderText: "CriticalweebR18"
+                                color: Theme.textPrimary
+                                font.family: "monospace"
+                                font.pixelSize: Theme.fontSizeSmall
+                                selectByMouse: true
+                                background: Rectangle { color: Theme.bgSurface; radius: 4; border.color: Theme.borderDim }
+                            }
+
+                            Text { text: "MAL Client ID:"; color: Theme.textSecondary; font.bold: true }
+                            TextField {
+                                id: malClientIdInput
+                                Layout.fillWidth: true
+                                text: backend ? backend.malClientId : ""
+                                placeholderText: "Optional MAL API v2 Client ID (Uses public fallback if empty)"
+                                echoMode: TextInput.PasswordEchoOnEdit
+                                color: Theme.textPrimary
+                                font.family: "monospace"
+                                font.pixelSize: Theme.fontSizeSmall
+                                selectByMouse: true
+                                background: Rectangle { color: Theme.bgSurface; radius: 4; border.color: Theme.borderDim }
+                            }
+
+                            Text { text: "MAL Access Token:"; color: Theme.textSecondary; font.bold: true }
+                            TextField {
+                                id: malTokenInput
+                                Layout.fillWidth: true
+                                text: backend ? backend.malAccessToken : ""
+                                placeholderText: "Optional OAuth2 Bearer Token"
+                                echoMode: TextInput.PasswordEchoOnEdit
+                                color: Theme.textPrimary
+                                font.family: "monospace"
+                                font.pixelSize: Theme.fontSizeSmall
+                                selectByMouse: true
+                                background: Rectangle { color: Theme.bgSurface; radius: 4; border.color: Theme.borderDim }
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            ActionBtn {
+                                text: "💾 Save Airing Credentials"
+                                isPrimary: true
+                                onClicked: {
+                                    if (backend) {
+                                        backend.saveAiringConfig(malUserInput.text, malClientIdInput.text, malTokenInput.text)
+                                    }
+                                }
+                            }
+                            ActionBtn {
+                                text: "🔄 Force Sync MAL & AniList Now"
+                                onClicked: if (backend) backend.forceSyncAiringNow()
+                            }
+                            ActionBtn {
+                                text: "⛓️‍💥 Clear All Folder Links"
+                                isDanger: true
+                                onClicked: if (backend) backend.clearAllAiringLinks()
+                            }
+                        }
+
+                        Rectangle {
+                            visible: root.ignoredAiringList.length > 0
+                            Layout.fillWidth: true
+                            height: 1
+                            color: Theme.borderDim
+                        }
+
+                        RowLayout {
+                            visible: root.ignoredAiringList.length > 0
+                            Layout.fillWidth: true
+                            Text {
+                                Layout.fillWidth: true
+                                text: "Ignored Airing Anime (" + root.ignoredAiringList.length + "):"
+                                color: Theme.textPrimary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeSmall
+                            }
+                            ActionBtn {
+                                text: "Restore All Ignored"
+                                onClicked: if (backend) backend.clearAllIgnoredAiringItems()
+                            }
+                        }
+
+                        ColumnLayout {
+                            visible: root.ignoredAiringList.length > 0
+                            Layout.fillWidth: true
+                            spacing: 4
+
+                            Repeater {
+                                model: root.ignoredAiringList
+                                delegate: Rectangle {
+                                    Layout.fillWidth: true
+                                    height: Math.round(32 * Theme.scaleFactor)
+                                    radius: Theme.radiusSmall
+                                    color: Theme.bgSurface
+                                    border.color: Theme.borderDim
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 8
+                                        spacing: 8
+
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: modelData.title + " (ID: " + modelData.id + ")"
+                                            color: Theme.textSecondary
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            elide: Text.ElideRight
+                                        }
+                                        ActionBtn {
+                                            text: "↩ Restore"
+                                            onClicked: if (backend) backend.restoreIgnoredAiringItem(modelData.id)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    SectionCard {
                         sectionTitle: "Registered Media Libraries (Series / Anime / Movies)"
                         sectionSubtitle: "Right-click any anime folder to 'Resume' directly from where you left off."
 
@@ -1186,10 +1624,11 @@ Dialog {
             // =================================================================
             // PAGE 3: MPV PROFILES (BOTH / SDR / HDR)
             // =================================================================
-            ColumnLayout {
-                anchors.fill: parent
-                anchors.margins: 14
-                spacing: 10
+            Item {
+                ColumnLayout {
+                    anchors.fill: parent
+                    anchors.margins: 14
+                    spacing: 10
 
                 SectionCard {
                     Layout.fillHeight: true
@@ -1282,6 +1721,7 @@ Dialog {
                             font.pixelSize: Theme.fontSizeSmall
                         }
                     }
+                }
                 }
             }
 

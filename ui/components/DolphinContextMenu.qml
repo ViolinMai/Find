@@ -38,12 +38,16 @@ StyledMenu {
     readonly property bool canResumeTargetFolder: (backend && root.isDir && targetPath !== "") ? backend.canResumeFolder(targetPath) : false
     readonly property bool isFavoritedTarget: (backend && targetPath !== "") ? backend.isPathFavorited(targetPath) : false
     readonly property bool isInTrash: backend ? backend.isTrashView : false
+    property bool isAiringItem: false
+    property string airingId: ""
+    property string airingLinkedPath: ""
 
     readonly property bool hasDialogOpen: renameDialog.visible || customArchiveDialog.visible
 
     signal requestDesktopMaker(string execPath)
     signal requestPermanentDelete(string targetPath)
     signal requestProperties(string targetPath)
+    signal requestAiringLinkModal(string airingId, string airingTitle)
 
     function popupSafe(anchorItem, mouseX, mouseY) {
         if (anchorItem && mouseX !== undefined && mouseY !== undefined) {
@@ -75,7 +79,59 @@ StyledMenu {
     }
 
     StyledMenuItem {
-        visible: backend ? (backend.currentPath === "mediahub://") : false
+        visible: root.isAiringItem
+        iconGlyph: "➕"
+        text: "Increment Watched Episode (+1)"
+        font.bold: true
+        onTriggered: if (backend) backend.adjustAiringEpisode(root.airingId, 1)
+    }
+
+    StyledMenuItem {
+        visible: root.isAiringItem
+        iconGlyph: "➖"
+        text: "Decrement Watched Episode (-1)"
+        onTriggered: if (backend) backend.adjustAiringEpisode(root.airingId, -1)
+    }
+
+    MenuSeparator {
+        visible: root.isAiringItem
+        contentItem: Rectangle { implicitHeight: 1; color: Theme.borderDim }
+    }
+
+    StyledMenuItem {
+        visible: root.isAiringItem
+        iconGlyph: "🔗"
+        text: root.airingLinkedPath !== "" ? "Change Linked Media Hub Work..." : "Link with Media Hub Work..."
+        font.bold: true
+        onTriggered: root.requestAiringLinkModal(root.airingId, root.targetName)
+    }
+
+    StyledMenuItem {
+        visible: root.isAiringItem && root.airingLinkedPath !== ""
+        iconGlyph: "▶"
+        text: "Resume Next Episode from Linked Work"
+        font.bold: true
+        onTriggered: if (backend) backend.resumeMediaFolder(root.airingLinkedPath)
+    }
+
+    StyledMenuItem {
+        visible: root.isAiringItem && root.airingLinkedPath !== ""
+        iconGlyph: "⛓️‍💥"
+        text: "Unlink Media Hub Work"
+        onTriggered: if (backend) backend.linkAiringToMediaFolder(root.airingId, "")
+    }
+
+    StyledMenuItem {
+        visible: root.isAiringItem
+        iconGlyph: "🚫"
+        text: "Ignore this from Airing"
+        isDanger: true
+        font.bold: true
+        onTriggered: if (backend) backend.ignoreAiringItem(root.airingId)
+    }
+
+    StyledMenuItem {
+        visible: backend ? (backend.currentPath === "mediahub://" && !root.isAiringItem) : false
         iconGlyph: "👁️"
         text: "Hide from Media Hub (Until Progress Changes)"
         isDanger: true

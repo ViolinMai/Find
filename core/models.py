@@ -418,12 +418,25 @@ class MediaHubCardModel(QAbstractListModel):
 
     @staticmethod
     def _compute_art_source(card: dict) -> str:
+        is_dir = bool(card.get("is_dir", False))
+        is_movie = bool(card.get("is_movie_item", False))
+        is_recent_batch = bool(card.get("is_recently_added_card", False))
         poster = str(card.get("poster") or "")
-        if poster:
-            return "file://" + poster
         thumb = str(card.get("thumb") or "")
+
+        # Recently added episodes, movies, and show directories always take the vertical poster
+        if is_recent_batch or is_dir or is_movie:
+            if poster:
+                return "file://" + poster
+            if thumb:
+                return "file://" + thumb
+
+        # Direct in-progress episode files (Continue Watching / Next Up) use video thumbnails
         if thumb:
             return "file://" + thumb
+        if poster:
+            return "file://" + poster
+
         fps = card.get("folder_previews") or []
         if fps and isinstance(fps[0], dict) and fps[0].get("thumb"):
             return "file://" + str(fps[0]["thumb"])

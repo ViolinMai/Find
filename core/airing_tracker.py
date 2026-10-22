@@ -395,11 +395,129 @@ class AiringTracker:
         self._save_json(self.state_file, state)
         return updated_any
 
+    def get_notification_config(self) -> dict:
+        defaults = self.config_mgr.DEFAULT_CONFIG.get("notification_settings", {})
+        raw = self.config_mgr.get("notification_settings", {})
+        if isinstance(raw, dict):
+            return {**defaults, **raw}
+        return dict(defaults)
+
+    def _compute_local_watched_eps(self, aid_str: str, local_ep_overrides: dict, links_map: dict) -> int:
+        manual_val = int(local_ep_overrides.get(aid_str, 0) or 0)
+        linked_folder = str(links_map.get(aid_str, "") or "")
+        folder_max = 0
+        if linked_folder and os.path.isdir(linked_folder):
+            try:
+                for root_d, _, files in os.walk(linked_folder):
+                    for fn in files:
+                        ext = Path(fn).suffix.lower()
+                        if ext in {".mkv", ".mp4", ".webm", ".avi", ".mov", ".m4v"} and not fn.startswith("."):
+                            fp = os.path.join(root_d, fn)
+                            p_info = self.config_mgr.get_media_progress(fp)
+                            if p_info.get("watched", False) or float(p_info.get("progress", 0.0) or 0.0) >= 0.90:
+                                m = re.search(r'(?:[Ss]\d+[Ee]|-\s*|[Ee][Pp]?\s*|\[)(\d{1,4})(?:\b|\]|v\d)', Path(fn).stem)
+                                if m:
+                                    folder_max = max(folder_max, int(m.group(1)))
+            except Exception:
+                pass
+        return max(manual_val, folder_max)
+
+    def dispatch_formatted_notification(
+        self,
+        aid_str: str,
+        title: str,
+        ep_num: int,
+        watched_eps: int,
+        poster_local: str,
+        event_type: str,
+        event_label: str,
+        force_send: bool = False
+    ):
+        ncfg = self.get_notification_config()
+        if not force_send:
+            if not ncfg.get("master_enabled", True) or not ncfg.get("os_notifications_enabled", True):
+                return
+            disabled_ids = {str(x) for x in (ncfg.get("disabled_anime_ids") or [])}
+            if str(aid_str) in disabled_ids:
+                return
+
+        if not shutil.which("notify-send"):
+            return
+
+        behind = max(0, int(ep_num) - int(watched_eps))
+        status_str = "Going tight!" if behind <= 0 else f"{behind} ep{'s' if behind > 1 else ''} behind"
+
+        show_ep = bool(ncfg.get("airing_content_show_ep", True))
+        show_prog = bool(ncfg.get("airing_content_show_progress", True))
+        show_behind = bool(ncfg.get("airing_content_show_behind", True))
+        show_poster = bool(ncfg.get("airing_content_show_poster", True))
+
+        title_tpl = str(ncfg.get("airing_title_template") or "🎬 {title} — Episode {ep}")
+        body_tpl = str(ncfg.get("airing_body_template") or "{event_label}\nLocal Progress: {watched} eps ({status})")
+
+        ep_str = str(ep_num) if show_ep else ""
+        try:
+            notif_title = title_tpl.format(
+                title=title,
+                ep=ep_str,
+                watched=watched_eps,
+                behind=behind,
+                status=status_str,
+                event_label=event_label
+            ).strip(" —-")
+        except Exception:
+            notif_title = f"🎬 {title}" + (f" — Ep {ep_num}" if show_ep else "")
+
+        body_lines = [event_label]
+        if show_prog and show_behind:
+            body_lines.append(f"Local Progress: Watched {watched_eps} eps ({status_str})")
+        elif show_prog:
+            body_lines.append(f"Local Progress: Watched {watched_eps} eps")
+        elif show_behind:
+            body_lines.append(f"Status: {status_str}")
+
+        try:
+            if body_tpl and "{event_label}" in body_tpl:
+                notif_body = body_tpl.format(
+                    title=title,
+                    ep=ep_num,
+                    watched=watched_eps,
+                    behind=behind,
+                    status=status_str,
+                    event_label=event_label
+                )
+                if not show_prog and not show_behind:
+                    notif_body = event_label
+            else:
+                notif_body = "\n".join(body_lines)
+        except Exception:
+            notif_body = "\n".join(body_lines)
+
+        urgency = str(ncfg.get("urgency", "normal") or "normal")
+        if urgency not in ("low", "normal", "critical"):
+            urgency = "normal"
+        timeout_ms = int(ncfg.get("display_timeout_ms", 6000) or 6000)
+
+        cmd = [
+            "notify-send",
+            "-a", "Find Media Hub",
+            "-u", urgency,
+            "-t", str(max(1500, timeout_ms))
+        ]
+        if show_poster and poster_local and os.path.exists(poster_local):
+            cmd.extend(["-i", poster_local])
+        cmd.extend([notif_title, notif_body])
+        try:
+            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
     def check_and_advance_airing_timers_sync(self, send_os_notification: bool = True) -> list:
         """
-        Checks if any currently_airing anime has reached its next_air_timestamp.
-        Advances timestamp by +604800 (1 week) and next_ep + 1 (or marks finished if next_ep >= total_eps),
-        exactly like MalBot's timer_checker_loop, and sends a desktop notification via notify-send.
+        Checks:
+        1) Pre-airing reminder notifications (e.g., X minutes before episode airs).
+        2) On-release airing notifications + automatic +604800s weekly advancement.
+        3) Unwatched follow-up reminder notifications (e.g., X hours after episode aired if still unwatched).
         """
         schedules = self._load_json(self.schedules_file)
         if not schedules:
@@ -409,24 +527,63 @@ class AiringTracker:
         user_list = cache.get(self.mal_username, {})
         ignored_ids = set(str(x) for x in (self.config_mgr.get("airing_ignored_ids", []) or []))
         local_ep_overrides = dict(self.config_mgr.get("airing_local_eps", {}) or {})
-        now = datetime.now(timezone.utc).timestamp()
+        links_map = dict(self.config_mgr.get("airing_links", {}) or {})
+        state = self._load_json(self.state_file)
+        notif_history = dict(state.get("notif_history", {}) or {})
 
-        updated = False
+        ncfg = self.get_notification_config()
+        pre_enabled = bool(ncfg.get("airing_pre_reminder_enabled", False))
+        pre_mins = max(1, int(ncfg.get("airing_pre_reminder_minutes", 30) or 30))
+        on_release_enabled = bool(ncfg.get("airing_on_release", True))
+        unwatched_enabled = bool(ncfg.get("airing_unwatched_reminder_enabled", True))
+        unwatched_hours = max(1, int(ncfg.get("airing_unwatched_reminder_hours", 12) or 12))
+
+        now = datetime.now(timezone.utc).timestamp()
+        updated_schedules = False
+        updated_state = False
         newly_aired = []
 
         for aid, data in schedules.items():
+            aid_str = str(aid)
             if not isinstance(data, dict) or data.get("status") != "currently_airing":
                 continue
             next_ts = float(data.get("next_air_timestamp", 0) or 0)
             if next_ts <= 0:
                 continue
 
-            if now >= next_ts:
-                aired_ep = int(data.get("next_ep", 1) or 1)
-                title = str(data.get("title") or "Anime")
-                anime_user_data = user_list.get(str(aid), {})
-                is_tracked = anime_user_data.get("status", "watching") in ("watching", "plan_to_watch")
+            anime_user_data = user_list.get(aid_str, {})
+            is_tracked = anime_user_data.get("status", "watching") in ("watching", "plan_to_watch")
+            if not is_tracked or aid_str in ignored_ids:
+                continue
 
+            title = str(data.get("title") or anime_user_data.get("title") or "Anime")
+            upcoming_ep = int(data.get("next_ep", 1) or 1)
+            watched_eps = self._compute_local_watched_eps(aid_str, local_ep_overrides, links_map)
+            poster_local = self.get_cached_poster_path(aid_str) or self.ensure_poster_cached(aid_str, data.get("image", ""))
+
+            # 1. Pre-Airing Reminder Check (Before episode airs)
+            if send_os_notification and pre_enabled and now < next_ts:
+                rem_seconds = next_ts - now
+                if 0 < rem_seconds <= (pre_mins * 60):
+                    pre_key = f"pre_{aid_str}_{upcoming_ep}"
+                    if not notif_history.get(pre_key):
+                        notif_history[pre_key] = round(now, 1)
+                        updated_state = True
+                        mins_left = max(1, int(round(rem_seconds / 60.0)))
+                        self.dispatch_formatted_notification(
+                            aid_str=aid_str,
+                            title=title,
+                            ep_num=upcoming_ep,
+                            watched_eps=watched_eps,
+                            poster_local=poster_local,
+                            event_type="pre_airing",
+                            event_label=f"⏰ Airing in {mins_left} minutes! (Episode {upcoming_ep})"
+                        )
+
+            # 2. Episode Release Check & Weekly Advancement
+            if now >= next_ts:
+                aired_ep = upcoming_ep
+                aired_at_ts = next_ts
                 total_eps = data.get("total_eps")
                 while now >= data["next_air_timestamp"]:
                     if total_eps and data["next_ep"] >= int(total_eps):
@@ -435,33 +592,65 @@ class AiringTracker:
                     data["next_air_timestamp"] += 604800
                     data["next_ep"] += 1
 
-                updated = True
-                if is_tracked and str(aid) not in ignored_ids:
-                    poster_local = self.get_cached_poster_path(str(aid)) or self.ensure_poster_cached(str(aid), data.get("image", ""))
-                    newly_aired.append({
-                        "aid": str(aid),
-                        "title": title,
-                        "episode": aired_ep,
-                        "poster": poster_local
-                    })
-                    if send_os_notification and shutil.which("notify-send"):
-                        try:
-                            watched_eps = int(local_ep_overrides.get(str(aid), 0) or 0)
-                            cmd = [
-                                "notify-send",
-                                "-a", "Find Media Hub",
-                                "-u", "normal",
-                            ]
-                            if poster_local and os.path.exists(poster_local):
-                                cmd.extend(["-i", poster_local])
-                            cmd.extend([
-                                f"🎬 New Episode Aired! — Ep {aired_ep}",
-                                f"{title}\nYour Local Progress: Watched {watched_eps} eps"
-                            ])
-                            subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        except Exception:
-                            pass
+                data["last_aired_ep"] = aired_ep
+                data["last_aired_timestamp"] = aired_at_ts
+                updated_schedules = True
 
-        if updated:
+                newly_aired.append({
+                    "aid": aid_str,
+                    "title": title,
+                    "episode": aired_ep,
+                    "poster": poster_local
+                })
+
+                rel_key = f"rel_{aid_str}_{aired_ep}"
+                if send_os_notification and on_release_enabled and not notif_history.get(rel_key):
+                    notif_history[rel_key] = round(now, 1)
+                    updated_state = True
+                    self.dispatch_formatted_notification(
+                        aid_str=aid_str,
+                        title=title,
+                        ep_num=aired_ep,
+                        watched_eps=watched_eps,
+                        poster_local=poster_local,
+                        event_type="aired",
+                        event_label=f"📡 Episode {aired_ep} Has Just Aired!"
+                    )
+
+            # 3. Unwatched Follow-up Reminder Check (If user hasn't watched the latest aired episode after X hours)
+            last_aired_ep = int(data.get("last_aired_ep") or max(0, int(data.get("next_ep", 1)) - 1))
+            last_aired_ts = float(data.get("last_aired_timestamp") or (float(data.get("next_air_timestamp", 0)) - 604800.0))
+            if (
+                send_os_notification
+                and unwatched_enabled
+                and last_aired_ep > 0
+                and watched_eps < last_aired_ep
+                and last_aired_ts > 0
+                and (now - last_aired_ts) >= (unwatched_hours * 3600.0)
+                and (now - last_aired_ts) <= 604800.0
+            ):
+                unw_key = f"unw_{aid_str}_{last_aired_ep}"
+                if not notif_history.get(unw_key):
+                    notif_history[unw_key] = round(now, 1)
+                    updated_state = True
+                    hrs_passed = int((now - last_aired_ts) // 3600)
+                    self.dispatch_formatted_notification(
+                        aid_str=aid_str,
+                        title=title,
+                        ep_num=last_aired_ep,
+                        watched_eps=watched_eps,
+                        poster_local=poster_local,
+                        event_type="unwatched_reminder",
+                        event_label=f"🔔 Reminder: You haven't watched Episode {last_aired_ep} yet ({hrs_passed}h since release)"
+                    )
+
+        if updated_schedules:
             self._save_json(self.schedules_file, schedules)
+        if updated_state:
+            # Keep history compact (last 500 entries)
+            if len(notif_history) > 500:
+                sorted_k = sorted(notif_history.keys(), key=lambda k: notif_history[k], reverse=True)[:400]
+                notif_history = {k: notif_history[k] for k in sorted_k}
+            state["notif_history"] = notif_history
+            self._save_json(self.state_file, state)
         return newly_aired

@@ -43,6 +43,60 @@ PROTECTED_SYSTEM_PATHS = {
 }
 
 
+def find_matching_external_subs_for_video(video_file_path: str) -> list:
+    """
+    Scans the video file's directory (and Subs/Subtitles subfolders) for external subtitle files
+    matching the original video filename stem so MPV always loads them regardless of Jellyfin titles.
+    """
+    if not video_file_path or not os.path.isfile(video_file_path):
+        return []
+    vp = Path(video_file_path)
+    parent = vp.parent
+    stem = vp.stem
+    stem_low = stem.lower()
+    matched = []
+    seen = set()
+
+    search_dirs = [parent]
+    for sd_name in ("Subs", "subs", "Subtitles", "subtitles", stem):
+        sd = parent / sd_name
+        if sd.is_dir():
+            search_dirs.append(sd)
+
+    for sdir in search_dirs:
+        try:
+            with os.scandir(str(sdir)) as it:
+                for entry in it:
+                    if not entry.is_file():
+                        continue
+                    sp = Path(entry.name)
+                    if sp.suffix.lower() not in SUBTITLE_EXTS:
+                        continue
+                    sub_stem_low = sp.stem.lower()
+                    if (
+                        sub_stem_low == stem_low
+                        or sub_stem_low.startswith(stem_low + ".")
+                        or sub_stem_low.startswith(stem_low + "_")
+                        or sub_stem_low.startswith(stem_low + "-")
+                        or sub_stem_low.startswith(stem_low + " ")
+                    ):
+                        abs_sub = os.path.abspath(entry.path)
+                        if abs_sub not in seen:
+                            seen.add(abs_sub)
+                            matched.append(abs_sub)
+        except OSError:
+            pass
+
+    def _sub_prio(p_str: str):
+        nl = Path(p_str).stem.lower()
+        is_ar = any(x in nl for x in (".ar", "_ar", "-ar", "arabic", "ara"))
+        is_ass = p_str.lower().endswith((".ass", ".ssa"))
+        return (0 if is_ar else 1, 0 if is_ass else 1, p_str)
+
+    matched.sort(key=_sub_prio)
+    return matched
+
+
 def _get_secure_runtime_dir() -> Path:
     xdg_run = os.environ.get("XDG_RUNTIME_DIR", "")
     if xdg_run and os.path.isdir(xdg_run):
@@ -534,17 +588,24 @@ class MpvSessionMonitorTask(QRunnable):
                             last_recorded_sub = ""
                             file_switch_ts = time.time()
 
-                            # Load saved subtitle or saved position for the newly switched episode (or start at 0.0)
+                            # Load saved subtitle and any matching external subtitles for the newly switched episode
                             saved_next = self.get_progress_func(active_file) if callable(self.get_progress_func) else {}
+                            loaded_subs = set()
                             next_sub = saved_next.get("ext_sub", "")
                             if next_sub and os.path.exists(next_sub):
                                 self._send_ipc_command(s, ["sub-add", next_sub, "select"], 10)
+                                loaded_subs.add(os.path.abspath(next_sub))
                                 last_recorded_sub = next_sub
-                            if not saved_next.get("watched", False) and saved_next.get("position", 0.0) > 5.0:
+                            for auto_sub in find_matching_external_subs_for_video(active_file):
+                                if auto_sub not in loaded_subs:
+                                    self._send_ipc_command(s, ["sub-add", auto_sub, "select" if not loaded_subs else "auto"], 10)
+                                    loaded_subs.add(auto_sub)
+
+                            if not saved_next.get("watched", False) and float(saved_next.get("position", 0.0) or 0.0) > 5.0:
                                 self._send_ipc_command(s, ["set_property", "time-pos", float(saved_next["position"])], 11)
                             else:
                                 self._send_ipc_command(s, ["set_property", "time-pos", 0.0], 11)
-                            time.sleep(0.35)
+                            time.sleep(0.45)
                             continue
 
                         dur_val = self._query_ipc_property(s, "duration", 2)
@@ -568,11 +629,12 @@ class MpvSessionMonitorTask(QRunnable):
                                     pos_val = self.initial_start_pos
 
                         if isinstance(pos_val, (int, float)) and pos_val >= 0:
+                            f_pos = float(pos_val)
                             # Guard against stale time-pos right after switching files in MPV
-                            if file_switch_ts > 0 and (time.time() - file_switch_ts) < 2.0:
-                                if prev_file_final_pos > 30.0 and abs(float(pos_val) - prev_file_final_pos) < 5.0:
+                            if file_switch_ts > 0 and (time.time() - file_switch_ts) < 4.5:
+                                if prev_file_final_pos > 15.0 and abs(f_pos - prev_file_final_pos) < 12.0:
                                     continue
-                            last_pos = float(pos_val)
+                            last_pos = f_pos
 
                         if eof_val is True:
                             eof_reached = True
@@ -610,9 +672,9 @@ class MpvSessionMonitorTask(QRunnable):
         except OSError:
             pass
 
-        # Final check on exit for whichever episode was playing last
+        # Final check on exit for whichever episode was playing last (only if not stale from previous episode)
         wl_pos = self._read_mpv_watch_later_pos(active_file)
-        if wl_pos >= 0 and (file_switch_ts == 0.0 or abs(wl_pos - prev_file_final_pos) > 5.0):
+        if wl_pos >= 0 and (file_switch_ts == 0.0 or abs(wl_pos - prev_file_final_pos) > 12.0):
             last_pos = wl_pos
         if duration > 0 and last_pos > 0:
             is_done = eof_reached or (last_pos / duration >= 0.90)
@@ -1865,7 +1927,10 @@ class FileManagerBackend(QObject):
     pickerCompleted = Signal(list)
 
     scaleFactorChanged = Signal()
+    scrollSpeedChanged = Signal()
     themeColorChanged = Signal()
+    windowActivationRequested = Signal()
+    notificationSettingsChanged = Signal()
 
     def __init__(self, parent=None, is_picker_mode: bool = False):
         super().__init__(parent)
@@ -1986,7 +2051,8 @@ class FileManagerBackend(QObject):
 
         self.signals = AsyncWorkerSignals()
         self.signals.directoryLoaded.connect(self._on_directory_loaded)
-        self.signals.directoryLoadError.connect(lambda _p, msg: self.toastMessage.emit(msg))
+        self._raw_toast_emit = self.toastMessage.emit
+        self.signals.directoryLoadError.connect(lambda _p, msg: self.emitToastFiltered(msg, "file_ops"))
         self.signals.folderSizeReady.connect(self._on_folder_size_calculated)
         self.signals.multiSelectionSizeReady.connect(self._on_multi_selection_size_ready)
         self.signals.trashSizeReady.connect(self._on_trash_size_ready)
@@ -2071,6 +2137,39 @@ class FileManagerBackend(QObject):
         self.config_mgr.set("scale_factor", clamped)
         self.scaleFactorChanged.emit()
 
+    @Property(float, notify=scrollSpeedChanged)
+    def scrollSpeedMultiplier(self) -> float:
+        return float(self.config_mgr.get("scroll_speed_multiplier", 1.25) or 1.25)
+
+    @Slot(float)
+    def setScrollSpeedMultiplier(self, val: float):
+        clamped = round(min(4.0, max(0.3, float(val))), 2)
+        self.config_mgr.set("scroll_speed_multiplier", clamped)
+        self.scrollSpeedChanged.emit()
+
+    @Property(bool, notify=sessionConfigChanged)
+    def keepAliveInBackground(self) -> bool:
+        return bool(self.config_mgr.get("keep_alive_in_background", True))
+
+    @Slot(bool)
+    def setKeepAliveInBackground(self, enabled: bool):
+        self.config_mgr.set("keep_alive_in_background", bool(enabled))
+        self.sessionConfigChanged.emit()
+
+    def emitToastFiltered(self, msg: str, category: str = "general"):
+        ncfg = self.airing_tracker.get_notification_config()
+        if not ncfg.get("master_enabled", True) or not ncfg.get("in_app_toasts_enabled", True):
+            return
+        if category == "file_ops" and not ncfg.get("toast_file_ops", True):
+            return
+        if category == "archive" and not ncfg.get("toast_archive_ops", True):
+            return
+        if category == "jellyfin" and not ncfg.get("toast_jellyfin_sync", True):
+            return
+        if category == "clipboard" and not ncfg.get("toast_clipboard", True):
+            return
+        self.toastMessage.emit(msg)
+
     @Property(str, notify=themeColorChanged)
     def accentColor(self) -> str:
         return str(self.config_mgr.get("accent_color", "#0078d4") or "#0078d4")
@@ -2108,6 +2207,8 @@ class FileManagerBackend(QObject):
 
     @Slot(list, bool)
     def handleExternalIpcRequest(self, paths_list: list, select_mode: bool = False):
+        # Always wake up, unhide, and focus the application window when a new launch request arrives!
+        self.windowActivationRequested.emit()
         if not paths_list:
             return
         first_p = paths_list[0]
@@ -2126,9 +2227,181 @@ class FileManagerBackend(QObject):
                 self.addTab(parent_d)
                 self.selectMultiplePaths([p])
 
+    @Slot()
+    def quitApplicationCompletely(self):
+        self.shutdownCleanup()
+        QGuiApplication.quit()
+
     def _on_mounts_changed(self, _path: str = ""):
         self._last_drives_ts = 0.0
         self.sidebarUpdated.emit()
+
+    @Slot(str, result=dict)
+    def getEpisodeDetailedInfo(self, file_path_str: str) -> dict:
+        """Retrieves exact duration, formatted size, and checks metadata strictly for Arabic subtitles ('ar')."""
+        if not file_path_str or not os.path.isfile(file_path_str):
+            return {"duration_str": "", "size_str": "", "has_arabic_sub": False, "sub_tag": ""}
+
+        p_info = self.config_mgr.get_media_progress(file_path_str)
+        dur = float(p_info.get("duration", 0.0) or 0.0)
+        if dur <= 0:
+            if file_path_str in self._media_info_cache:
+                c_dur = self._media_info_cache[file_path_str].get("duration_sec", 0.0)
+                dur = float(c_dur or 0.0)
+            if dur <= 0 and shutil.which("ffprobe"):
+                try:
+                    pr = subprocess.run([
+                        "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                        "-of", "default=noprint_wrappers=1:nokey=1", file_path_str
+                    ], capture_output=True, text=True, timeout=1.2)
+                    if pr.returncode == 0 and pr.stdout.strip():
+                        dur = float(pr.stdout.strip())
+                        self.config_mgr.set_media_progress(file_path_str, float(p_info.get("position", 0.0) or 0.0), dur)
+                except Exception:
+                    pass
+
+        mins, secs = divmod(int(dur), 60)
+        hrs, mins = divmod(mins, 60)
+        if hrs > 0:
+            dur_str = f"{hrs}h {mins:02d}m"
+        elif mins > 0:
+            dur_str = f"{mins}m {secs:02d}s"
+        elif secs > 0:
+            dur_str = f"{secs}s"
+        else:
+            dur_str = ""
+
+        size_str = ""
+        try:
+            sz = os.path.getsize(file_path_str)
+            size_str = self._format_size(sz)
+        except OSError:
+            pass
+
+        has_ar = False
+        mi = self._media_info_cache.get(file_path_str)
+        if mi and isinstance(mi.get("sub_langs"), list):
+            has_ar = any("ar" in str(x).lower() for x in mi["sub_langs"])
+        else:
+            # Fallback 1: Check external subtitles
+            matching_exts = find_matching_external_subs_for_video(file_path_str)
+            if matching_exts and any(any(k in Path(x).stem.lower() for k in (".ar", "_ar", "-ar", "arabic", "ara")) for x in matching_exts):
+                has_ar = True
+            elif shutil.which("ffprobe"):
+                # Fallback 2: Direct ffprobe stream metadata check
+                try:
+                    cmd = [
+                        "ffprobe", "-v", "quiet", "-select_streams", "s",
+                        "-show_entries", "stream_tags=language,title", "-of", "json", file_path_str
+                    ]
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=1.2)
+                    if res.returncode == 0 and res.stdout:
+                        s_data = json.loads(res.stdout)
+                        for st in s_data.get("streams", []):
+                            tags = st.get("tags") or {}
+                            lang = str(tags.get("language") or "").lower()
+                            title = str(tags.get("title") or "").lower()
+                            if any(k in lang for k in ("ara", "arabic", "ar")) or any(k in title for k in ("arabic", "عربي", "ترجمة")):
+                                has_ar = True
+                                break
+                except Exception:
+                    pass
+
+        return {
+            "duration_str": dur_str,
+            "size_str": size_str,
+            "has_arabic_sub": has_ar,
+            "sub_tag": "ar" if has_ar else ""
+        }
+
+    @Slot(str, result=dict)
+    def getFolderMediaSummary(self, folder_path_str: str) -> dict:
+        """Calculates total episodes, accurate total duration, total disk size, and resume state for Show header."""
+        target_dir = os.path.abspath(folder_path_str) if folder_path_str else ""
+        if not target_dir or not os.path.isdir(target_dir):
+            return {}
+
+        total_bytes = 0
+        total_duration = 0.0
+        episode_count = 0
+        has_watched_any = False
+        resume_ep_path = self._find_resume_episode_in_folder(target_dir)
+
+        try:
+            for root, _, files in os.walk(target_dir):
+                for f in files:
+                    ext = Path(f).suffix.lower()
+                    if ext in VIDEO_EXTS and not f.startswith("."):
+                        episode_count += 1
+                        fp = os.path.join(root, f)
+                        try:
+                            st = os.stat(fp)
+                            total_bytes += st.st_size
+                        except OSError:
+                            pass
+                        p_info = self.config_mgr.get_media_progress(fp)
+                        dur = float(p_info.get("duration", 0.0) or 0.0)
+                        if dur <= 0 and shutil.which("ffprobe"):
+                            try:
+                                pr = subprocess.run([
+                                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
+                                    "-of", "default=noprint_wrappers=1:nokey=1", fp
+                                ], capture_output=True, text=True, timeout=1.0)
+                                if pr.returncode == 0 and pr.stdout.strip():
+                                    dur = float(pr.stdout.strip())
+                                    self.config_mgr.set_media_progress(fp, float(p_info.get("position", 0.0) or 0.0), dur)
+                            except Exception:
+                                pass
+                        total_duration += dur
+                        if p_info.get("watched") or float(p_info.get("progress", 0.0) or 0.0) > 0.02:
+                            has_watched_any = True
+        except Exception:
+            pass
+
+        resume_info = {}
+        resume_progress_ratio = 0.0
+        if resume_ep_path and os.path.exists(resume_ep_path):
+            p_inf = self.config_mgr.get_media_progress(resume_ep_path)
+            pos = float(p_inf.get("position", 0.0) or 0.0)
+            dur = float(p_inf.get("duration", 0.0) or 0.0)
+            if dur > 0:
+                resume_progress_ratio = min(1.0, max(0.0, pos / dur))
+            badge, ep_v = self._parse_episode_info(Path(resume_ep_path).name)
+            mins, secs = divmod(int(pos), 60)
+            resume_info = {
+                "path": resume_ep_path,
+                "name": Path(resume_ep_path).name,
+                "ep_num": str(int(ep_v)) if (ep_v is not None and float(ep_v).is_integer()) else (badge or "1"),
+                "position": pos,
+                "duration": dur,
+                "time_str": f"{mins:02d}:{secs:02d}" if pos > 5.0 else "",
+                "ratio": resume_progress_ratio,
+                "is_resumable": pos > 5.0 and not p_inf.get("watched", False)
+            }
+
+        # Format Total Duration accurately (e.g. 5h 24m or 48m)
+        tot_mins = int(total_duration // 60)
+        tot_hrs, rem_mins = divmod(tot_mins, 60)
+        dur_str = f"{tot_hrs}h {rem_mins}m" if tot_hrs > 0 else (f"{rem_mins}m" if rem_mins > 0 else "-")
+
+        jf_meta = self.jf_bridge.get_cached_item(target_dir) or {}
+        year = jf_meta.get("year", "")
+        rating = jf_meta.get("rating", "")
+        overview = jf_meta.get("overview", "")
+        poster = jf_meta.get("poster", "")
+
+        return {
+            "title": jf_meta.get("title") or Path(target_dir).name,
+            "path": target_dir,
+            "episode_count": episode_count,
+            "total_size": self._format_size(total_bytes),
+            "total_duration": dur_str,
+            "year": str(year) if year else "",
+            "rating": str(rating) if rating else "",
+            "overview": overview,
+            "poster": poster,
+            "resume": resume_info
+        }
 
     @Slot(str, result=dict)
     def getItemProperties(self, file_path_str: str) -> dict:
@@ -3220,9 +3493,15 @@ class FileManagerBackend(QObject):
                 cmd.append("--fs")
             if self._anonymous_mode:
                 cmd.append("--no-save-position-on-quit")
+            loaded_initial_subs = set()
             ext_sub = saved.get("ext_sub", "")
             if ext_sub and os.path.exists(ext_sub):
                 cmd.append(f"--sub-file={ext_sub}")
+                loaded_initial_subs.add(os.path.abspath(ext_sub))
+            for auto_sub in find_matching_external_subs_for_video(abs_clicked):
+                if auto_sub not in loaded_initial_subs:
+                    cmd.append(f"--sub-file={auto_sub}")
+                    loaded_initial_subs.add(auto_sub)
 
             vids = list(ordered_videos)
             if abs_clicked not in vids:
@@ -4516,16 +4795,16 @@ class FileManagerBackend(QObject):
 
             behind_count = max(0, latest_aired_ep - effective_watched)
             if latest_aired_ep == 0:
-                status_label = f"📡 Ep 1 Soon • Watched {effective_watched}"
+                status_label = f"📡 Ep 1 Soon"
                 is_going_tight = True
             elif behind_count == 0:
-                status_label = f"🔥 Going tight! (Ep {effective_watched})"
+                status_label = f"Going tight!"
                 is_going_tight = True
             elif behind_count == 1:
-                status_label = f"⏳ You are 1 episode behind... (Ep {effective_watched}/{latest_aired_ep})"
+                status_label = f"1 episode behind..."
                 is_going_tight = False
             else:
-                status_label = f"⏳ You are {behind_count} episodes behind... (Ep {effective_watched}/{latest_aired_ep})"
+                status_label = f"{behind_count} episodes behind..."
                 is_going_tight = False
 
             if next_air_ts > now_ts:
@@ -4617,7 +4896,7 @@ class FileManagerBackend(QObject):
 
     @Slot()
     def forceSyncAiringNow(self):
-        self.toastMessage.emit("🔄 Syncing MAL & AniList Airing schedules in background...")
+        self.toastMessage.emit("Syncing MAL & AniList Airing schedules in background...")
         self._trigger_background_airing_sync(force=True)
 
     @Slot(str, int)
@@ -4705,6 +4984,122 @@ class FileManagerBackend(QObject):
         self.toastMessage.emit("✔ Restored anime to Airing tab")
         if str(self._current_path) == "mediahub://":
             self.refreshMediaHub()
+
+    # ==========================================================================
+    # Notification Center Full Configuration & Per-Work Controls
+    # ==========================================================================
+
+    @Slot(result=dict)
+    def getNotificationSettings(self) -> dict:
+        return self.airing_tracker.get_notification_config()
+
+    @Slot(str, "QVariant")
+    def updateNotificationSetting(self, key: str, value):
+        cfg = self.airing_tracker.get_notification_config()
+        cfg[key] = value
+        self.config_mgr.set("notification_settings", cfg)
+        self.notificationSettingsChanged.emit()
+
+    @Slot(dict)
+    def saveNotificationSettings(self, new_cfg: dict):
+        cfg = self.airing_tracker.get_notification_config()
+        if isinstance(new_cfg, dict):
+            cfg.update(new_cfg)
+        self.config_mgr.set("notification_settings", cfg)
+        self.notificationSettingsChanged.emit()
+        self.toastMessage.emit("🔔 Saved Notification Center settings")
+
+    @Slot(result=list)
+    def getTrackedWorksNotificationList(self) -> list:
+        """
+        Returns all tracked/airing works so the user can toggle notifications per anime.
+        All works are ON by default unless explicitly in disabled_anime_ids.
+        """
+        ncfg = self.airing_tracker.get_notification_config()
+        disabled_ids = {str(x) for x in (ncfg.get("disabled_anime_ids") or [])}
+        ignored_ids = {str(x) for x in (self.config_mgr.get("airing_ignored_ids", []) or [])}
+        cache = self.airing_tracker._load_json(self.airing_tracker.cache_file).get(self.airing_tracker.mal_username, {})
+        schedules = self.airing_tracker._load_json(self.airing_tracker.schedules_file)
+        local_ep_overrides = dict(self.config_mgr.get("airing_local_eps", {}) or {})
+        links_map = dict(self.config_mgr.get("airing_links", {}) or {})
+
+        works = []
+        seen_ids = set()
+
+        for aid, udata in cache.items():
+            aid_str = str(aid)
+            if aid_str.startswith("manga_") or aid_str in ignored_ids:
+                continue
+            if udata.get("status") not in ("watching", "plan_to_watch"):
+                continue
+            sched = schedules.get(aid_str, {})
+            if sched and sched.get("status") == "finished":
+                continue
+            if not sched and udata.get("airing_status", "currently_airing") != "currently_airing":
+                continue
+
+            seen_ids.add(aid_str)
+            title = str(sched.get("title") or udata.get("title") or f"Anime #{aid_str}")
+            poster = self.airing_tracker.get_cached_poster_path(aid_str)
+            next_ep = int(sched.get("next_ep", 1) or 1)
+            next_ts = float(sched.get("next_air_timestamp", 0) or 0)
+            watched_eps = self.airing_tracker._compute_local_watched_eps(aid_str, local_ep_overrides, links_map)
+            works.append({
+                "id": aid_str,
+                "title": title,
+                "poster": poster,
+                "next_ep": next_ep,
+                "next_ts": next_ts,
+                "watched_eps": watched_eps,
+                "enabled": aid_str not in disabled_ids
+            })
+
+        works.sort(key=lambda w: w["title"].lower())
+        return works
+
+    @Slot(str, bool)
+    def setWorkNotificationEnabled(self, anime_id: str, enabled: bool):
+        clean_id = str(anime_id).strip()
+        if not clean_id:
+            return
+        ncfg = self.airing_tracker.get_notification_config()
+        disabled = [str(x) for x in (ncfg.get("disabled_anime_ids") or []) if str(x) != clean_id]
+        if not enabled:
+            disabled.append(clean_id)
+        ncfg["disabled_anime_ids"] = disabled
+        self.config_mgr.set("notification_settings", ncfg)
+        self.notificationSettingsChanged.emit()
+
+    @Slot(bool)
+    def setAllWorksNotificationsEnabled(self, enabled: bool):
+        ncfg = self.airing_tracker.get_notification_config()
+        if enabled:
+            ncfg["disabled_anime_ids"] = []
+        else:
+            all_works = self.getTrackedWorksNotificationList()
+            ncfg["disabled_anime_ids"] = [w["id"] for w in all_works]
+        self.config_mgr.set("notification_settings", ncfg)
+        self.notificationSettingsChanged.emit()
+        self.toastMessage.emit("🔔 Enabled notifications for all works" if enabled else "🔕 Muted notifications for all works")
+
+    @Slot()
+    def sendTestNotification(self):
+        works = self.getTrackedWorksNotificationList()
+        sample_title = works[0]["title"] if works else "The Eminence in Shadow"
+        sample_poster = works[0]["poster"] if works else ""
+        sample_ep = works[0]["next_ep"] if works else 15
+        sample_watched = works[0]["watched_eps"] if works else 14
+        self.airing_tracker.dispatch_formatted_notification(
+            aid_str="test",
+            title=sample_title,
+            ep_num=sample_ep,
+            watched_eps=sample_watched,
+            poster_local=sample_poster,
+            event_type="test",
+            event_label="🔔 Test Notification from Find Notification Center!",
+            force_send=True
+        )
+        self.toastMessage.emit("🔔 Sent test desktop notification")
 
     @Slot()
     def clearAllIgnoredAiringItems(self):
@@ -5441,6 +5836,34 @@ class FileManagerBackend(QObject):
                 self.copyToClipboard(file_path_str)
         except Exception:
             pass
+
+    @Slot(str)
+    def openInFindInstance(self, target_path_str: str):
+        """Spawns or sends the target directory to a standard Find window instance."""
+        target = str(target_path_str or "").strip()
+        if not target or target.startswith("airing://"):
+            target = str(Path.home())
+        elif target == "mediahub://":
+            target = "mediahub://"
+        elif not os.path.exists(target):
+            target = str(Path.home())
+        else:
+            target = os.path.abspath(target)
+            if os.path.isfile(target):
+                parent_d = os.path.dirname(target)
+                target = parent_d
+
+        main_script = Path(__file__).resolve().parent.parent / "main.py"
+        try:
+            subprocess.Popen(
+                [sys.executable, str(main_script), target],
+                start_new_session=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL
+            )
+            self.toastMessage.emit(f"📂 Opened in Find: {Path(target).name or target}")
+        except Exception as e:
+            self.toastMessage.emit(f"⚠️ Failed to open in Find: {e}")
 
     @Slot(str)
     def goToParentFolder(self, file_path_str: str):

@@ -23,6 +23,8 @@ Dialog {
     property var ignoredAiringList: backend ? backend.getIgnoredAiringItems() : []
     property var savedDesktopList: backend ? backend.getSavedDesktopApps() : []
     property var defaultIconsMap: backend ? backend.getDefaultTypeIcons() : ({})
+    property var notifConfig: backend ? backend.getNotificationSettings() : ({})
+    property var trackedWorksNotifList: backend ? backend.getTrackedWorksNotificationList() : []
     property int selectedQAIndex: -1
     property string activePickerTarget: ""
     property string activeIconKeyTarget: ""
@@ -110,6 +112,12 @@ Dialog {
         function onDesktopAppsUpdated() {
             if (backend) root.savedDesktopList = backend.getSavedDesktopApps()
         }
+        function onNotificationSettingsChanged() {
+            if (backend) {
+                root.notifConfig = backend.getNotificationSettings()
+                root.trackedWorksNotifList = backend.getTrackedWorksNotificationList()
+            }
+        }
     }
 
     // Reusable UI Building Blocks for Modern Settings
@@ -154,6 +162,61 @@ Dialog {
                     height: 1
                     color: Theme.borderDim
                 }
+            }
+        }
+    }
+
+    component StyledCheckChip: Rectangle {
+        property string label: ""
+        property bool checked: false
+        signal toggled(bool isChecked)
+
+        implicitWidth: chipRow.implicitWidth + Math.round(20 * Theme.scaleFactor)
+        implicitHeight: Math.round(30 * Theme.scaleFactor)
+        radius: Theme.radiusMedium
+        color: checked ? Qt.rgba(Theme.accent.r, Theme.accent.g, Theme.accent.b, 0.18) : (chipMouse.containsMouse ? Theme.bgHover : Theme.bgSurface)
+        border.color: checked ? Theme.accent : Theme.borderDim
+        border.width: 1
+
+        RowLayout {
+            id: chipRow
+            anchors.centerIn: parent
+            spacing: Math.round(7 * Theme.scaleFactor)
+
+            Rectangle {
+                width: Math.round(16 * Theme.scaleFactor)
+                height: Math.round(16 * Theme.scaleFactor)
+                radius: Math.round(4 * Theme.scaleFactor)
+                color: parent.parent.checked ? Theme.accent : Theme.bgCard
+                border.color: parent.parent.checked ? Theme.accentHover : Theme.textTertiary
+                border.width: 1
+
+                Text {
+                    anchors.centerIn: parent
+                    visible: parent.parent.parent.checked
+                    text: "✔"
+                    color: "#ffffff"
+                    font.pixelSize: Math.round(10 * Theme.scaleFactor)
+                    font.bold: true
+                }
+            }
+
+            Text {
+                text: parent.parent.label
+                color: parent.parent.checked ? Theme.textPrimary : Theme.textSecondary
+                font.pixelSize: Theme.fontSizeSmall
+                font.bold: parent.parent.checked
+            }
+        }
+
+        MouseArea {
+            id: chipMouse
+            anchors.fill: parent
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+            onClicked: {
+                parent.checked = !parent.checked
+                parent.toggled(parent.checked)
             }
         }
     }
@@ -259,6 +322,7 @@ Dialog {
                         { icon: "🎨", title: "Appearance & UI" },
                         { icon: "⭐", title: "Quick Access & Favs" },
                         { icon: "📺", title: "Media Library & HDR" },
+                        { icon: "🔔", title: "Notification Center" },
                         { icon: "🎬", title: "MPV Profiles" },
                         { icon: "🚀", title: "System & .desktop" },
                         { icon: "🔤", title: "Fonts & Icons" }
@@ -741,6 +805,33 @@ Dialog {
                             Switch {
                                 checked: backend ? backend.swapMouseButtons : false
                                 onToggled: if (backend) backend.setSwapMouseButtons(checked)
+                            }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 4
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Text {
+                                    text: "Mouse Wheel Scroll Speed Multiplier: " + (backend ? backend.scrollSpeedMultiplier.toFixed(2) + "x" : "1.25x")
+                                    color: Theme.textPrimary
+                                    font.bold: true
+                                    font.pixelSize: Theme.fontSizeNormal
+                                    Layout.fillWidth: true
+                                }
+                                ActionBtn {
+                                    text: "Reset (1.25x)"
+                                    onClicked: if (backend) backend.setScrollSpeedMultiplier(1.25)
+                                }
+                            }
+                            Slider {
+                                Layout.fillWidth: true
+                                from: 0.4
+                                to: 3.5
+                                stepSize: 0.05
+                                value: backend ? backend.scrollSpeedMultiplier : 1.25
+                                onMoved: if (backend) backend.setScrollSpeedMultiplier(value)
                             }
                         }
                     }
@@ -1622,7 +1713,386 @@ Dialog {
             }
 
             // =================================================================
-            // PAGE 3: MPV PROFILES (BOTH / SDR / HDR)
+            // PAGE 3: NOTIFICATION CENTER (COMPREHENSIVE APP & MEDIA HUB ALERTS)
+            // =================================================================
+            ScrollView {
+                clip: true
+                contentWidth: availableWidth
+
+                ColumnLayout {
+                    width: parent.width - 28
+                    x: 14
+                    y: 14
+                    spacing: 14
+
+                    SectionCard {
+                        sectionTitle: "🔔 Global Notification Center"
+                        sectionSubtitle: "Master controls for all OS Desktop notifications (notify-send) and in-app status toast banners across Find."
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "Enable All Notifications (Master Switch):"
+                                color: Theme.textPrimary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeNormal
+                                Layout.fillWidth: true
+                            }
+                            Switch {
+                                checked: root.notifConfig.master_enabled !== false
+                                onToggled: if (backend) backend.updateNotificationSetting("master_enabled", checked)
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "Enable OS Desktop Notifications (System Tray / Dunst / SwayNC / Mako):"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeNormal
+                                Layout.fillWidth: true
+                            }
+                            Switch {
+                                checked: root.notifConfig.os_notifications_enabled !== false
+                                onToggled: if (backend) backend.updateNotificationSetting("os_notifications_enabled", checked)
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "Enable In-App Floating Toast Notifications:"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeNormal
+                                Layout.fillWidth: true
+                            }
+                            Switch {
+                                checked: root.notifConfig.in_app_toasts_enabled !== false
+                                onToggled: if (backend) backend.updateNotificationSetting("in_app_toasts_enabled", checked)
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Text {
+                                text: "OS Notification Urgency & Timeout:"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                                Layout.fillWidth: true
+                            }
+                            Repeater {
+                                model: [
+                                    { k: "low", lbl: "Low" },
+                                    { k: "normal", lbl: "Normal" },
+                                    { k: "critical", lbl: "Critical" }
+                                ]
+                                delegate: ActionBtn {
+                                    text: modelData.lbl
+                                    isPrimary: (root.notifConfig.urgency || "normal") === modelData.k
+                                    onClicked: if (backend) backend.updateNotificationSetting("urgency", modelData.k)
+                                }
+                            }
+                            ActionBtn {
+                                text: "🔔 Send Test Notification"
+                                isPrimary: true
+                                onClicked: if (backend) backend.sendTestNotification()
+                            }
+                        }
+
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Text {
+                                text: "In-App Toast Categories:"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                                font.bold: true
+                                height: Math.round(30 * Theme.scaleFactor)
+                                verticalAlignment: Text.AlignVCenter
+                            }
+                            StyledCheckChip {
+                                label: "File Ops"
+                                checked: root.notifConfig.toast_file_ops !== false
+                                onToggled: function(val) { if (backend) backend.updateNotificationSetting("toast_file_ops", val) }
+                            }
+                            StyledCheckChip {
+                                label: "Archives"
+                                checked: root.notifConfig.toast_archive_ops !== false
+                                onToggled: function(val) { if (backend) backend.updateNotificationSetting("toast_archive_ops", val) }
+                            }
+                            StyledCheckChip {
+                                label: "Jellyfin Sync"
+                                checked: root.notifConfig.toast_jellyfin_sync !== false
+                                onToggled: function(val) { if (backend) backend.updateNotificationSetting("toast_jellyfin_sync", val) }
+                            }
+                            StyledCheckChip {
+                                label: "Clipboard"
+                                checked: root.notifConfig.toast_clipboard !== false
+                                onToggled: function(val) { if (backend) backend.updateNotificationSetting("toast_clipboard", val) }
+                            }
+                        }
+                    }
+
+                    SectionCard {
+                        sectionTitle: "⏰ Media Hub Timing & Reminder Rules"
+                        sectionSubtitle: "Configure when notifications arrive: at episode release, a pre-airing reminder before it airs, and a follow-up reminder if you haven't watched it yet."
+
+                        // 1. On Airing Release
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "📡 Notify Immediately When Episode Airs (On Release Time):"
+                                color: Theme.textPrimary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeNormal
+                                Layout.fillWidth: true
+                            }
+                            Switch {
+                                checked: root.notifConfig.airing_on_release !== false
+                                onToggled: if (backend) backend.updateNotificationSetting("airing_on_release", checked)
+                            }
+                        }
+
+                        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.borderDim }
+
+                        // 2. Pre-Airing Reminder
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "⏳ Pre-Airing Reminder (Notify Before Episode Airs):"
+                                color: Theme.textPrimary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeNormal
+                                Layout.fillWidth: true
+                            }
+                            Switch {
+                                checked: Boolean(root.notifConfig.airing_pre_reminder_enabled)
+                                onToggled: if (backend) backend.updateNotificationSetting("airing_pre_reminder_enabled", checked)
+                            }
+                        }
+
+                        RowLayout {
+                            visible: Boolean(root.notifConfig.airing_pre_reminder_enabled)
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Text {
+                                text: "When to send Pre-Airing Reminder:"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                                Layout.fillWidth: true
+                            }
+                            Repeater {
+                                model: [
+                                    { m: 15, lbl: "15m before" },
+                                    { m: 30, lbl: "30m before" },
+                                    { m: 60, lbl: "1h before" },
+                                    { m: 120, lbl: "2h before" }
+                                ]
+                                delegate: ActionBtn {
+                                    text: modelData.lbl
+                                    isPrimary: Number(root.notifConfig.airing_pre_reminder_minutes || 30) === modelData.m
+                                    onClicked: if (backend) backend.updateNotificationSetting("airing_pre_reminder_minutes", modelData.m)
+                                }
+                            }
+                        }
+
+                        Rectangle { Layout.fillWidth: true; height: 1; color: Theme.borderDim }
+
+                        // 3. Unwatched Follow-up Reminder
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "📌 Unwatched Episode Reminder (Notify if you haven't watched after release):"
+                                color: Theme.textPrimary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeNormal
+                                Layout.fillWidth: true
+                            }
+                            Switch {
+                                checked: root.notifConfig.airing_unwatched_reminder_enabled !== false
+                                onToggled: if (backend) backend.updateNotificationSetting("airing_unwatched_reminder_enabled", checked)
+                            }
+                        }
+
+                        RowLayout {
+                            visible: root.notifConfig.airing_unwatched_reminder_enabled !== false
+                            Layout.fillWidth: true
+                            spacing: 6
+                            Text {
+                                text: "Remind me if still unwatched after:"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                                Layout.fillWidth: true
+                            }
+                            Repeater {
+                                model: [
+                                    { h: 3, lbl: "3 Hours" },
+                                    { h: 6, lbl: "6 Hours" },
+                                    { h: 12, lbl: "12 Hours" },
+                                    { h: 24, lbl: "24 Hours" },
+                                    { h: 48, lbl: "2 Days" }
+                                ]
+                                delegate: ActionBtn {
+                                    text: modelData.lbl
+                                    isPrimary: Number(root.notifConfig.airing_unwatched_reminder_hours || 12) === modelData.h
+                                    onClicked: if (backend) backend.updateNotificationSetting("airing_unwatched_reminder_hours", modelData.h)
+                                }
+                            }
+                        }
+                    }
+
+                    SectionCard {
+                        sectionTitle: "📝 Notification Content & Template Customization"
+                        sectionSubtitle: "Choose what details appear inside Media Hub notifications. Placeholders: {title}, {ep}, {watched}, {behind}, {status}, {event_label}"
+
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            StyledCheckChip {
+                                label: "🖼️ Show Anime Poster Icon"
+                                checked: root.notifConfig.airing_content_show_poster !== false
+                                onToggled: function(val) { if (backend) backend.updateNotificationSetting("airing_content_show_poster", val) }
+                            }
+                            StyledCheckChip {
+                                label: "🔢 Show Episode Number"
+                                checked: root.notifConfig.airing_content_show_ep !== false
+                                onToggled: function(val) { if (backend) backend.updateNotificationSetting("airing_content_show_ep", val) }
+                            }
+                            StyledCheckChip {
+                                label: "📊 Show Local Watched Progress"
+                                checked: root.notifConfig.airing_content_show_progress !== false
+                                onToggled: function(val) { if (backend) backend.updateNotificationSetting("airing_content_show_progress", val) }
+                            }
+                            StyledCheckChip {
+                                label: "⏳ Show Behind Status"
+                                checked: root.notifConfig.airing_content_show_behind !== false
+                                onToggled: function(val) { if (backend) backend.updateNotificationSetting("airing_content_show_behind", val) }
+                            }
+                        }
+
+                        GridLayout {
+                            columns: 2
+                            Layout.fillWidth: true
+                            rowSpacing: 8
+                            columnSpacing: 10
+
+                            Text { text: "Title Format:"; color: Theme.textSecondary; font.bold: true }
+                            TextField {
+                                id: notifTitleTplInput
+                                Layout.fillWidth: true
+                                text: root.notifConfig.airing_title_template || "🎬 {title} — Episode {ep}"
+                                color: Theme.textPrimary
+                                font.family: "monospace"
+                                font.pixelSize: Theme.fontSizeSmall
+                                selectByMouse: true
+                                onEditingFinished: if (backend) backend.updateNotificationSetting("airing_title_template", text)
+                                background: Rectangle { color: Theme.bgSurface; radius: 4; border.color: Theme.borderDim }
+                            }
+
+                            Text { text: "Body Format:"; color: Theme.textSecondary; font.bold: true }
+                            TextField {
+                                id: notifBodyTplInput
+                                Layout.fillWidth: true
+                                text: root.notifConfig.airing_body_template || "{event_label}\\nLocal Progress: {watched} eps ({status})"
+                                color: Theme.textPrimary
+                                font.family: "monospace"
+                                font.pixelSize: Theme.fontSizeSmall
+                                selectByMouse: true
+                                onEditingFinished: if (backend) backend.updateNotificationSetting("airing_body_template", text)
+                                background: Rectangle { color: Theme.bgSurface; radius: 4; border.color: Theme.borderDim }
+                            }
+                        }
+                    }
+
+                    SectionCard {
+                        sectionTitle: "📺 Per-Work Notification Selection (All ON by Default)"
+                        sectionSubtitle: "Select which airing works in your Media Hub send notifications. All tracked works are enabled by default."
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            ActionBtn {
+                                text: "🔔 Enable All Works"
+                                isPrimary: true
+                                onClicked: if (backend) backend.setAllWorksNotificationsEnabled(true)
+                            }
+                            ActionBtn {
+                                text: "🔕 Mute All Works"
+                                onClicked: if (backend) backend.setAllWorksNotificationsEnabled(false)
+                            }
+                            ActionBtn {
+                                text: "🔄 Refresh List"
+                                onClicked: if (backend) root.trackedWorksNotifList = backend.getTrackedWorksNotificationList()
+                            }
+                            Item { Layout.fillWidth: true }
+                        }
+
+                        Text {
+                            visible: root.trackedWorksNotifList.length === 0
+                            text: "No active airing works found in local cache yet. Click 'Force Sync MAL & AniList' in the Media Library tab."
+                            color: Theme.textTertiary
+                            font.pixelSize: Theme.fontSizeSmall
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Repeater {
+                                model: root.trackedWorksNotifList
+                                delegate: Rectangle {
+                                    Layout.fillWidth: true
+                                    height: Math.round(44 * Theme.scaleFactor)
+                                    radius: Theme.radiusSmall
+                                    color: Theme.bgSurface
+                                    border.color: modelData.enabled ? Theme.borderDim : "transparent"
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 12
+                                        anchors.rightMargin: 12
+                                        spacing: 10
+
+                                        Text {
+                                            text: modelData.enabled ? "🔔" : "🔕"
+                                            font.pixelSize: Theme.fontSizeMedium
+                                        }
+
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 1
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: modelData.title
+                                                color: modelData.enabled ? Theme.textPrimary : Theme.textTertiary
+                                                font.bold: modelData.enabled
+                                                font.pixelSize: Theme.fontSizeNormal
+                                                elide: Text.ElideRight
+                                            }
+                                            Text {
+                                                Layout.fillWidth: true
+                                                text: "Next: EP " + modelData.next_ep + "  •  Local Watched: " + modelData.watched_eps + " eps"
+                                                color: Theme.textTertiary
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                elide: Text.ElideRight
+                                            }
+                                        }
+
+                                        Switch {
+                                            checked: Boolean(modelData.enabled)
+                                            onToggled: if (backend) backend.setWorkNotificationEnabled(modelData.id, checked)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // =================================================================
+            // PAGE 4: MPV PROFILES (BOTH / SDR / HDR)
             // =================================================================
             Item {
                 ColumnLayout {
@@ -1754,6 +2224,21 @@ Dialog {
                             Switch {
                                 checked: backend ? backend.restoreLastSession : true
                                 onToggled: if (backend) backend.setRestoreLastSession(checked)
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "Keep Find Resident in Background on Window Close (Instant Re-open):"
+                                color: Theme.textPrimary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeNormal
+                                Layout.fillWidth: true
+                            }
+                            Switch {
+                                checked: backend ? backend.keepAliveInBackground : true
+                                onToggled: if (backend) backend.setKeepAliveInBackground(checked)
                             }
                         }
 

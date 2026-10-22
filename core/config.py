@@ -3,7 +3,10 @@ import os
 import time
 import shutil
 import threading
-import fcntl
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 from pathlib import Path
 
 
@@ -17,6 +20,8 @@ class ConfigManager:
         "sort_ascending": True,
         "max_cache_mb": 500,
         "scale_factor": 1.35,
+        "scroll_speed_multiplier": 1.25,
+        "keep_alive_in_background": True,
         "accent_color": "#0078d4",
         "recent_accent_colors": ["#0078d4", "#8b5cf6", "#10b981", "#f59e0b", "#ec4899"],
         "transparent_blur": False,
@@ -46,6 +51,29 @@ class ConfigManager:
         "airing_links": {},
         "airing_local_eps": {},
         "airing_ignored_ids": [],
+        "notification_settings": {
+            "master_enabled": True,
+            "os_notifications_enabled": True,
+            "in_app_toasts_enabled": True,
+            "toast_file_ops": True,
+            "toast_archive_ops": True,
+            "toast_jellyfin_sync": True,
+            "toast_clipboard": True,
+            "urgency": "normal",
+            "display_timeout_ms": 6000,
+            "airing_on_release": True,
+            "airing_pre_reminder_enabled": False,
+            "airing_pre_reminder_minutes": 30,
+            "airing_unwatched_reminder_enabled": True,
+            "airing_unwatched_reminder_hours": 12,
+            "airing_content_show_poster": True,
+            "airing_content_show_ep": True,
+            "airing_content_show_progress": True,
+            "airing_content_show_behind": True,
+            "airing_title_template": "🎬 {title} — Episode {ep}",
+            "airing_body_template": "{event_label}\nLocal Progress: {watched} eps ({status})",
+            "disabled_anime_ids": []
+        },
         "media_hub_rows": [
             {"id": "continue_watching", "title": "Continue Watching", "visible": True},
             {"id": "recently_added", "title": "Recently Added Episodes", "visible": True},
@@ -162,7 +190,12 @@ class ConfigManager:
         tmp_path = target_file.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
         try:
             with open(lock_path, "w", encoding="utf-8") as lf:
-                fcntl.flock(lf, fcntl.LOCK_EX)
+                # القفل
+                if os.name == "nt":
+                    lf.seek(0)
+                    msvcrt.locking(lf.fileno(), msvcrt.LK_LOCK, 1)
+                else:
+                    fcntl.flock(lf, fcntl.LOCK_EX)
                 try:
                     with open(tmp_path, "w", encoding="utf-8") as f:
                         json.dump(data_snapshot, f, indent=indent)
@@ -175,7 +208,14 @@ class ConfigManager:
                             pass
                     os.replace(tmp_path, target_file)
                 finally:
-                    fcntl.flock(lf, fcntl.LOCK_UN)
+                    if os.name == "nt":
+                        try:
+                            lf.seek(0)
+                            msvcrt.locking(lf.fileno(), msvcrt.LK_UNLCK, 1)
+                        except OSError:
+                            pass
+                    else:
+                        fcntl.flock(lf, fcntl.LOCK_UN)
         except Exception:
             if tmp_path.exists():
                 try:

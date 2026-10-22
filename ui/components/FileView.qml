@@ -618,16 +618,6 @@ Rectangle {
                 clip: true
                 spacing: 2
 
-                WheelHandler {
-                    target: null
-                    orientation: Qt.Vertical
-                    onWheel: function(event) {
-                        var step = (event.angleDelta.y / 120.0) * Math.round(920 * Theme.scaleFactor)
-                        var maxY = Math.max(0, searchListView.contentHeight - searchListView.height)
-                        searchListView.contentY = Math.max(0, Math.min(maxY, searchListView.contentY - step))
-                        event.accepted = true
-                    }
-                }
 
                 delegate: Rectangle {
                     id: sRow
@@ -990,16 +980,6 @@ Rectangle {
                     clip: true
                     boundsBehavior: Flickable.StopAtBounds
 
-                    WheelHandler {
-                        target: null
-                        orientation: Qt.Vertical
-                        onWheel: function(event) {
-                            var step = (event.angleDelta.y / 120.0) * Math.round(960 * Theme.scaleFactor)
-                            var maxY = Math.max(0, mediaHubFlick.contentHeight - mediaHubFlick.height)
-                            mediaHubFlick.contentY = Math.max(0, Math.min(maxY, mediaHubFlick.contentY - step))
-                            event.accepted = true
-                        }
-                    }
 
                     ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
@@ -1185,17 +1165,6 @@ Rectangle {
                                     reuseItems: false
                                     model: sectionBlock.cards_model
 
-                                    WheelHandler {
-                                        target: null
-                                        orientation: Qt.Horizontal
-                                        onWheel: function(event) {
-                                            var delta = event.angleDelta.x !== 0 ? event.angleDelta.x : event.angleDelta.y
-                                            var step = (delta / 120.0) * Math.round(840 * Theme.scaleFactor)
-                                            var maxX = Math.max(0, rowHorizList.contentWidth - rowHorizList.width)
-                                            rowHorizList.contentX = Math.max(0, Math.min(maxX, rowHorizList.contentX - step))
-                                            event.accepted = true
-                                        }
-                                    }
 
                                     delegate: Rectangle {
                                         id: hubCard
@@ -1699,18 +1668,6 @@ Rectangle {
                         }
                     }
 
-                    WheelHandler {
-                        id: listFastWheel
-                        target: null
-                        orientation: Qt.Vertical
-                        onWheel: function(event) {
-                            fileListView.cancelFlick()
-                            var step = (event.angleDelta.y / 120.0) * Math.round(960 * Theme.scaleFactor)
-                            var maxY = Math.max(0, fileListView.contentHeight - fileListView.height)
-                            fileListView.contentY = Math.max(0, Math.min(maxY, fileListView.contentY - step))
-                            event.accepted = true
-                        }
-                    }
 
                     ScrollBar.vertical: ScrollBar {
                         active: true
@@ -2288,18 +2245,6 @@ Rectangle {
                         }
                     }
 
-                    WheelHandler {
-                        id: gridFastWheel
-                        target: null
-                        orientation: Qt.Vertical
-                        onWheel: function(event) {
-                            fileGridView.cancelFlick()
-                            var step = (event.angleDelta.y / 120.0) * Math.round(1040 * Theme.scaleFactor)
-                            var maxY = Math.max(0, fileGridView.contentHeight - fileGridView.height)
-                            fileGridView.contentY = Math.max(0, Math.min(maxY, fileGridView.contentY - step))
-                            event.accepted = true
-                        }
-                    }
 
                     readonly property bool isMoviePosterGrid: backend ? (backend.isMovieFolderView || (backend.isMediaLibraryView && backend.showSeriesPosters)) : false
                     readonly property int minCardSize: Math.round((isMoviePosterGrid ? 165 : 145) * Theme.scaleFactor)

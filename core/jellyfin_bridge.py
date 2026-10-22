@@ -656,6 +656,7 @@ class JellyfinBridge:
 
                 by_exact_path = {}
                 by_filename = {}
+                by_ep_number = {}
                 by_clean_title = {}
                 for itm in server_items:
                     srv_p = str(itm.get("Path") or "").strip()
@@ -663,6 +664,12 @@ class JellyfinBridge:
                         norm_srv = os.path.abspath(srv_p)
                         by_exact_path[norm_srv] = itm
                         by_filename[Path(norm_srv).name] = itm
+                    ep_idx = itm.get("IndexNumber")
+                    if ep_idx is not None and str(itm.get("Type") or "") == "Episode":
+                        try:
+                            by_ep_number.setdefault(int(ep_idx), itm)
+                        except Exception:
+                            pass
                     for t_field in (itm.get("Name"), itm.get("OriginalTitle")):
                         if t_field:
                             ck = self._normalize_match_key(str(t_field), strip_season=True)
@@ -672,6 +679,12 @@ class JellyfinBridge:
                 for loc_abs, loc_name in local_video_files.items():
                     matched_itm = by_exact_path.get(loc_abs) or by_filename.get(loc_name)
                     if not matched_itm:
+                        # Match by explicit episode number so two episodes in the same folder NEVER share the same Jellyfin item!
+                        m_ep = re.search(r'(?:[Ss]\d{1,2}[Ee]|-\s*|\b[Ee][Pp]?\s*|\[)(\d{1,4})(?:\b|\]|v\d)', Path(loc_name).stem)
+                        if m_ep:
+                            ep_int = int(m_ep.group(1))
+                            matched_itm = by_ep_number.get(ep_int)
+                    if not matched_itm and is_movie_folder:
                         stem_key = self._normalize_match_key(Path(loc_name).stem, strip_season=True)
                         matched_itm = by_clean_title.get(stem_key)
 
@@ -902,25 +915,12 @@ class JellyfinBridge:
         m3u_lines = ["#EXTM3U"]
         use_http_stream = bool(self.is_enabled and self.stream_via_server and self._server_online)
 
+        # IMPORTANT: Do NOT write #EXTINF titles into the M3U8 playlist!
+        # In MPV, #EXTINF overrides `media-title` with the Jellyfin episode title, which breaks
+        # MPV's `sub-auto=fuzzy` external subtitle matching against the local video filename!
         for lp in ordered_local_files:
             c_meta = self._path_map.get(lp, {})
             iid = c_meta.get("item_id", "")
-            srv_title = str(c_meta.get("title") or "").strip()
-            ep_idx = c_meta.get("index_number")
-            is_movie = (c_meta.get("item_type") == "Movie")
-
-            if srv_title:
-                if ep_idx is not None and not is_movie:
-                    display_title = f"{int(ep_idx):02d} - {srv_title}"
-                else:
-                    display_title = srv_title
-            else:
-                display_title = Path(lp).stem
-
-            clean_ext_title = display_title.replace("\n", " ").replace("\r", " ")
-            dur_int = int(c_meta.get("duration", -1) or -1) if c_meta.get("duration", 0) > 0 else -1
-            m3u_lines.append(f"#EXTINF:{dur_int},{clean_ext_title}")
-
             if use_http_stream and iid:
                 ms_id = c_meta.get("media_source_id", iid)
                 s_url = (

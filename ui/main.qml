@@ -92,6 +92,12 @@ ApplicationWindow {
             if (!backend) return
             root.topFavoritesModel = backend.getFavorites()
         }
+        function onWindowActivationRequested() {
+            root.visible = true
+            root.show()
+            root.raise()
+            root.requestActivate()
+        }
         function onToastMessage(msg) {
             root.activeToastText = msg
             toastTimer.restart()
@@ -210,11 +216,17 @@ ApplicationWindow {
     }
 
     onClosing: function(close) {
-        if (backend) {
-            backend.shutdownCleanup()
-        }
         if (backend && backend.picker && backend.picker.isActive) {
             backend.cancelPicker()
+            return
+        }
+        if (backend && backend.keepAliveInBackground) {
+            close.accepted = false
+            root.hide()
+            return
+        }
+        if (backend) {
+            backend.quitApplicationCompletely()
         }
     }
 

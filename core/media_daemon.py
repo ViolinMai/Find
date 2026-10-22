@@ -174,6 +174,64 @@ def save_json_atomic(path: Path, data: dict):
                 pass
 
 
+SUBTITLE_EXTS = {".srt", ".ass", ".ssa", ".sub", ".vtt", ".idx", ".sup", ".smi"}
+
+
+def find_matching_external_subs(video_file_path: str) -> list:
+    """
+    Finds all external subtitle files on disk matching the local video file's exact stem
+    (or stem.lang.ass / stem_ar.srt, plus Subs/Subtitles subfolders), ensuring external subs
+    always load even when Jellyfin integration or M3U8 playlists are active.
+    """
+    if not video_file_path or not os.path.isfile(video_file_path):
+        return []
+    vp = Path(video_file_path)
+    parent = vp.parent
+    stem = vp.stem
+    stem_low = stem.lower()
+    matched = []
+    seen = set()
+
+    search_dirs = [parent]
+    for sd_name in ("Subs", "subs", "Subtitles", "subtitles", stem):
+        sd = parent / sd_name
+        if sd.is_dir():
+            search_dirs.append(sd)
+
+    for sdir in search_dirs:
+        try:
+            with os.scandir(str(sdir)) as it:
+                for entry in it:
+                    if not entry.is_file():
+                        continue
+                    sp = Path(entry.name)
+                    if sp.suffix.lower() not in SUBTITLE_EXTS:
+                        continue
+                    sub_stem_low = sp.stem.lower()
+                    if (
+                        sub_stem_low == stem_low
+                        or sub_stem_low.startswith(stem_low + ".")
+                        or sub_stem_low.startswith(stem_low + "_")
+                        or sub_stem_low.startswith(stem_low + "-")
+                        or sub_stem_low.startswith(stem_low + " ")
+                    ):
+                        abs_sub = os.path.abspath(entry.path)
+                        if abs_sub not in seen:
+                            seen.add(abs_sub)
+                            matched.append(abs_sub)
+        except OSError:
+            pass
+
+    def _sub_prio(p_str: str):
+        nl = Path(p_str).stem.lower()
+        is_ar = any(x in nl for x in (".ar", "_ar", "-ar", "arabic", "ara"))
+        is_ass = p_str.lower().endswith((".ass", ".ssa"))
+        return (0 if is_ar else 1, 0 if is_ass else 1, p_str)
+
+    matched.sort(key=_sub_prio)
+    return matched
+
+
 def resolve_mpv_path(raw_path: str, fallback_dir: str) -> str:
     if not raw_path:
         return ""
@@ -423,15 +481,27 @@ def run_daemon_loop():
 
                             all_prog = load_json_safe(progress_file)
                             saved_next = all_prog.get(resolved, {})
+                            loaded_subs = set()
                             if isinstance(saved_next, dict):
                                 next_sub = saved_next.get("ext_sub", "")
                                 if next_sub and os.path.exists(next_sub):
                                     send_ipc_cmd(s, ["sub-add", next_sub, "select"], 10)
+                                    loaded_subs.add(os.path.abspath(next_sub))
                                     st["last_sub"] = next_sub
-                                if not saved_next.get("watched", False) and saved_next.get("position", 0.0) > 5.0:
-                                    send_ipc_cmd(s, ["set_property", "time-pos", float(saved_next["position"])], 11)
-                                else:
-                                    send_ipc_cmd(s, ["set_property", "time-pos", 0.0], 11)
+                            # Auto-attach any local external subtitle matching the switched episode's real filename!
+                            for auto_sub in find_matching_external_subs(resolved):
+                                if auto_sub not in loaded_subs:
+                                    sel_mode = "select" if not loaded_subs else "auto"
+                                    send_ipc_cmd(s, ["sub-add", auto_sub, sel_mode], 10)
+                                    loaded_subs.add(auto_sub)
+
+                            if isinstance(saved_next, dict) and not saved_next.get("watched", False) and float(saved_next.get("position", 0.0) or 0.0) > 5.0:
+                                target_resume = float(saved_next["position"])
+                                send_ipc_cmd(s, ["set_property", "time-pos", target_resume], 11)
+                                st["expected_seek_pos"] = target_resume
+                            else:
+                                send_ipc_cmd(s, ["set_property", "time-pos", 0.0], 11)
+                                st["expected_seek_pos"] = 0.0
                             continue
 
                         dur_val = query_ipc(s, "duration", 2)
@@ -448,9 +518,9 @@ def run_daemon_loop():
                                     existing_ch = query_ipc(s, "chapter-list", 14)
                                     if not existing_ch:
                                         send_ipc_cmd(s, ["set_property", "chapter-list", jf_chapters], 15)
-                                title_str = (st.get("jellyfin") or {}).get("title", "")
-                                if title_str:
-                                    send_ipc_cmd(s, ["set_property", "media-title", title_str], 16)
+                                # Attach matching local external subtitles before setting any custom title
+                                for idx_sub, auto_sub in enumerate(find_matching_external_subs(st["active_file"])):
+                                    send_ipc_cmd(s, ["sub-add", auto_sub, "select" if idx_sub == 0 else "auto"], 18)
 
                             if not st["initial_seek_done"]:
                                 st["initial_seek_done"] = True
@@ -466,10 +536,16 @@ def run_daemon_loop():
                                     pos_val = st["initial_pos"]
 
                         if isinstance(pos_val, (int, float)) and pos_val >= 0:
-                            if st["switch_ts"] > 0 and (time.time() - st["switch_ts"]) < 2.0:
-                                if st["prev_final_pos"] > 30.0 and abs(float(pos_val) - st["prev_final_pos"]) < 5.0:
+                            f_pos = float(pos_val)
+                            # Prevent stale time-pos from previous episode bleeding into newly switched episode!
+                            if st["switch_ts"] > 0:
+                                elapsed_sw = time.time() - st["switch_ts"]
+                                if elapsed_sw < 4.5 and st["prev_final_pos"] > 15.0 and abs(f_pos - st["prev_final_pos"]) < 12.0:
                                     continue
-                            st["last_pos"] = float(pos_val)
+                                exp_pos = float(st.get("expected_seek_pos", 0.0) or 0.0)
+                                if elapsed_sw < 2.5 and exp_pos == 0.0 and f_pos > 30.0:
+                                    continue
+                            st["last_pos"] = f_pos
 
                         if eof_val is True:
                             st["eof_reached"] = True

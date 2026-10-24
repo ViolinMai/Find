@@ -94,18 +94,22 @@ def install_desktop_and_set_default(main_script_path: str) -> bool:
         xdg_data = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
         apps_dir = Path(xdg_data) / "applications"
         apps_dir.mkdir(parents=True, exist_ok=True)
-        desktop_file = apps_dir / "find.desktop"
+
+        desktop_file_find = apps_dir / "find.desktop"
+        desktop_file_mh = apps_dir / "find-mediahub.desktop"
 
         python_bin = os.path.abspath(os.sys.executable)
         script_abs = os.path.abspath(main_script_path)
+        base_exec = f'"{python_bin}"' if getattr(os.sys, "frozen", False) else f'"{python_bin}" "{script_abs}"'
 
-        content = (
+        # 1. Desktop File لـ Find (مدير الملفات الأساسي)
+        content_find = (
             "[Desktop Entry]\n"
             "Type=Application\n"
             "Name=Find\n"
             "GenericName=File Manager\n"
             "Comment=Modern Linux Wayland File Manager & Picker\n"
-            f"Exec=\"{python_bin}\" \"{script_abs}\" %U\n"
+            f"Exec={base_exec} %U\n"
             "Icon=system-file-manager\n"
             "Terminal=false\n"
             "StartupNotify=true\n"
@@ -114,9 +118,24 @@ def install_desktop_and_set_default(main_script_path: str) -> bool:
             "Actions=new-window;\n\n"
             "[Desktop Action new-window]\n"
             "Name=Open New Window\n"
-            f"Exec=\"{python_bin}\" \"{script_abs}\"\n"
+            f"Exec={base_exec}\n"
         )
-        desktop_file.write_text(content, encoding="utf-8")
+        desktop_file_find.write_text(content_find, encoding="utf-8")
+
+        # 2. Desktop File مستقل لـ MediaHub
+        content_mh = (
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=Find Media Hub\n"
+            "GenericName=Media Center\n"
+            "Comment=Standalone Media Hub & Airing Tracker\n"
+            f"Exec={base_exec} --mh\n"
+            "Icon=applications-multimedia\n"
+            "Terminal=false\n"
+            "StartupNotify=true\n"
+            "Categories=AudioVideo;Player;Utility;\n"
+        )
+        desktop_file_mh.write_text(content_mh, encoding="utf-8")
 
         # Also create D-Bus service activation file so org.freedesktop.FileManager1 auto-starts Find when closed
         dbus_srv_dir = Path(xdg_data) / "dbus-1" / "services"
@@ -125,7 +144,7 @@ def install_desktop_and_set_default(main_script_path: str) -> bool:
         dbus_srv_content = (
             "[D-BUS Service]\n"
             "Name=org.freedesktop.FileManager1\n"
-            f"Exec=\"{python_bin}\" \"{script_abs}\"\n"
+            f"Exec={base_exec}\n"
         )
         dbus_srv_file.write_text(dbus_srv_content, encoding="utf-8")
 
@@ -133,7 +152,7 @@ def install_desktop_and_set_default(main_script_path: str) -> bool:
         local_bin = Path.home() / ".local" / "bin"
         local_bin.mkdir(parents=True, exist_ok=True)
         wrapper_bin = local_bin / "find-fm"
-        wrapper_bin.write_text(f"#!/usr/bin/env bash\nexec \"{python_bin}\" \"{script_abs}\" \"$@\"\n", encoding="utf-8")
+        wrapper_bin.write_text(f"#!/usr/bin/env bash\nexec {base_exec} \"$@\"\n", encoding="utf-8")
         try:
             os.chmod(wrapper_bin, 0o755)
         except OSError:
@@ -157,7 +176,7 @@ def install_desktop_and_set_default(main_script_path: str) -> bool:
             "elif [ -n \"$path\" ]; then\n"
             "    args+=(\"$path\")\n"
             "fi\n"
-            f"\"{python_bin}\" \"{script_abs}\" \"${{args[@]}}\" > \"$out\"\n"
+            f"{base_exec} \"${{args[@]}}\" > \"$out\"\n"
         )
         portal_wrapper.write_text(portal_wrapper_code, encoding="utf-8")
         try:

@@ -1,8 +1,6 @@
 {
   "modified": [
-    "core/jellyfin_bridge.py",
-    "core/backend.py",
-    "core/config.py"
+    "core/portal_service.py"
   ],
   "created": []
 }

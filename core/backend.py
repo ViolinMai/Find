@@ -2703,11 +2703,11 @@ class FileManagerBackend(QObject):
                     return
             except Exception:
                 pass
-        script = self._get_daemon_script_path()
-        if script.exists():
+        cmd_daemon = [sys.executable, "--daemon"] if getattr(sys, "frozen", False) else [sys.executable, str(self._get_daemon_script_path())]
+        if getattr(sys, "frozen", False) or self._get_daemon_script_path().exists():
             try:
                 subprocess.Popen(
-                    [sys.executable, str(script)],
+                    cmd_daemon,
                     start_new_session=True,
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL
@@ -2751,13 +2751,14 @@ class FileManagerBackend(QObject):
             except Exception:
                 pass
         script = self._get_daemon_script_path()
+        exec_line = f'"{sys.executable}" --daemon' if getattr(sys, "frozen", False) else f'"{sys.executable}" "{script}"'
         return (
             "[Unit]\n"
             "Description=Find Media Library MPV Tracker & HDR Daemon\n"
             "After=graphical-session.target\n\n"
             "[Service]\n"
             "Type=simple\n"
-            f"ExecStart={sys.executable} {script}\n"
+            f"ExecStart={exec_line}\n"
             "Restart=on-failure\n"
             "RestartSec=2\n\n"
             "[Install]\n"
@@ -3737,9 +3738,10 @@ class FileManagerBackend(QObject):
         if target_path in ("recent://", "trash://"):
             target_path = str(Path.home())
         main_script = Path(__file__).resolve().parent.parent / "main.py"
+        cmd_detach = [sys.executable, target_path] if getattr(sys, "frozen", False) else [sys.executable, str(main_script), target_path]
         try:
             subprocess.Popen(
-                [sys.executable, str(main_script), target_path],
+                cmd_detach,
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
@@ -5865,9 +5867,10 @@ class FileManagerBackend(QObject):
                 target = parent_d
 
         main_script = Path(__file__).resolve().parent.parent / "main.py"
+        cmd_open = [sys.executable, target] if getattr(sys, "frozen", False) else [sys.executable, str(main_script), target]
         try:
             subprocess.Popen(
-                [sys.executable, str(main_script), target],
+                cmd_open,
                 start_new_session=True,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL
@@ -6387,7 +6390,7 @@ class FileManagerBackend(QObject):
             return
 
         main_script = str(Path(__file__).resolve().parent.parent / "main.py")
-        cmd = [sys.executable, main_script, "--picker"]
+        cmd = [sys.executable, "--picker"] if getattr(sys, "frozen", False) else [sys.executable, main_script, "--picker"]
         if mode == "folder":
             cmd.append("--folder")
         elif mode == "multi_file":

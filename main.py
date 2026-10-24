@@ -255,6 +255,7 @@ def main():
     QQuickStyle.setStyle("Basic")
 
     parser = argparse.ArgumentParser(description="Find - Modern Linux Wayland File Manager & Picker")
+    parser.add_argument("--daemon", action="store_true", help="Run background media daemon loop")
     parser.add_argument("--mh", action="store_true", help="Launch directly in standalone MediaHub Window")
     parser.add_argument("--picker", action="store_true", help="Launch in File/Folder Picker mode")
     parser.add_argument("--folder", action="store_true", help="Select directory only")
@@ -267,6 +268,10 @@ def main():
     parser.add_argument("paths", nargs="*", help="Initial path(s) or URI(s)")
 
     args, unknown = parser.parse_known_args()
+    if getattr(args, "daemon", False):
+        from core.media_daemon import run_daemon_loop
+        run_daemon_loop()
+        sys.exit(0)
     _setup_logging()
 
     is_mediahub_launch = bool(args.mh)

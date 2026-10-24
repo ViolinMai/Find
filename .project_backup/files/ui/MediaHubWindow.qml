@@ -608,13 +608,13 @@ ApplicationWindow {
                             Layout.alignment: Qt.AlignVCenter
                             spacing: 8
 
-                            // Perfectly Rounded Pill Resume Button with Contained Progress Fill
+                            // Perfectly Rounded Pill Resume Button with Clean Progress Track Fill
                             Rectangle {
                                 id: mainResumeBtn
                                 Layout.preferredWidth: Math.round(180 * Theme.scaleFactor)
                                 Layout.preferredHeight: Math.round(38 * Theme.scaleFactor)
                                 radius: height / 2
-                                color: "#32323f"
+                                color: "#32323e"
                                 border.color: "#ffffff"
                                 border.width: 1
                                 clip: true
@@ -623,32 +623,21 @@ ApplicationWindow {
                                 readonly property bool hasResumeProgress: resData.is_resumable === true
                                 readonly property real fillRatio: Math.min(1.0, Math.max(0.0, resData.ratio || 0.0))
 
-                                // Track Container with strict inner radius
-                                Item {
+                                // Incomplete Progress Track (Clean Dark Slate)
+                                Rectangle {
                                     anchors.fill: parent
-                                    layer.enabled: true
-                                    layer.effect: Item {
-                                        Rectangle {
-                                            width: mainResumeBtn.width
-                                            height: mainResumeBtn.height
-                                            radius: mainResumeBtn.radius
-                                        }
-                                    }
+                                    radius: parent.radius
+                                    color: "#333342"
+                                }
 
-                                    // Grey Background
-                                    Rectangle {
-                                        anchors.fill: parent
-                                        color: "#353545"
-                                    }
-
-                                    // Filled Progress Portion
-                                    Rectangle {
-                                        anchors.left: parent.left
-                                        anchors.top: parent.top
-                                        anchors.bottom: parent.bottom
-                                        width: mainResumeBtn.hasResumeProgress ? (parent.width * mainResumeBtn.fillRatio) : parent.width
-                                        color: resumeBtnMouse.containsMouse ? Theme.accentHover : Theme.accent
-                                    }
+                                // Active Watched Progress Portion
+                                Rectangle {
+                                    anchors.left: parent.left
+                                    anchors.top: parent.top
+                                    anchors.bottom: parent.bottom
+                                    width: mainResumeBtn.hasResumeProgress ? (parent.width * mainResumeBtn.fillRatio) : parent.width
+                                    radius: parent.radius
+                                    color: resumeBtnMouse.containsMouse ? Theme.accentHover : Theme.accent
                                 }
 
                                 RowLayout {
@@ -757,9 +746,9 @@ ApplicationWindow {
                                 id: epThumbContainer
                                 Layout.preferredWidth: Math.round(116 * Theme.scaleFactor)
                                 Layout.preferredHeight: Math.round(66 * Theme.scaleFactor)
-                                radius: Math.round(8 * Theme.scaleFactor)
+                                radius: Math.round(12 * Theme.scaleFactor)
                                 color: "#16161c"
-                                border.color: "#28ffffff"
+                                border.color: "#30ffffff"
                                 border.width: 1
                                 clip: true
 

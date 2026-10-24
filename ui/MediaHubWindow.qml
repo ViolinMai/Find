@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Effects
 import "."
 import "components"
 
@@ -31,10 +32,25 @@ ApplicationWindow {
         }
     }
 
+    Component.onCompleted: {
+        if (backend) {
+            if (backend.currentPath !== "mediahub://") {
+                backend.navigateTo("mediahub://")
+            } else {
+                backend.refreshMediaHub()
+            }
+        }
+    }
+
     Connections {
         target: backend
         function onCurrentPathChanged() {
             mhWindow.refreshShowSummary()
+        }
+        function onMediaLibraryStateChanged() {
+            if (mhWindow.isViewingEpisodeList) {
+                mhWindow.refreshShowSummary()
+            }
         }
         function onToastMessage(msg) {
             mhWindow.activeToastText = msg
@@ -309,6 +325,15 @@ ApplicationWindow {
                                     width: cardW
                                     height: cardH
 
+                                    Component.onCompleted: {
+                                        if (!backend || !model.path || model.is_airing_card) return
+                                        if (model.is_dir) {
+                                            backend.requestFolderPreview(model.path)
+                                        } else if (!model.thumb || model.thumb === "") {
+                                            backend.requestItemThumbnail(model.path)
+                                        }
+                                    }
+
                                     Rectangle {
                                         id: cardDelegate
                                         anchors.fill: parent
@@ -333,6 +358,15 @@ ApplicationWindow {
                                                 border.width: 1
                                                 clip: true
 
+                                                Rectangle {
+                                                    id: cardArtMask
+                                                    anchors.fill: parent
+                                                    radius: mediaArtBox.radius
+                                                    visible: false
+                                                    layer.enabled: true
+                                                    layer.smooth: true
+                                                }
+
                                                 Image {
                                                     id: cardArt
                                                     anchors.fill: parent
@@ -342,6 +376,12 @@ ApplicationWindow {
                                                     asynchronous: true
                                                     smooth: true
                                                     mipmap: true
+                                                    layer.enabled: visible
+                                                    layer.smooth: true
+                                                    layer.effect: MultiEffect {
+                                                        maskEnabled: true
+                                                        maskSource: cardArtMask
+                                                    }
                                                 }
 
                                                 // Find Watched Overlay: Dimmed glass + centered elegant WATCHED frame
@@ -416,7 +456,7 @@ ApplicationWindow {
                                                     clip: true
 
                                                     Rectangle {
-                                                        width: parent.width * Math.min(1.0, Math.max(0.0, model.progress))
+                                                        width: parent.width * Math.min(1.0, Math.max(0.0, model.progress || 0.0))
                                                         height: parent.height
                                                         radius: parent.radius
                                                         color: model.is_watched ? "#10b981" : Theme.accent
@@ -443,7 +483,7 @@ ApplicationWindow {
                                                     text: model.subtitle || ""
                                                     color: model.is_airing_card ? (model.is_going_tight ? "#34d399" : "#fbbf24") : Theme.textTertiary
                                                     font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
-                                                    font.bold: model.is_airing_card
+                                                    font.bold: Boolean(model.is_airing_card)
                                                     horizontalAlignment: Text.AlignHCenter
                                                     elide: Text.ElideMiddle
                                                 }
@@ -513,6 +553,7 @@ ApplicationWindow {
 
                         // Vertical Poster Box
                         Rectangle {
+                            id: headerPosterBox
                             Layout.preferredWidth: Math.round(88 * Theme.scaleFactor)
                             Layout.preferredHeight: Math.round(126 * Theme.scaleFactor)
                             radius: Math.round(8 * Theme.scaleFactor)
@@ -521,9 +562,12 @@ ApplicationWindow {
                             border.width: 1
                             clip: true
 
+                            readonly property bool hasPoster: mhWindow.currentShowSummary && mhWindow.currentShowSummary.poster !== undefined && mhWindow.currentShowSummary.poster !== ""
+
                             Image {
+                                id: headerPosterImg
                                 anchors.fill: parent
-                                visible: mhWindow.currentShowSummary.poster !== undefined && mhWindow.currentShowSummary.poster !== ""
+                                visible: headerPosterBox.hasPoster
                                 source: visible ? ("file://" + mhWindow.currentShowSummary.poster) : ""
                                 fillMode: Image.PreserveAspectCrop
                                 asynchronous: true
@@ -532,7 +576,7 @@ ApplicationWindow {
 
                             Text {
                                 anchors.centerIn: parent
-                                visible: !parent.children[0].visible
+                                visible: !headerPosterBox.hasPoster
                                 text: "📺"
                                 font.pixelSize: Math.round(34 * Theme.scaleFactor)
                             }
@@ -546,7 +590,7 @@ ApplicationWindow {
 
                             Text {
                                 Layout.fillWidth: true
-                                text: mhWindow.currentShowSummary.title || (backend ? backend.breadcrumbs[backend.breadcrumbs.length - 1].name : "Show")
+                                text: (mhWindow.currentShowSummary && mhWindow.currentShowSummary.title) ? mhWindow.currentShowSummary.title : ((backend && backend.breadcrumbs && backend.breadcrumbs.length > 0) ? backend.breadcrumbs[backend.breadcrumbs.length - 1].name : "Show")
                                 color: Theme.textPrimary
                                 font.pixelSize: Math.round(21 * Theme.scaleFactor)
                                 font.bold: true
@@ -557,34 +601,34 @@ ApplicationWindow {
                             RowLayout {
                                 spacing: 8
                                 Text {
-                                    text: "Episodes: " + (mhWindow.currentShowSummary.episode_count || "0")
+                                    text: "Episodes: " + ((mhWindow.currentShowSummary && mhWindow.currentShowSummary.episode_count !== undefined) ? mhWindow.currentShowSummary.episode_count : "0")
                                     color: Theme.accent
                                     font.pixelSize: Theme.fontSizeSmall
                                     font.bold: true
                                 }
                                 Text { text: "•"; color: Theme.textTertiary; font.bold: true }
                                 Text {
-                                    text: "Total Time: " + (mhWindow.currentShowSummary.total_duration || "-")
+                                    text: "Total Time: " + ((mhWindow.currentShowSummary && mhWindow.currentShowSummary.total_duration) ? mhWindow.currentShowSummary.total_duration : "-")
                                     color: Theme.textSecondary
                                     font.pixelSize: Theme.fontSizeSmall
                                     font.bold: true
                                 }
                                 Text { text: "•"; color: Theme.textTertiary; font.bold: true }
                                 Text {
-                                    text: "Total Size: " + (mhWindow.currentShowSummary.total_size || "0 B")
+                                    text: "Total Size: " + ((mhWindow.currentShowSummary && mhWindow.currentShowSummary.total_size) ? mhWindow.currentShowSummary.total_size : "0 B")
                                     color: Theme.textSecondary
                                     font.pixelSize: Theme.fontSizeSmall
                                     font.bold: true
                                 }
                                 Text {
-                                    visible: mhWindow.currentShowSummary.rating !== ""
+                                    visible: Boolean(mhWindow.currentShowSummary && mhWindow.currentShowSummary.rating)
                                     text: "•"
                                     color: Theme.textTertiary
                                     font.bold: true
                                 }
                                 Text {
-                                    visible: mhWindow.currentShowSummary.rating !== ""
-                                    text: "⭐ " + mhWindow.currentShowSummary.rating
+                                    visible: Boolean(mhWindow.currentShowSummary && mhWindow.currentShowSummary.rating)
+                                    text: "⭐ " + ((mhWindow.currentShowSummary && mhWindow.currentShowSummary.rating) ? mhWindow.currentShowSummary.rating : "")
                                     color: "#fbbf24"
                                     font.pixelSize: Theme.fontSizeSmall
                                     font.bold: true
@@ -594,7 +638,7 @@ ApplicationWindow {
                             Text {
                                 Layout.fillWidth: true
                                 Layout.fillHeight: true
-                                text: mhWindow.currentShowSummary.overview || "Local series folder with automatic episode tracking and audio/subtitle matching."
+                                text: (mhWindow.currentShowSummary && mhWindow.currentShowSummary.overview) ? mhWindow.currentShowSummary.overview : "Local series folder with automatic episode tracking and audio/subtitle matching."
                                 color: Theme.textSecondary
                                 font.pixelSize: Theme.fontSizeSmall
                                 wrapMode: Text.WordWrap
@@ -619,7 +663,7 @@ ApplicationWindow {
                                 border.width: 1
                                 clip: true
 
-                                readonly property var resData: mhWindow.currentShowSummary.resume || ({})
+                                readonly property var resData: (mhWindow.currentShowSummary && mhWindow.currentShowSummary.resume) ? mhWindow.currentShowSummary.resume : ({})
                                 readonly property bool hasResumeProgress: resData.is_resumable === true
                                 readonly property real fillRatio: Math.min(1.0, Math.max(0.0, resData.ratio || 0.0))
 
@@ -656,7 +700,7 @@ ApplicationWindow {
                                         text: {
                                             var d = mainResumeBtn.resData
                                             if (mainResumeBtn.hasResumeProgress) {
-                                                return "Resume EP " + d.ep_num + (d.time_str ? " (" + d.time_str + ")" : "")
+                                                return "Resume EP " + (d.ep_num || "1") + (d.time_str ? " (" + d.time_str + ")" : "")
                                             }
                                             return "Play Show"
                                         }
@@ -717,7 +761,7 @@ ApplicationWindow {
                     id: episodesList
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    anchors.margins: Math.round(16 * Theme.scaleFactor)
+                    Layout.margins: Math.round(16 * Theme.scaleFactor)
                     clip: true
                     spacing: 8
                     model: visible && backend ? backend.files : null
@@ -733,7 +777,16 @@ ApplicationWindow {
                         border.color: epMouse.containsMouse ? Theme.accent : "#22ffffff"
                         border.width: 1
 
-                        readonly property var epDetail: backend ? backend.getEpisodeDetailedInfo(model.path) : ({})
+                        readonly property var epDetail: (backend && model.path) ? backend.getEpisodeDetailedInfo(model.path) : ({})
+
+                        Component.onCompleted: {
+                            if (!backend || !model.path) return
+                            if (model.is_dir) {
+                                backend.requestFolderPreview(model.path)
+                            } else if (!model.thumb || model.thumb === "") {
+                                backend.requestItemThumbnail(model.path)
+                            }
+                        }
 
                         RowLayout {
                             anchors.fill: parent
@@ -741,7 +794,7 @@ ApplicationWindow {
                             anchors.rightMargin: 14
                             spacing: 14
 
-                            // Episode Thumbnail with smooth Rounded Corners and Clip
+                            // Episode Thumbnail with smooth Rounded Corners Mask
                             Rectangle {
                                 id: epThumbContainer
                                 Layout.preferredWidth: Math.round(116 * Theme.scaleFactor)
@@ -752,28 +805,44 @@ ApplicationWindow {
                                 border.width: 1
                                 clip: true
 
+                                Rectangle {
+                                    id: epThumbMask
+                                    anchors.fill: parent
+                                    radius: epThumbContainer.radius
+                                    visible: false
+                                    layer.enabled: true
+                                    layer.smooth: true
+                                }
+
                                 Image {
                                     id: epImg
                                     anchors.fill: parent
-                                    visible: model.thumb !== ""
-                                    source: model.thumb !== "" ? ("file://" + model.thumb) : ""
+                                    visible: model.thumb !== undefined && model.thumb !== ""
+                                    source: visible ? ("file://" + model.thumb) : ""
                                     fillMode: Image.PreserveAspectCrop
                                     asynchronous: true
                                     smooth: true
                                     mipmap: true
+                                    layer.enabled: visible
+                                    layer.smooth: true
+                                    layer.effect: MultiEffect {
+                                        maskEnabled: true
+                                        maskSource: epThumbMask
+                                    }
                                 }
 
                                 // Watched Dim Overlay on Episode Thumbnail
                                 Rectangle {
                                     visible: model.is_watched === true || (model.progress !== undefined && model.progress >= 0.90)
                                     anchors.fill: parent
+                                    radius: epThumbContainer.radius
                                     color: "#66000000"
                                 }
 
                                 Text {
                                     anchors.centerIn: parent
-                                    visible: model.thumb === ""
-                                    text: "🎬"
+                                    visible: !epImg.visible
+                                    text: model.is_dir ? "📁" : "🎬"
                                     font.pixelSize: Theme.fontSizeLarge
                                 }
                             }
@@ -809,7 +878,7 @@ ApplicationWindow {
 
                                     Text {
                                         Layout.fillWidth: true
-                                        text: (model.episode_title && model.episode_title !== "") ? model.episode_title : model.name
+                                        text: (model.episode_title && model.episode_title !== "") ? model.episode_title : (model.name || "")
                                         color: model.is_watched ? Theme.textSecondary : Theme.textPrimary
                                         font.bold: true
                                         font.pixelSize: Theme.fontSizeNormal
@@ -822,21 +891,21 @@ ApplicationWindow {
                                     spacing: 8
 
                                     Text {
-                                        visible: epRowBox.epDetail.duration_str !== ""
-                                        text: "⏱ " + epRowBox.epDetail.duration_str
+                                        visible: Boolean(epRowBox.epDetail && epRowBox.epDetail.duration_str)
+                                        text: "⏱ " + ((epRowBox.epDetail && epRowBox.epDetail.duration_str) ? epRowBox.epDetail.duration_str : "")
                                         color: Theme.textSecondary
                                         font.pixelSize: Math.round(9.5 * Theme.scaleFactor)
                                         font.bold: true
                                     }
 
                                     Text {
-                                        visible: epRowBox.epDetail.duration_str !== ""
+                                        visible: Boolean(epRowBox.epDetail && epRowBox.epDetail.duration_str)
                                         text: "•"
                                         color: Theme.textTertiary
                                     }
 
                                     Text {
-                                        text: "💾 " + (epRowBox.epDetail.size_str || model.size || "")
+                                        text: "💾 " + ((epRowBox.epDetail && epRowBox.epDetail.size_str) ? epRowBox.epDetail.size_str : (model.size || ""))
                                         color: Theme.textSecondary
                                         font.pixelSize: Math.round(9.5 * Theme.scaleFactor)
                                         font.bold: true
@@ -844,7 +913,7 @@ ApplicationWindow {
 
                                     // Display 'ar' Tag ONLY when Arabic subtitles are verified in metadata
                                     Rectangle {
-                                        visible: epRowBox.epDetail.has_arabic_sub === true
+                                        visible: epRowBox.epDetail && epRowBox.epDetail.has_arabic_sub === true
                                         implicitWidth: arBadgeTxt.implicitWidth + 8
                                         implicitHeight: Math.round(18 * Theme.scaleFactor)
                                         radius: Theme.radiusSmall
@@ -870,10 +939,10 @@ ApplicationWindow {
                                     radius: height / 2
                                     color: "#22ffffff"
                                     clip: true
-                                    visible: model.progress > 0.005 || model.is_watched
+                                    visible: (model.progress !== undefined && model.progress > 0.005) || model.is_watched === true
 
                                     Rectangle {
-                                        width: parent.width * Math.min(1.0, Math.max(0.0, model.progress))
+                                        width: parent.width * Math.min(1.0, Math.max(0.0, model.progress || 0.0))
                                         height: parent.height
                                         radius: parent.radius
                                         color: model.is_watched ? "#10b981" : Theme.accent
@@ -884,9 +953,9 @@ ApplicationWindow {
                             // Watched Checkmark Badge
                             Rectangle {
                                 visible: model.is_watched === true
-                                width: Math.round(22 * Theme.scaleFactor)
-                                height: Math.round(22 * Theme.scaleFactor)
-                                radius: width / 2
+                                Layout.preferredWidth: Math.round(22 * Theme.scaleFactor)
+                                Layout.preferredHeight: Math.round(22 * Theme.scaleFactor)
+                                radius: Layout.preferredWidth / 2
                                 color: "#10b981"
 
                                 Text {
@@ -907,8 +976,8 @@ ApplicationWindow {
                             cursorShape: Qt.PointingHandCursor
                             onClicked: function(mouse) {
                                 if (mouse.button === Qt.RightButton) {
-                                    mhContext.targetPath = model.path
-                                    mhContext.targetName = model.name
+                                    mhContext.targetPath = model.path || ""
+                                    mhContext.targetName = model.name || ""
                                     mhContext.isDir = Boolean(model.is_dir)
                                     mhContext.isAiringItem = false
                                     mhContext.popupSafe(epRowBox, mouse.x, mouse.y)

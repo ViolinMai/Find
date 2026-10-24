@@ -1932,9 +1932,10 @@ class FileManagerBackend(QObject):
     windowActivationRequested = Signal()
     notificationSettingsChanged = Signal()
 
-    def __init__(self, parent=None, is_picker_mode: bool = False):
+    def __init__(self, parent=None, is_picker_mode: bool = False, is_mediahub_mode: bool = False):
         super().__init__(parent)
         self._launched_as_picker = bool(is_picker_mode)
+        self._launched_as_mediahub = bool(is_mediahub_mode)
         self.config_mgr = ConfigManager()
         self.jf_bridge = JellyfinBridge(self.config_mgr)
         self.airing_tracker = AiringTracker(self.config_mgr)
@@ -1972,7 +1973,18 @@ class FileManagerBackend(QObject):
                         "history_idx": 0
                     })
 
-        if valid_restored_tabs:
+        if self._launched_as_mediahub:
+            self._current_path = "mediahub://"
+            self._history = ["mediahub://"]
+            self._history_idx = 0
+            self._tabs = [{
+                "path": "mediahub://",
+                "title": "Media Hub",
+                "history": ["mediahub://"],
+                "history_idx": 0
+            }]
+            self._active_tab_index = 0
+        elif valid_restored_tabs:
             self._tabs = valid_restored_tabs
             act_idx = int(saved_session.get("active_index", 0) or 0)
             self._active_tab_index = max(0, min(len(self._tabs) - 1, act_idx))
@@ -3277,6 +3289,7 @@ class FileManagerBackend(QObject):
             self.media_hub_model.update_jellyfin_in_place(fpath, meta)
         if str(self._current_path) != folder_path:
             return
+        self.mediaLibraryStateChanged.emit()
         for fpath, meta in meta_map.items():
             self.file_model.update_jellyfin_metadata(
                 fpath,
@@ -3597,7 +3610,7 @@ class FileManagerBackend(QObject):
         return name if name else path_str
 
     def _save_session_state(self):
-        if getattr(self, "_launched_as_picker", False):
+        if getattr(self, "_launched_as_picker", False) or getattr(self, "_launched_as_mediahub", False):
             return
         serialized_tabs = []
         for t in self._tabs:

@@ -51,7 +51,9 @@ def _try_send_to_existing_instance(paths: list, select_mode: bool) -> bool:
     }).encode("utf-8") + b"\n"
     sock.write(payload)
     sock.flush()
-    if not sock.waitForBytesWritten(300):
+    if sock.state() == QLocalSocket.LocalSocketState.ConnectedState:
+        sock.waitForBytesWritten(300)
+    if sock.state() != QLocalSocket.LocalSocketState.ConnectedState:
         sock.abort()
         return False
     # Wait for explicit ACK from the active window so a hung/closing background instance never blocks launching a new window!
@@ -282,10 +284,10 @@ def main():
             sys.exit(0)
 
     engine = QQmlApplicationEngine()
-    backend = FileManagerBackend(app, is_picker_mode=is_picker_launch)
+    backend = FileManagerBackend(app, is_picker_mode=is_picker_launch, is_mediahub_mode=is_mediahub_launch)
 
     ipc_server = None
-    if not is_picker_launch:
+    if not is_picker_launch and not is_mediahub_launch:
         srv_name = _get_ipc_server_name()
         QLocalServer.removeServer(srv_name)
         ipc_server = QLocalServer(app)
@@ -302,9 +304,11 @@ def main():
                                     p_list = msg.get("paths") or []
                                     act = msg.get("action", "open")
                                     backend.handleExternalIpcRequest(p_list, act == "select")
-                                c.write(b"OK\n")
-                                c.flush()
-                                c.waitForBytesWritten(100)
+                                if c.state() == QLocalSocket.LocalSocketState.ConnectedState:
+                                    c.write(b"OK\n")
+                                    c.flush()
+                                    if c.state() == QLocalSocket.LocalSocketState.ConnectedState:
+                                        c.waitForBytesWritten(100)
                             except Exception:
                                 pass
                             finally:
@@ -360,7 +364,7 @@ def main():
                 backend.navigateTo(parent_d)
                 backend.selectMultiplePaths(cleaned_paths)
 
-    app.setQuitOnLastWindowClosed(False)
+    app.setQuitOnLastWindowClosed(is_mediahub_launch or is_picker_launch)
     wheel_filter = FastWheelInterceptor(backend, app)
     app.installEventFilter(wheel_filter)
 
@@ -369,9 +373,9 @@ def main():
     qml_dir = Path(__file__).resolve().parent / "ui"
     engine.addImportPath(str(qml_dir))
     target_qml = qml_dir / ("MediaHubWindow.qml" if is_mediahub_launch else "main.qml")
+    engine.load(QUrl.fromLocalFile(str(target_qml)))
     if is_mediahub_launch:
         backend.navigateTo("mediahub://")
-    engine.load(QUrl.fromLocalFile(str(target_qml)))
 
     if not engine.rootObjects():
         sys.exit(-1)

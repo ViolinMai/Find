@@ -3397,8 +3397,6 @@ class FileManagerBackend(QObject):
                 ln = "input-default-bindings=yes"
             elif ln in ("input-vo-keyboard=no", "input_vo_keyboard=no"):
                 ln = "input-vo-keyboard=yes"
-            elif ln == "osc=no":
-                ln = "osc=yes"
 
             if "=" in ln and not ln.startswith("["):
                 k = _normalize_key(ln.split("=", 1)[0])

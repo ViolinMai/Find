@@ -1,8 +1,8 @@
 {
   "modified": [
-    "main.py",
+    "core/jellyfin_bridge.py",
     "core/backend.py",
-    "ui/MediaHubWindow.qml"
+    "core/config.py"
   ],
   "created": []
 }

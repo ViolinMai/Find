@@ -915,12 +915,39 @@ class JellyfinBridge:
         m3u_lines = ["#EXTM3U"]
         use_http_stream = bool(self.is_enabled and self.stream_via_server and self._server_online)
 
-        # IMPORTANT: Do NOT write #EXTINF titles into the M3U8 playlist!
-        # In MPV, #EXTINF overrides `media-title` with the Jellyfin episode title, which breaks
-        # MPV's `sub-auto=fuzzy` external subtitle matching against the local video filename!
         for lp in ordered_local_files:
             c_meta = self._path_map.get(lp, {})
             iid = c_meta.get("item_id", "")
+
+            # Build formatted title "Series Name • EP X • Episode Title" for iOSD Top/Bottom Bar & Drawer
+            p_obj = Path(lp)
+            parent_meta = self._path_map.get(str(p_obj.parent), {})
+            if not parent_meta and self.is_season_folder_name(p_obj.parent.name):
+                parent_meta = self._path_map.get(str(p_obj.parent.parent), {})
+
+            series_name = str(c_meta.get("series_name") or parent_meta.get("title") or "").strip()
+            if not series_name and c_meta.get("item_type") != "Movie":
+                series_name = p_obj.parent.parent.name if self.is_season_folder_name(p_obj.parent.name) else p_obj.parent.name
+
+            ep_num = c_meta.get("index_number")
+            if ep_num is None:
+                m_ep = re.search(r'(?:[Ss]\d{1,2}[Ee]|-\s*|\b[Ee][Pp]?\s*|\[)(\d{1,4})(?:\b|\]|v\d)', p_obj.stem)
+                if m_ep:
+                    ep_num = int(m_ep.group(1))
+
+            ep_title = str(c_meta.get("title") or "").strip()
+            parts = []
+            if series_name and c_meta.get("item_type") != "Movie":
+                parts.append(series_name)
+            if ep_num is not None and c_meta.get("item_type") != "Movie":
+                parts.append(f"EP {ep_num}")
+            if ep_title and ep_title.lower() != series_name.lower():
+                parts.append(ep_title)
+
+            if parts:
+                clean_extinf = " • ".join(parts).replace("\n", " ").replace("\r", " ")
+                m3u_lines.append(f"#EXTINF:-1,{clean_extinf}")
+
             if use_http_stream and iid:
                 ms_id = c_meta.get("media_source_id", iid)
                 s_url = (

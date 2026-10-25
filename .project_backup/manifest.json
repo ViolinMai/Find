@@ -1,6 +1,6 @@
 {
   "modified": [
-    "core/portal_service.py"
+    "core/models.py"
   ],
   "created": []
 }

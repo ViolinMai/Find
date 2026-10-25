@@ -268,8 +268,10 @@ ApplicationWindow {
                             required property string subtitle
                             required property int item_count
                             required property var cards_model
+                            required property bool has_movie_poster
 
                             readonly property bool isWideCardRow: secRowLayout.section_id === "continue_watching" || secRowLayout.section_id === "next_up"
+                            readonly property bool expandRowForMoviePoster: secRowLayout.section_id === "continue_watching" && secRowLayout.has_movie_poster
 
                             RowLayout {
                                 Layout.fillWidth: true
@@ -310,7 +312,7 @@ ApplicationWindow {
                             ListView {
                                 id: cardsHView
                                 Layout.fillWidth: true
-                                height: Math.round((secRowLayout.isWideCardRow ? 186 : 252) * Theme.scaleFactor)
+                                height: Math.round(((secRowLayout.isWideCardRow && !secRowLayout.expandRowForMoviePoster) ? 186 : 252) * Theme.scaleFactor)
                                 orientation: ListView.Horizontal
                                 spacing: Math.round(18 * Theme.scaleFactor)
                                 clip: true
@@ -319,11 +321,13 @@ ApplicationWindow {
 
                                 delegate: Item {
                                     id: cardItemContainer
-                                    readonly property bool isWideCard: secRowLayout.isWideCardRow
+                                    readonly property bool isMovieCardInWideRow: secRowLayout.section_id === "continue_watching" && Boolean(model.is_movie_item)
+                                    readonly property bool isWideCard: secRowLayout.isWideCardRow && !isMovieCardInWideRow
                                     readonly property int cardW: Math.round((isWideCard ? 240 : 156) * Theme.scaleFactor)
                                     readonly property int cardH: Math.round((isWideCard ? 184 : 250) * Theme.scaleFactor)
                                     width: cardW
                                     height: cardH
+                                    anchors.verticalCenter: parent ? parent.verticalCenter : undefined
 
                                     Component.onCompleted: {
                                         if (!backend || !model.path || model.is_airing_card) return
@@ -338,14 +342,43 @@ ApplicationWindow {
                                         id: cardDelegate
                                         anchors.fill: parent
                                         radius: Theme.radiusLarge
-                                        color: cardArea.containsMouse ? "#18ffffff" : "transparent"
-                                        border.color: cardArea.containsMouse ? Theme.accent : "transparent"
+                                        color: (cardArea.containsMouse || showLinkArea.containsMouse) ? "#18ffffff" : "transparent"
+                                        border.color: (cardArea.containsMouse || showLinkArea.containsMouse) ? Theme.accent : "transparent"
                                         border.width: 1
+
+                                        MouseArea {
+                                            id: cardArea
+                                            anchors.fill: parent
+                                            z: 0
+                                            hoverEnabled: true
+                                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: function(mouse) {
+                                                if (mouse.button === Qt.RightButton) {
+                                                    mhContext.targetPath = model.path || ""
+                                                    mhContext.targetName = model.name || ""
+                                                    mhContext.showPath = model.show_path || ""
+                                                    mhContext.isDir = Boolean(model.is_dir)
+                                                    mhContext.isAiringItem = Boolean(model.is_airing_card)
+                                                    mhContext.airingId = model.airing_id || ""
+                                                    mhContext.airingLinkedPath = model.linked_path || ""
+                                                    mhContext.popupSafe(cardDelegate, mouse.x, mouse.y)
+                                                } else {
+                                                    if (model.is_dir) {
+                                                        backend.setViewMode("details")
+                                                        backend.navigateTo(model.path)
+                                                    } else {
+                                                        backend.openEntry(model.path)
+                                                    }
+                                                }
+                                            }
+                                        }
 
                                         ColumnLayout {
                                             anchors.fill: parent
                                             anchors.margins: 4
                                             spacing: 6
+                                            z: 10
 
                                             // Media Thumbnail Box
                                             Rectangle {
@@ -420,7 +453,7 @@ ApplicationWindow {
                                                     font.pixelSize: Math.round(36 * Theme.scaleFactor)
                                                 }
 
-                                                // Top Badge
+                                                // Top-Left Badge
                                                 Rectangle {
                                                     visible: model.badge !== undefined && model.badge !== ""
                                                     anchors.left: parent.left
@@ -440,6 +473,53 @@ ApplicationWindow {
                                                         color: Theme.accent
                                                         font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
                                                         font.bold: true
+                                                    }
+                                                }
+
+                                                // Top-Right NEW & HDR Badges Row
+                                                RowLayout {
+                                                    anchors.right: parent.right
+                                                    anchors.top: parent.top
+                                                    anchors.margins: 6
+                                                    spacing: 4
+                                                    z: 12
+
+                                                    Rectangle {
+                                                        visible: model.is_new === true && !model.is_watched && !model.is_airing_card
+                                                        implicitWidth: cardNewTxt.implicitWidth + 8
+                                                        implicitHeight: Math.round(16 * Theme.scaleFactor)
+                                                        radius: Theme.radiusSmall
+                                                        color: "#d9451a03"
+                                                        border.color: "#f59e0b"
+                                                        border.width: 1
+
+                                                        Text {
+                                                            id: cardNewTxt
+                                                            anchors.centerIn: parent
+                                                            text: "NEW"
+                                                            color: "#fbbf24"
+                                                            font.pixelSize: Math.round(7.5 * Theme.scaleFactor)
+                                                            font.bold: true
+                                                        }
+                                                    }
+
+                                                    Rectangle {
+                                                        visible: model.is_hdr === true
+                                                        implicitWidth: cardHdrTxt.implicitWidth + 8
+                                                        implicitHeight: Math.round(16 * Theme.scaleFactor)
+                                                        radius: Math.round(3 * Theme.scaleFactor)
+                                                        color: "#d91e293b"
+                                                        border.color: "#e2e8f0"
+                                                        border.width: 1
+
+                                                        Text {
+                                                            id: cardHdrTxt
+                                                            anchors.centerIn: parent
+                                                            text: "HDR"
+                                                            color: "#f8fafc"
+                                                            font.pixelSize: Math.round(7.5 * Theme.scaleFactor)
+                                                            font.bold: true
+                                                        }
                                                     }
                                                 }
 
@@ -464,7 +544,7 @@ ApplicationWindow {
                                                 }
                                             }
 
-                                            // Text Info Container (Exactly matches thumbnail width)
+                                            // Text Info Container (Headline = Episode Name, Subtitle = Clickable Show Link)
                                             ColumnLayout {
                                                 Layout.fillWidth: true
                                                 spacing: 2
@@ -478,39 +558,44 @@ ApplicationWindow {
                                                     horizontalAlignment: Text.AlignHCenter
                                                     elide: Text.ElideRight
                                                 }
-                                                Text {
-                                                    Layout.fillWidth: true
-                                                    text: model.subtitle || ""
-                                                    color: model.is_airing_card ? (model.is_going_tight ? "#34d399" : "#fbbf24") : Theme.textTertiary
-                                                    font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
-                                                    font.bold: Boolean(model.is_airing_card)
-                                                    horizontalAlignment: Text.AlignHCenter
-                                                    elide: Text.ElideMiddle
-                                                }
-                                            }
-                                        }
 
-                                        MouseArea {
-                                            id: cardArea
-                                            anchors.fill: parent
-                                            hoverEnabled: true
-                                            acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                            cursorShape: Qt.PointingHandCursor
-                                            onClicked: function(mouse) {
-                                                if (mouse.button === Qt.RightButton) {
-                                                    mhContext.targetPath = model.path || ""
-                                                    mhContext.targetName = model.name || ""
-                                                    mhContext.isDir = Boolean(model.is_dir)
-                                                    mhContext.isAiringItem = Boolean(model.is_airing_card)
-                                                    mhContext.airingId = model.airing_id || ""
-                                                    mhContext.airingLinkedPath = model.linked_path || ""
-                                                    mhContext.popupSafe(cardDelegate, mouse.x, mouse.y)
-                                                } else {
-                                                    if (model.is_dir) {
-                                                        backend.setViewMode("details")
-                                                        backend.navigateTo(model.path)
-                                                    } else {
-                                                        backend.openEntry(model.path)
+                                                Rectangle {
+                                                    Layout.fillWidth: true
+                                                    implicitHeight: showLinkText.implicitHeight + Math.round(4 * Theme.scaleFactor)
+                                                    radius: Theme.radiusSmall
+                                                    readonly property bool hasShowLink: !model.is_airing_card && model.show_path !== undefined && model.show_path !== ""
+                                                    color: (showLinkArea.containsMouse && hasShowLink) ? "#280078d4" : "transparent"
+
+                                                    Text {
+                                                        id: showLinkText
+                                                        anchors.left: parent.left
+                                                        anchors.right: parent.right
+                                                        anchors.verticalCenter: parent.verticalCenter
+                                                        text: model.subtitle || ""
+                                                        color: model.is_airing_card
+                                                               ? (model.is_going_tight ? "#34d399" : "#fbbf24")
+                                                               : (showLinkArea.containsMouse && parent.hasShowLink ? Theme.accent : Theme.textSecondary)
+                                                        font.pixelSize: Math.round(9 * Theme.scaleFactor)
+                                                        font.bold: Boolean(model.is_airing_card) || parent.hasShowLink
+                                                        font.underline: showLinkArea.containsMouse && parent.hasShowLink
+                                                        horizontalAlignment: Text.AlignHCenter
+                                                        elide: Text.ElideMiddle
+                                                    }
+
+                                                    MouseArea {
+                                                        id: showLinkArea
+                                                        anchors.fill: parent
+                                                        enabled: parent.hasShowLink
+                                                        hoverEnabled: parent.hasShowLink
+                                                        acceptedButtons: Qt.LeftButton
+                                                        cursorShape: parent.hasShowLink ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                                        onClicked: function(mouse) {
+                                                            mouse.accepted = true
+                                                            if (backend && model.show_path) {
+                                                                backend.setViewMode("details")
+                                                                backend.navigateTo(model.show_path)
+                                                            }
+                                                        }
                                                     }
                                                 }
                                             }
@@ -884,6 +969,50 @@ ApplicationWindow {
                                         font.pixelSize: Theme.fontSizeNormal
                                         elide: Text.ElideRight
                                     }
+
+                                    // NEW Badge inside Show Episode List
+                                    Rectangle {
+                                        visible: model.is_new === true && !model.is_watched
+                                        implicitWidth: epNewLbl.implicitWidth + 10
+                                        implicitHeight: Math.round(17 * Theme.scaleFactor)
+                                        radius: Theme.radiusSmall
+                                        color: "#22f59e0b"
+                                        border.color: "#f59e0b"
+                                        border.width: 1
+
+                                        Text {
+                                            id: epNewLbl
+                                            anchors.centerIn: parent
+                                            text: "NEW"
+                                            color: "#fbbf24"
+                                            font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
+                                            font.bold: true
+                                        }
+                                    }
+
+                                    // HDR Badge inside Show Episode List
+                                    Rectangle {
+                                        visible: model.is_hdr === true
+                                        implicitWidth: epHdrLbl.implicitWidth + Math.round(10 * Theme.scaleFactor)
+                                        implicitHeight: Math.round(16 * Theme.scaleFactor)
+                                        radius: Math.round(3 * Theme.scaleFactor)
+                                        gradient: Gradient {
+                                            GradientStop { position: 0.0; color: "#28e2e8f0" }
+                                            GradientStop { position: 1.0; color: "#1294a3b8" }
+                                        }
+                                        border.color: "#e2e8f0"
+                                        border.width: 1
+
+                                        Text {
+                                            id: epHdrLbl
+                                            anchors.centerIn: parent
+                                            text: "HDR"
+                                            color: "#f1f5f9"
+                                            font.pixelSize: Math.round(8 * Theme.scaleFactor)
+                                            font.bold: true
+                                            font.letterSpacing: 0.8
+                                        }
+                                    }
                                 }
 
                                 RowLayout {
@@ -978,6 +1107,7 @@ ApplicationWindow {
                                 if (mouse.button === Qt.RightButton) {
                                     mhContext.targetPath = model.path || ""
                                     mhContext.targetName = model.name || ""
+                                    mhContext.showPath = ""
                                     mhContext.isDir = Boolean(model.is_dir)
                                     mhContext.isAiringItem = false
                                     mhContext.popupSafe(epRowBox, mouse.x, mouse.y)
@@ -1018,5 +1148,212 @@ ApplicationWindow {
 
     MediaHubContextMenu {
         id: mhContext
+        onRequestAiringLinkModal: function(aid, aTitle) {
+            mhAiringLinkDialog.openForAiring(aid, aTitle)
+        }
+    }
+
+    Dialog {
+        id: mhAiringLinkDialog
+        title: "Link Airing Anime with Media Hub Work"
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: Math.min(Math.round(520 * Theme.scaleFactor), mhWindow.width - 24)
+        height: Math.min(Math.round(440 * Theme.scaleFactor), mhWindow.height - 24)
+
+        property string targetAiringId: ""
+        property string targetAiringTitle: ""
+        property var candidatesList: []
+        property bool browsingCustomLink: false
+
+        function openForAiring(aid, title) {
+            targetAiringId = aid
+            targetAiringTitle = title
+            mhLinkFilterField.text = ""
+            candidatesList = backend ? backend.getMediaHubLinkCandidates() : []
+            mhAiringLinkDialog.open()
+            mhLinkFilterField.forceActiveFocus()
+        }
+
+        Connections {
+            target: backend
+            function onPickerCompleted(paths) {
+                if (paths.length > 0 && mhAiringLinkDialog.browsingCustomLink) {
+                    mhAiringLinkDialog.browsingCustomLink = false
+                    backend.linkAiringToMediaFolder(mhAiringLinkDialog.targetAiringId, paths[0])
+                    mhAiringLinkDialog.close()
+                }
+            }
+        }
+
+        background: Rectangle {
+            color: Theme.bgSurface
+            border.color: Theme.accent
+            border.width: 1
+            radius: Theme.radiusLarge
+        }
+
+        header: Rectangle {
+            height: Math.round(44 * Theme.scaleFactor)
+            color: Theme.bgCard
+            radius: Theme.radiusLarge
+            RowLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 16
+                anchors.rightMargin: 16
+                Text {
+                    Layout.fillWidth: true
+                    text: "🔗 Link '" + mhAiringLinkDialog.targetAiringTitle + "' with Local Work"
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSizeMedium
+                    font.bold: true
+                    elide: Text.ElideRight
+                }
+            }
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 10
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                TextField {
+                    id: mhLinkFilterField
+                    Layout.fillWidth: true
+                    placeholderText: "🔍 Search your Media Hub works..."
+                    color: Theme.textPrimary
+                    font.pixelSize: Theme.fontSizeNormal
+                    selectByMouse: true
+                    background: Rectangle {
+                        implicitHeight: Math.round(32 * Theme.scaleFactor)
+                        color: Theme.bgCard
+                        radius: Theme.radiusSmall
+                        border.color: mhLinkFilterField.activeFocus ? Theme.accent : Theme.borderDim
+                    }
+                }
+                Button {
+                    text: "📂 Browse Folder..."
+                    onClicked: {
+                        mhAiringLinkDialog.browsingCustomLink = true
+                        if (backend) backend.openInternalPicker("folder", "", "Select Local Anime Folder to Link")
+                    }
+                    contentItem: Text {
+                        text: parent.text
+                        color: Theme.textPrimary
+                        font.bold: true
+                        font.pixelSize: Theme.fontSizeSmall
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: Math.round(130 * Theme.scaleFactor)
+                        implicitHeight: Math.round(32 * Theme.scaleFactor)
+                        color: parent.hovered ? Theme.bgHover : Theme.bgCard
+                        border.color: Theme.borderDim
+                        radius: Theme.radiusSmall
+                    }
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                color: Theme.bgBase
+                radius: Theme.radiusMedium
+                border.color: Theme.borderDim
+                clip: true
+
+                ListView {
+                    anchors.fill: parent
+                    anchors.margins: 6
+                    spacing: 4
+                    clip: true
+                    model: {
+                        var q = mhLinkFilterField.text.trim().toLowerCase()
+                        var all = mhAiringLinkDialog.candidatesList || []
+                        if (q === "") return all
+                        var filtered = []
+                        for (var i = 0; i < all.length; i++) {
+                            if (all[i].name.toLowerCase().indexOf(q) !== -1 || all[i].path.toLowerCase().indexOf(q) !== -1) {
+                                filtered.push(all[i])
+                            }
+                        }
+                        return filtered
+                    }
+
+                    delegate: Rectangle {
+                        width: ListView.view.width
+                        height: Math.round(40 * Theme.scaleFactor)
+                        radius: Theme.radiusSmall
+                        color: mhCandMouse.containsMouse ? Theme.bgHover : Theme.bgCard
+                        border.color: mhCandMouse.containsMouse ? Theme.accent : Theme.borderDim
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 12
+                            spacing: 10
+                            Text { text: "📺"; font.pixelSize: Theme.fontSizeMedium }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 1
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.name
+                                    color: Theme.textPrimary
+                                    font.bold: true
+                                    font.pixelSize: Theme.fontSizeNormal
+                                    elide: Text.ElideRight
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.path
+                                    color: Theme.textTertiary
+                                    font.family: "monospace"
+                                    font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
+                                    elide: Text.ElideMiddle
+                                }
+                            }
+                        }
+
+                        MouseArea {
+                            id: mhCandMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (backend) {
+                                    backend.linkAiringToMediaFolder(mhAiringLinkDialog.targetAiringId, modelData.path)
+                                }
+                                mhAiringLinkDialog.close()
+                            }
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Item { Layout.fillWidth: true }
+                Button {
+                    text: "Cancel"
+                    onClicked: mhAiringLinkDialog.close()
+                    contentItem: Text {
+                        text: parent.text
+                        color: Theme.textSecondary
+                        font.pixelSize: Theme.fontSizeNormal
+                        horizontalAlignment: Text.AlignHCenter
+                    }
+                    background: Rectangle {
+                        implicitWidth: Math.round(85 * Theme.scaleFactor)
+                        implicitHeight: Math.round(32 * Theme.scaleFactor)
+                        color: parent.hovered ? Theme.bgHover : "transparent"
+                        border.color: Theme.borderDim
+                        radius: Theme.radiusSmall
+                    }
+                }
+            }
+        }
     }
 }

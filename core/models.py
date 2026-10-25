@@ -1,4 +1,5 @@
 from PySide6.QtCore import Qt, QAbstractListModel, QModelIndex, QObject
+import os
 
 
 class FileListModel(QAbstractListModel):
@@ -163,28 +164,26 @@ class FileListModel(QAbstractListModel):
         return changed
 
     def set_entries(self, entries: list, context_key: str = None, force_reset: bool = False):
-        """
-        Smart Damage-Tracking In-Place Updater:
-        - Only performs a full model reset when switching to a completely different directory (context_key changes)
-          or when clearing/initializing from empty.
-        - When refreshing the SAME directory (file added, deleted, renamed, or sorted), performs exact
-          row removals, row moves, row insertions, and granular role-level dataChanged emissions so scroll position
-          and QML Image delegates are 100% preserved without any flashing!
-        """
         if context_key is not None and context_key != self._current_context_key:
             self._current_context_key = context_key
             force_reset = True
 
-        if force_reset or not self._entries or not entries:
+        if force_reset or not self._entries:
             self.beginResetModel()
             self._entries = list(entries)
             self._rebuild_index_map()
             self.endResetModel()
             return
 
+        if not entries:
+            self.beginRemoveRows(QModelIndex(), 0, len(self._entries) - 1)
+            self._entries.clear()
+            self._rebuild_index_map()
+            self.endRemoveRows()
+            return
+
         new_paths = [e.get("path", "") for e in entries]
         if len(set(new_paths)) != len(new_paths):
-            # Fallback if duplicate paths exist
             self.beginResetModel()
             self._entries = list(entries)
             self._rebuild_index_map()
@@ -193,14 +192,14 @@ class FileListModel(QAbstractListModel):
 
         new_path_set = set(new_paths)
 
-        # Step 1: Remove deleted items in-place (backwards so indices remain valid)
+        # Step 1: Remove deleted items in-place (backwards)
         for i in range(len(self._entries) - 1, -1, -1):
             if self._entries[i].get("path", "") not in new_path_set:
                 self.beginRemoveRows(QModelIndex(), i, i)
                 self._entries.pop(i)
                 self.endRemoveRows()
 
-        # Step 2: Reorder surviving items & insert newly added items at their exact target index
+        # Step 2: Reorder surviving items & insert newly added items
         for target_idx, new_entry in enumerate(entries):
             p = new_entry.get("path", "")
             existing_idx = -1
@@ -341,13 +340,30 @@ class FileListModel(QAbstractListModel):
                 model_idx = self.index(idx, 0)
                 self.dataChanged.emit(model_idx, model_idx, [self.SizeRole, self.RawSizeRole])
 
+    def remove_paths_in_place(self, paths_to_remove: list):
+        rem_set = set()
+        for p in paths_to_remove:
+            if p:
+                rem_set.add(str(p))
+                try:
+                    rem_set.add(os.path.abspath(str(p)))
+                except Exception:
+                    pass
+        if not rem_set or not self._entries:
+            return
+        removed_any = False
+        for i in range(len(self._entries) - 1, -1, -1):
+            ep = str(self._entries[i].get("path", ""))
+            if ep in rem_set or os.path.abspath(ep) in rem_set:
+                self.beginRemoveRows(QModelIndex(), i, i)
+                self._entries.pop(i)
+                self.endRemoveRows()
+                removed_any = True
+        if removed_any:
+            self._rebuild_index_map()
+
 
 class MediaHubCardModel(QAbstractListModel):
-    """
-    Persistent in-place model for a single horizontal Media Hub row.
-    Updates individual cards (progress, badge, subtitle, poster, watched state) in-place
-    so QML Image delegates NEVER flash, reload, or lose horizontal scroll position!
-    """
     NameRole = Qt.ItemDataRole.UserRole + 1
     DisplayTitleRole = Qt.ItemDataRole.UserRole + 2
     SubtitleRole = Qt.ItemDataRole.UserRole + 3
@@ -378,6 +394,7 @@ class MediaHubCardModel(QAbstractListModel):
     BehindCountRole = Qt.ItemDataRole.UserRole + 28
     IsGoingTightRole = Qt.ItemDataRole.UserRole + 29
     ArtSourceRole = Qt.ItemDataRole.UserRole + 30
+    ShowPathRole = Qt.ItemDataRole.UserRole + 31
 
     FIELD_TO_ROLE = {
         "name": NameRole,
@@ -410,6 +427,7 @@ class MediaHubCardModel(QAbstractListModel):
         "behind_count": BehindCountRole,
         "is_going_tight": IsGoingTightRole,
         "_art_source": ArtSourceRole,
+        "show_path": ShowPathRole,
     }
 
     def __init__(self, parent=None):
@@ -424,14 +442,12 @@ class MediaHubCardModel(QAbstractListModel):
         poster = str(card.get("poster") or "")
         thumb = str(card.get("thumb") or "")
 
-        # Recently added episodes, movies, and show directories always take the vertical poster
         if is_recent_batch or is_dir or is_movie:
             if poster:
                 return "file://" + poster
             if thumb:
                 return "file://" + thumb
 
-        # Direct in-progress episode files (Continue Watching / Next Up) use video thumbnails
         if thumb:
             return "file://" + thumb
         if poster:
@@ -515,6 +531,8 @@ class MediaHubCardModel(QAbstractListModel):
             return bool(c.get("is_going_tight", False))
         elif role == self.ArtSourceRole:
             return str(c.get("_art_source", ""))
+        elif role == self.ShowPathRole:
+            return str(c.get("show_path", ""))
         return None
 
     def roleNames(self):
@@ -549,6 +567,7 @@ class MediaHubCardModel(QAbstractListModel):
             self.BehindCountRole: b"behind_count",
             self.IsGoingTightRole: b"is_going_tight",
             self.ArtSourceRole: b"art_source",
+            self.ShowPathRole: b"show_path",
         }
 
     def sync_cards(self, new_cards: list):
@@ -569,14 +588,12 @@ class MediaHubCardModel(QAbstractListModel):
 
         new_key_set = {c["_key"] for c in prepared}
 
-        # 1. Remove cards that are no longer in this row
         for i in range(len(self._cards) - 1, -1, -1):
             if self._cards[i].get("_key") not in new_key_set:
                 self.beginRemoveRows(QModelIndex(), i, i)
                 self._cards.pop(i)
                 self.endRemoveRows()
 
-        # 2. Move, update in-place, or insert cards
         for target_idx, new_c in enumerate(prepared):
             k = new_c["_key"]
             existing_idx = -1
@@ -654,6 +671,22 @@ class MediaHubCardModel(QAbstractListModel):
                     m_idx = self.index(idx, 0)
                     self.dataChanged.emit(m_idx, m_idx, changed_roles)
 
+    def remove_paths_in_place(self, paths_to_remove: list):
+        rem_set = {os.path.abspath(str(p)) for p in paths_to_remove if p} | {str(p) for p in paths_to_remove if p}
+        for i in range(len(self._cards) - 1, -1, -1):
+            cp = str(self._cards[i].get("path", ""))
+            if cp in rem_set or (cp and os.path.abspath(cp) in rem_set):
+                self.beginRemoveRows(QModelIndex(), i, i)
+                self._cards.pop(i)
+                self.endRemoveRows()
+
+    def update_hdr_in_place(self, file_path: str, is_hdr: bool):
+        for idx, c in enumerate(self._cards):
+            if c.get("path") == file_path and bool(c.get("is_hdr", False)) != bool(is_hdr):
+                c["is_hdr"] = bool(is_hdr)
+                m_idx = self.index(idx, 0)
+                self.dataChanged.emit(m_idx, m_idx, [self.IsHdrRole])
+
     def update_jellyfin_in_place(self, file_path: str, meta: dict):
         for idx, c in enumerate(self._cards):
             if c.get("path") == file_path:
@@ -680,15 +713,12 @@ class MediaHubCardModel(QAbstractListModel):
 
 
 class MediaHubSectionModel(QAbstractListModel):
-    """
-    Top-level persistent model for Media Hub sections (Continue Watching, Recently Added, Next Up, Airing).
-    Holds a persistent MediaHubCardModel per section ID so rows and cards never flash or destroy their QML views!
-    """
     SectionIdRole = Qt.ItemDataRole.UserRole + 1
     TitleRole = Qt.ItemDataRole.UserRole + 2
     SubtitleRole = Qt.ItemDataRole.UserRole + 3
     ItemCountRole = Qt.ItemDataRole.UserRole + 4
     CardsModelRole = Qt.ItemDataRole.UserRole + 5
+    HasMoviePosterRole = Qt.ItemDataRole.UserRole + 6
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -712,6 +742,8 @@ class MediaHubSectionModel(QAbstractListModel):
             return sec["count"]
         elif role == self.CardsModelRole:
             return sec["cards_model"]
+        elif role == self.HasMoviePosterRole:
+            return bool(sec.get("has_movie_poster", False))
         return None
 
     def roleNames(self):
@@ -721,20 +753,19 @@ class MediaHubSectionModel(QAbstractListModel):
             self.SubtitleRole: b"subtitle",
             self.ItemCountRole: b"item_count",
             self.CardsModelRole: b"cards_model",
+            self.HasMoviePosterRole: b"has_movie_poster",
         }
 
     def sync_sections(self, new_sections: list):
         new_ids = [s.get("id", "") for s in new_sections if s.get("id")]
         new_id_set = set(new_ids)
 
-        # 1. Remove hidden/removed sections in-place
         for i in range(len(self._sections) - 1, -1, -1):
             if self._sections[i]["id"] not in new_id_set:
                 self.beginRemoveRows(QModelIndex(), i, i)
                 self._sections.pop(i)
                 self.endRemoveRows()
 
-        # 2. Reorder, update, or insert sections while keeping each section's MediaHubCardModel alive!
         for target_idx, s_data in enumerate(new_sections):
             sid = s_data.get("id", "")
             if not sid:
@@ -745,12 +776,17 @@ class MediaHubSectionModel(QAbstractListModel):
             items_list = s_data.get("items") or []
             card_model.sync_cards(items_list)
 
+            has_movie_poster = any(
+                bool(itm.get("is_movie_item", False))
+                for itm in items_list
+            )
             new_sec_entry = {
                 "id": sid,
                 "title": str(s_data.get("title", "")),
                 "subtitle": str(s_data.get("subtitle", "")),
                 "count": len(items_list),
                 "cards_model": card_model,
+                "has_movie_poster": has_movie_poster,
             }
 
             existing_idx = -1
@@ -768,6 +804,8 @@ class MediaHubSectionModel(QAbstractListModel):
                     changed_roles.append(self.SubtitleRole)
                 if old_sec["count"] != new_sec_entry["count"]:
                     changed_roles.append(self.ItemCountRole)
+                if old_sec.get("has_movie_poster") != new_sec_entry["has_movie_poster"]:
+                    changed_roles.append(self.HasMoviePosterRole)
                 self._sections[target_idx] = new_sec_entry
                 if changed_roles:
                     m_idx = self.index(target_idx, 0)
@@ -779,7 +817,7 @@ class MediaHubSectionModel(QAbstractListModel):
                 self.endMoveRows()
                 self._sections[target_idx] = new_sec_entry
                 m_idx = self.index(target_idx, 0)
-                self.dataChanged.emit(m_idx, m_idx, [self.TitleRole, self.SubtitleRole, self.ItemCountRole])
+                self.dataChanged.emit(m_idx, m_idx, [self.TitleRole, self.SubtitleRole, self.ItemCountRole, self.HasMoviePosterRole])
             else:
                 self.beginInsertRows(QModelIndex(), target_idx, target_idx)
                 self._sections.insert(target_idx, new_sec_entry)
@@ -796,6 +834,14 @@ class MediaHubSectionModel(QAbstractListModel):
     def update_progress_in_place(self, file_path: str, progress_val: float, is_watched_val: bool):
         for cm in self._card_models.values():
             cm.update_progress_in_place(file_path, progress_val, is_watched_val)
+
+    def update_hdr_in_place(self, file_path: str, is_hdr: bool):
+        for cm in self._card_models.values():
+            cm.update_hdr_in_place(file_path, is_hdr)
+
+    def remove_paths_in_place(self, paths_to_remove: list):
+        for cm in self._card_models.values():
+            cm.remove_paths_in_place(paths_to_remove)
 
     def update_jellyfin_in_place(self, file_path: str, meta: dict):
         for cm in self._card_models.values():

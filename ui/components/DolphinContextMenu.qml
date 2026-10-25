@@ -38,6 +38,7 @@ StyledMenu {
     readonly property bool canResumeTargetFolder: (backend && root.isDir && targetPath !== "") ? backend.canResumeFolder(targetPath) : false
     readonly property bool isFavoritedTarget: (backend && targetPath !== "") ? backend.isPathFavorited(targetPath) : false
     readonly property bool isInTrash: backend ? backend.isTrashView : false
+    property string showPath: ""
     property bool isAiringItem: false
     property string airingId: ""
     property string airingLinkedPath: ""
@@ -71,7 +72,15 @@ StyledMenu {
     }
 
     StyledMenuItem {
-        visible: backend ? (backend.currentPath === "mediahub://") : false
+        visible: backend ? (backend.currentPath === "mediahub://" && root.showPath !== "" && root.showPath !== root.targetPath) : false
+        iconGlyph: "📺"
+        text: "Go to Show Page"
+        font.bold: true
+        onTriggered: if (backend) backend.navigateTo(root.showPath)
+    }
+
+    StyledMenuItem {
+        visible: backend ? (backend.currentPath === "mediahub://" && !root.isAiringItem) : false
         iconGlyph: "📂"
         text: "Open Containing Folder"
         font.bold: true

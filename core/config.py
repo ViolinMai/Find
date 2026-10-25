@@ -76,7 +76,7 @@ class ConfigManager:
         },
         "media_hub_rows": [
             {"id": "continue_watching", "title": "Continue Watching", "visible": True},
-            {"id": "recently_added", "title": "Recently Added Episodes", "visible": True},
+            {"id": "recently_added", "title": "New Episodes", "visible": True},
             {"id": "next_up", "title": "Next Up", "visible": True},
             {"id": "airing", "title": "Airing Weekly Tracker", "visible": True}
         ],

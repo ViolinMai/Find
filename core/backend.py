@@ -257,6 +257,22 @@ class IconGalleryScannerTask(QRunnable):
         self.signals.iconGalleryReady.emit(icons)
 
 
+class CallableTask(QRunnable):
+    """Wraps any Python callable in a proper QRunnable with autoDelete so QThreadPool never drops or GCs it."""
+    def __init__(self, fn, on_done=None):
+        super().__init__()
+        self.setAutoDelete(True)
+        self.fn = fn
+        self.on_done = on_done
+
+    def run(self):
+        try:
+            self.fn()
+        finally:
+            if callable(self.on_done):
+                self.on_done(self)
+
+
 class AsyncWorkerSignals(QObject):
     directoryLoaded = Signal(str, list)
     directoryLoadError = Signal(str, str)
@@ -276,6 +292,7 @@ class AsyncWorkerSignals(QObject):
     archiveFinished = Signal(bool, str)
     mediaHubSectionsReady = Signal(list)
     storageAnalyzerReady = Signal(str, list, object)
+    requestRefresh = Signal()
 
 
 class ArchiveTask(QRunnable):
@@ -1479,22 +1496,51 @@ class MediaHubBuilderTask(QRunnable):
 
         poster = override_poster or (jf_meta.get("poster") if jf_meta else "") or (parent_jf.get("poster") if parent_jf else "")
         series_title = (jf_meta.get("series_name") if jf_meta else "") or (parent_jf.get("title") if parent_jf else "")
-        if not series_title and not is_dir:
-            series_title = p_obj.parent.parent.name if self.backend.jf_bridge.is_season_folder_name(p_obj.parent.name) else p_obj.parent.name
+        is_movie_flag = bool(is_in_movie_dir or (jf_meta and jf_meta.get("item_type") == "Movie"))
+
+        if is_dir:
+            show_folder_path = target_path
+        elif not is_movie_flag:
+            show_folder_path = str(p_obj.parent.parent if self.backend.jf_bridge.is_season_folder_name(p_obj.parent.name) else p_obj.parent)
+        else:
+            show_folder_path = str(p_obj.parent)
+
+        if not series_title and not is_dir and not is_movie_flag:
+            series_title = Path(show_folder_path).name
 
         ep_badge, _ = self.backend._parse_episode_info(p_obj.name) if not is_dir else ("", None)
         if not badge_text and ep_badge:
             badge_text = f"EP {ep_badge.lstrip('0') or '0'}"
 
-        ep_title = (jf_meta.get("title") if jf_meta else "") or p_obj.name
-        display_title = series_title if (series_title and not is_dir and jf_meta.get("item_type") != "Movie") else (ep_title if ep_title else p_obj.name)
-        sub_line = subtitle_text or (ep_title if (series_title and ep_title != series_title) else p_obj.name)
+        raw_jf_title = (jf_meta.get("title") if jf_meta else "")
+        if not is_dir and not is_movie_flag:
+            if raw_jf_title and raw_jf_title.lower() != series_title.lower():
+                ep_title = f"EP {ep_badge.lstrip('0') or '0'} - {raw_jf_title}" if ep_badge and not raw_jf_title.lower().startswith(("ep", "episode")) else raw_jf_title
+            elif ep_badge:
+                ep_title = f"Episode {ep_badge.lstrip('0') or '0'}"
+            else:
+                ep_title = p_obj.stem
+            # Headline is the episode name; subtitle is the clickable show name
+            display_title = ep_title
+            sub_line = subtitle_text or series_title or p_obj.parent.name
+        else:
+            ep_title = raw_jf_title or p_obj.stem
+            display_title = ep_title if not is_dir else (raw_jf_title or p_obj.name)
+            sub_line = subtitle_text or (series_title if series_title else p_obj.name)
 
         is_hdr = False
+        is_new_flag = False
+        now_sec = time.time()
+        seven_days = 7 * 86400
         if not is_dir and p_obj.suffix.lower() in VIDEO_EXTS:
+            newest_ts = max(raw_mod, raw_created)
+            if not watched_val and newest_ts > 0 and (now_sec - newest_ts) <= seven_days:
+                is_new_flag = True
             cached_hdr = self.backend.config_mgr.get_cached_hdr(target_path, raw_mod)
             if cached_hdr is not None:
                 is_hdr = bool(cached_hdr)
+            elif hasattr(self, "_unprobed_hdr_items"):
+                self._unprobed_hdr_items.append((target_path, raw_mod))
 
         return {
             "name": p_obj.name,
@@ -1502,6 +1548,7 @@ class MediaHubBuilderTask(QRunnable):
             "subtitle": sub_line,
             "badge": badge_text,
             "path": target_path,
+            "show_path": show_folder_path,
             "is_dir": is_dir,
             "size": size_str,
             "modified": mod_str,
@@ -1516,7 +1563,7 @@ class MediaHubBuilderTask(QRunnable):
             "episode_num": ep_badge or "",
             "progress": round(prog_val, 4),
             "is_watched": watched_val,
-            "is_new": False,
+            "is_new": is_new_flag,
             "is_movie_item": bool(is_in_movie_dir or (jf_meta and jf_meta.get("item_type") == "Movie")),
             "is_hdr": is_hdr,
             "episode_title": ep_title,
@@ -1526,6 +1573,7 @@ class MediaHubBuilderTask(QRunnable):
         }
 
     def run(self):
+        self._unprobed_hdr_items = []
         rows_cfg = self.backend.getMediaHubRowConfig()
         hidden_map = dict(self.backend.config_mgr.get("media_hub_hidden", {}) or {})
         dirty_hidden = False
@@ -1609,6 +1657,9 @@ class MediaHubBuilderTask(QRunnable):
                 p_info = self.backend.config_mgr.get_media_progress(loc_p)
                 cur_prog = float(p_info.get("progress", meta.get("progress", 0.0)) or 0.0)
                 cur_pos = float(p_info.get("position", meta.get("position", 0.0)) or 0.0)
+                is_already_watched = bool(meta.get("watched", False) or p_info.get("watched", False) or cur_prog >= 0.90)
+                if is_already_watched:
+                    continue
                 if _is_hidden_item(loc_p, cur_prog, cur_pos):
                     continue
                 seen_next_paths.add(loc_p)
@@ -1628,7 +1679,7 @@ class MediaHubBuilderTask(QRunnable):
                         badge_text=b_lbl,
                         override_poster=meta.get("poster", ""),
                         override_prog=cur_prog,
-                        override_watched=bool(meta.get("watched", False))
+                        override_watched=False
                     )
                 )
 
@@ -1669,12 +1720,10 @@ class MediaHubBuilderTask(QRunnable):
             except OSError:
                 pass
 
-        # 3. Recently Added Episodes (Strict Chronological Run-Length Grouping!)
-        # If Show A adds EP 1 & 2 -> grouped together. Then Show B adds EP 10 -> separate card.
-        # Then Show A adds EP 3 -> new separate card at the front (NOT merged into the older Show A card!).
+        # 3. New Episodes (Strictly last 7 days only, then automatically disappears!)
         raw_recent_events = []
         now_ts = time.time()
-        window_sec = 30 * 86400  # 30 days window
+        window_sec = 7 * 86400  # 7 days (1 week) window
 
         for lib in libs:
             lp = lib.get("path", "")
@@ -1786,12 +1835,14 @@ class MediaHubBuilderTask(QRunnable):
                 badge_s = self._compress_ep_ranges(ep_nums) if ep_nums else (f"{len(batch)} EP added" if len(batch) > 1 else "New EP added")
                 poster_p = first_ev["poster"]
                 show_title = first_ev["show_name"]
+                # Always navigate to the show's folder page when clicking a card in New Episodes
+                target_p = first_ev["show_path"]
                 if len(batch) == 1:
-                    target_p = first_ev["file_path"]
-                    sub_d = first_ev["file_name"]
+                    ep_b, _ = self.backend._parse_episode_info(first_ev["file_name"])
+                    ep_headline = f"Episode {ep_b.lstrip('0') or '1'}" if ep_b else Path(first_ev["file_name"]).stem
                 else:
-                    target_p = first_ev["show_path"]
-                    sub_d = f"{len(batch)} episodes added ({badge_s.replace(' added', '')})"
+                    ep_headline = f"{len(batch)} Episodes ({badge_s.replace(' added', '')})"
+                sub_d = show_title
 
             batch_watched = True
             batch_prog_sum = 0.0
@@ -1816,8 +1867,24 @@ class MediaHubBuilderTask(QRunnable):
                 override_prog=1.0 if batch_watched else avg_batch_prog,
                 override_watched=batch_watched
             )
-            if show_title:
-                card["display_title"] = show_title
+            if first_ev["is_movie"]:
+                if show_title:
+                    card["display_title"] = show_title
+            else:
+                card["display_title"] = ep_headline
+                card["subtitle"] = show_title
+                card["show_path"] = first_ev["show_path"]
+                latest_file_p = first_ev["file_path"]
+                try:
+                    f_mtime = os.path.getmtime(latest_file_p)
+                    c_hdr = self.backend.config_mgr.get_cached_hdr(latest_file_p, f_mtime)
+                    if c_hdr is not None:
+                        card["is_hdr"] = bool(c_hdr)
+                    else:
+                        self._unprobed_hdr_items.append((latest_file_p, f_mtime))
+                except OSError:
+                    pass
+            card["is_new"] = not batch_watched
             card["is_recently_added_card"] = True
             recently_added_items.append(card)
             if len(recently_added_items) >= 25:
@@ -1845,7 +1912,7 @@ class MediaHubBuilderTask(QRunnable):
             },
             "recently_added": {
                 "id": "recently_added",
-                "title": "✨  Recently Added Episodes",
+                "title": "✨  New Episodes",
                 "subtitle": "Latest episode batches added to your media libraries",
                 "items": recently_added_items
             },
@@ -1873,6 +1940,10 @@ class MediaHubBuilderTask(QRunnable):
                 if r_cfg.get("title"):
                     sec["raw_title"] = r_cfg["title"]
                 final_sections.append(sec)
+
+        if self._unprobed_hdr_items:
+            hdr_task = HdrBatchDetectorTask(self._unprobed_hdr_items, self.backend.config_mgr, self.signals)
+            self.backend.thread_pool.start(hdr_task)
 
         self.signals.mediaHubSectionsReady.emit(final_sections)
 
@@ -1931,6 +2002,7 @@ class FileManagerBackend(QObject):
     themeColorChanged = Signal()
     windowActivationRequested = Signal()
     notificationSettingsChanged = Signal()
+    requestRefreshSignal = Signal()
 
     def __init__(self, parent=None, is_picker_mode: bool = False, is_mediahub_mode: bool = False):
         super().__init__(parent)
@@ -2060,6 +2132,7 @@ class FileManagerBackend(QObject):
         self.dir_pool.setMaxThreadCount(4)
         self.thread_pool = QThreadPool(self)
         self.thread_pool.setMaxThreadCount(4)
+        self._active_bg_tasks = set()
 
         self.signals = AsyncWorkerSignals()
         self.signals.directoryLoaded.connect(self._on_directory_loaded)
@@ -2084,8 +2157,10 @@ class FileManagerBackend(QObject):
         # Debounce timers for QFileSystemWatcher so rapid file downloads or daemon writes never thrash the UI
         self._dir_reload_debounce = QTimer(self)
         self._dir_reload_debounce.setSingleShot(True)
-        self._dir_reload_debounce.setInterval(260)
+        self._dir_reload_debounce.setInterval(120)
         self._dir_reload_debounce.timeout.connect(self.refresh)
+        self.signals.requestRefresh.connect(self._trigger_immediate_refresh, Qt.ConnectionType.QueuedConnection)
+        self.requestRefreshSignal.connect(self._trigger_immediate_refresh, Qt.ConnectionType.QueuedConnection)
 
         self._progress_reload_debounce = QTimer(self)
         self._progress_reload_debounce.setSingleShot(True)
@@ -2867,6 +2942,7 @@ class FileManagerBackend(QObject):
 
     def _on_hdr_status_detected(self, file_path_str: str, is_hdr: bool):
         self.file_model.update_hdr_status(file_path_str, is_hdr)
+        self.media_hub_model.update_hdr_in_place(file_path_str, is_hdr)
         if self._selected_item.get("path") == file_path_str:
             updated = dict(self._selected_item)
             updated["is_hdr"] = bool(is_hdr)
@@ -2953,7 +3029,7 @@ class FileManagerBackend(QObject):
         raw = self.config_mgr.get("media_hub_rows", [])
         defaults = [
             {"id": "continue_watching", "title": "Continue Watching", "visible": True},
-            {"id": "recently_added", "title": "Recently Added Episodes", "visible": True},
+            {"id": "recently_added", "title": "New Episodes", "visible": True},
             {"id": "next_up", "title": "Next Up", "visible": True},
             {"id": "airing", "title": "Airing Weekly Tracker", "visible": True},
         ]
@@ -2966,9 +3042,12 @@ class FileManagerBackend(QObject):
                 rid = item["id"]
                 if rid not in seen:
                     seen.add(rid)
+                    raw_t = str(item.get("title") or rid.replace("_", " ").title())
+                    if rid == "recently_added" and raw_t == "Recently Added Episodes":
+                        raw_t = "New Episodes"
                     out.append({
                         "id": rid,
-                        "title": str(item.get("title") or rid.replace("_", " ").title()),
+                        "title": raw_t,
                         "visible": bool(item.get("visible", True))
                     })
         for d in defaults:
@@ -3961,6 +4040,16 @@ class FileManagerBackend(QObject):
     @Property(QObject, constant=True)
     def files(self):
         return self.file_model
+
+    def _run_bg_task(self, fn):
+        task = CallableTask(fn, on_done=lambda t: self._active_bg_tasks.discard(t))
+        self._active_bg_tasks.add(task)
+        self.thread_pool.start(task)
+
+    def _trigger_immediate_refresh(self):
+        self.refresh()
+        if str(self._current_path) == "mediahub://":
+            self.refreshMediaHub()
 
     def _on_dir_changed_externally(self, path):
         if path == str(self._current_path):
@@ -5468,9 +5557,9 @@ class FileManagerBackend(QObject):
                     self.toastMessage.emit(f"⚠️ Duplicate failed: {e}")
             if ok_cnt > 0:
                 self.toastMessage.emit(f"✔ Duplicated {ok_cnt} item(s)")
-                self._dir_reload_debounce.start()
+                self.signals.requestRefresh.emit()
 
-        QThreadPool.globalInstance().start(_dup_worker)
+        self._run_bg_task(_dup_worker)
 
     @Slot(str, str)
     def renameItem(self, file_path_str: str, new_name: str):
@@ -5695,10 +5784,13 @@ class FileManagerBackend(QObject):
                             else:
                                 shutil.copy2(str(src), str(target))
                     self.signals.archiveFinished.emit(True, f"✔ {'Moved' if operation == 'move' else 'Copied'} {src.name}")
+                    self.signals.requestRefresh.emit()
                 except Exception as e:
                     self.signals.archiveFinished.emit(False, f"⚠️ Transfer failed ({src.name}): {e}")
 
-            QThreadPool.globalInstance().start(_transfer_worker)
+            if operation == "move":
+                self.file_model.remove_paths_in_place([str(src)])
+            self._run_bg_task(_transfer_worker)
             return True
         except Exception as e:
             self.toastMessage.emit(f"⚠️ Transfer error: {e}")
@@ -6568,9 +6660,13 @@ class FileManagerBackend(QObject):
                 self.config_mgr.clean_cache()
                 self.cacheSizeChanged.emit()
                 self.toastMessage.emit(f"🗑️ Moved {moved_count} item{'s' if moved_count > 1 else ''} to Trash")
-                self._dir_reload_debounce.start()
+                self.signals.requestRefresh.emit()
 
-        QThreadPool.globalInstance().start(_trash_worker)
+        self.file_model.remove_paths_in_place(valid_targets)
+        self.media_hub_model.remove_paths_in_place(valid_targets)
+        if any(p in self._selected_paths or p == self._selected_item.get("path") for p in valid_targets):
+            self.clearSelection()
+        self._run_bg_task(_trash_worker)
 
     def _resolve_trashinfo_for_file(self, trashed_file_path: str):
         p = Path(trashed_file_path)
@@ -6623,11 +6719,13 @@ class FileManagerBackend(QObject):
                     self.toastMessage.emit(f"⚠️ Restore error: {e}")
             if restored_count > 0:
                 self.toastMessage.emit(f"↩ Restored {restored_count} item{'s' if restored_count > 1 else ''} to original location")
-                self._dir_reload_debounce.start()
+                self.signals.requestRefresh.emit()
             else:
                 self.toastMessage.emit("⚠️ Could not restore selected item(s)")
 
-        QThreadPool.globalInstance().start(_restore_worker)
+        self.file_model.remove_paths_in_place([fp for fp in targets if fp])
+        self.clearSelection()
+        self._run_bg_task(_restore_worker)
 
     @Slot(str)
     def deletePermanently(self, file_path_str: str = ""):
@@ -6664,12 +6762,22 @@ class FileManagerBackend(QObject):
                     self.toastMessage.emit(f"⚠️ Delete failed ({Path(abs_fp).name}): {e}")
             if deleted_count > 0:
                 self.toastMessage.emit(f"🔥 Permanently deleted {deleted_count} item{'s' if deleted_count > 1 else ''}")
-                self._dir_reload_debounce.start()
+                self.signals.requestRefresh.emit()
 
-        QThreadPool.globalInstance().start(_del_worker)
+        self.file_model.remove_paths_in_place([os.path.abspath(fp) for fp in targets if fp])
+        self.media_hub_model.remove_paths_in_place([os.path.abspath(fp) for fp in targets if fp])
+        self.clearSelection()
+        self._run_bg_task(_del_worker)
 
     @Slot()
     def emptyTrash(self):
+        if str(self._current_path) == "trash://":
+            self.file_model.set_entries([], context_key="trash://", force_reset=True)
+            self._trash_item_count = 0
+            self._trash_total_size_str = "0 B"
+            self.trashInfoChanged.emit()
+            self.clearSelection()
+
         def _empty_worker():
             deleted_count = 0
             for t_dir in self._get_all_trash_dirs():
@@ -6692,9 +6800,9 @@ class FileManagerBackend(QObject):
                         except Exception:
                             pass
             self.toastMessage.emit(f"🧹 Emptied Trash ({deleted_count} items permanently removed)")
-            self._dir_reload_debounce.start()
+            self.signals.requestRefresh.emit()
 
-        QThreadPool.globalInstance().start(_empty_worker)
+        self._run_bg_task(_empty_worker)
 
     @Slot(int)
     def setMaxCacheMb(self, mb: int):
@@ -7017,7 +7125,7 @@ class FileManagerBackend(QObject):
             next_idx = last_watched_idx + 1
             if next_idx < len(video_entries):
                 return video_entries[next_idx][0]
-            return video_entries[last_watched_idx][0]
+            return ""
 
         # Priority 3: First episode in folder
         return video_entries[0][0]

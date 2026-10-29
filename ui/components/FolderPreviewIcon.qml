@@ -63,9 +63,9 @@ Item {
             anchors.fill: parent
             anchors.margins: 2
             radius: Math.max(5, parent.width * 0.05)
-            color: "#18181f"
-            border.color: "#45ffffff"
-            border.width: 1
+            color: (firstItem !== null && firstItem.kind === "text") ? "#18181f" : "transparent"
+            border.color: (firstItem !== null && firstItem.kind === "text") ? "#45ffffff" : "transparent"
+            border.width: (firstItem !== null && firstItem.kind === "text") ? 1 : 0
             clip: true
 
             readonly property var firstItem: root.count > 0 ? root.safeList[0] : null
@@ -145,9 +145,9 @@ Item {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     radius: Math.max(3, pocketContent.width * 0.04)
-                    color: "#18181f"
-                    border.color: "#38ffffff"
-                    border.width: 1
+                    color: modelData.kind === "text" ? "#18181f" : "transparent"
+                    border.color: modelData.kind === "text" ? "#38ffffff" : "transparent"
+                    border.width: modelData.kind === "text" ? 1 : 0
                     clip: true
 
                     Image {

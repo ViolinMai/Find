@@ -49,14 +49,7 @@ ApplicationWindow {
     readonly property bool effectiveShowPreview: userShowPreview && (width >= 960 || height >= 760)
     readonly property bool dockPreviewBottom: width < 920 || isPortraitTile
 
-    // Global Drag & Drop state (Right-click hold drag + Smart Drop)
-    property bool isRightDragging: false
-    property string draggedFilePath: ""
-    property string draggedFileName: ""
-    property string draggedFileIcon: "📄"
-    property real dragCursorX: 0
-    property real dragCursorY: 0
-
+    // Global Smart Drop state
     property var pendingDropUrls: []
     property int pendingDropIndex: 0
     property string pendingDropDestDir: ""
@@ -68,6 +61,14 @@ ApplicationWindow {
     property var topQuickAccessModel: backend ? backend.getQuickAccessLocations() : []
     property var topDrivesModel: backend ? backend.getDrives() : []
     property string activeToastText: ""
+
+    function openSettings(mediaOnly) {
+        settingsDialog.mediaOnlyMode = Boolean(mediaOnly)
+        if (mediaOnly) {
+            settingsDialog.currentCategory = 2
+        }
+        settingsDialog.open()
+    }
 
     SettingsDialog {
         id: settingsDialog
@@ -122,40 +123,50 @@ ApplicationWindow {
         onTriggered: root.activeToastText = ""
     }
 
-    function beginRightDrag(path, name, icon, globalPt) {
-        draggedFilePath = path
-        draggedFileName = name
-        draggedFileIcon = icon || "📄"
-        var localPt = mainContainer.mapFromGlobal(globalPt.x, globalPt.y)
-        dragCursorX = localPt.x
-        dragCursorY = localPt.y
-        isRightDragging = true
-    }
-
-    function updateRightDragPos(globalPt) {
-        var localPt = mainContainer.mapFromGlobal(globalPt.x, globalPt.y)
-        dragCursorX = localPt.x
-        dragCursorY = localPt.y
-    }
-
-    function endRightDrag() {
-        isRightDragging = false
-    }
-
-    function requestSmartDrop(urlsList, destDir, dropPointX, dropPointY) {
-        if (!backend || !destDir || destDir === "recent://" || destDir === "trash://") return
+    function requestSmartDrop(urlsList, destDir, dropPointX, dropPointY, modifiers) {
+        if (!backend || !destDir || destDir === "recent://") return
         var cleanPaths = backend.filterValidDropSources(urlsList, destDir)
         if (!cleanPaths || cleanPaths.length === 0) return
+
+        if (destDir === "trash://") {
+            for (var i = 0; i < cleanPaths.length; i++) {
+                backend.moveToTrash(cleanPaths[i])
+            }
+            return
+        }
 
         pendingDropUrls = cleanPaths
         pendingDropDestDir = destDir
 
-        if (dropPointX !== undefined && dropPointY !== undefined) {
+        var mods = modifiers !== undefined ? modifiers : 0
+        if (mods & Qt.AltModifier) {
+            if (dropPointX !== undefined && dropPointY !== undefined) {
+                dropActionMenu.x = Math.max(8, Math.min(dropPointX, root.width - dropActionMenu.width - 12))
+                dropActionMenu.y = Math.max(8, Math.min(dropPointY, root.height - dropActionMenu.height - 12))
+                dropActionMenu.open()
+            } else {
+                dropActionMenu.popup()
+            }
+            return
+        }
+        if (mods & Qt.ControlModifier) {
+            startBatchTransfer("copy")
+            return
+        }
+        if (mods & Qt.ShiftModifier) {
+            startBatchTransfer("move")
+            return
+        }
+
+        // Standard default: Move if on the same filesystem, otherwise show menu or Copy
+        if (backend.isSameFilesystem(cleanPaths[0], destDir)) {
+            startBatchTransfer("move")
+        } else if (dropPointX !== undefined && dropPointY !== undefined) {
             dropActionMenu.x = Math.max(8, Math.min(dropPointX, root.width - dropActionMenu.width - 12))
             dropActionMenu.y = Math.max(8, Math.min(dropPointY, root.height - dropActionMenu.height - 12))
             dropActionMenu.open()
         } else {
-            dropActionMenu.popup()
+            startBatchTransfer("copy")
         }
     }
 
@@ -305,6 +316,17 @@ ApplicationWindow {
         context: Qt.WindowShortcut
         enabled: !addressBar.isEditingPath && !addressBar.isSearchActive
         onActivated: root.triggerPasteInCurrentFolder()
+    }
+    Shortcut {
+        sequence: "Ctrl+Z"
+        context: Qt.WindowShortcut
+        enabled: !addressBar.isEditingPath && !addressBar.isSearchActive && !root.isModalOpen && !root.isTextInputFocused
+        onActivated: if (backend) backend.undoLastAction()
+    }
+    Shortcut {
+        sequence: "Ctrl+Q"
+        context: Qt.WindowShortcut
+        onActivated: if (backend) backend.quitApplicationCompletely()
     }
     Shortcut {
         sequence: "Ctrl+D"
@@ -714,8 +736,7 @@ ApplicationWindow {
                                 }
                                 onDropped: function(drop) {
                                     tabHoverSwitchTimer.stop()
-                                    if (root.isRightDragging) root.endRightDrag()
-                                    if (!modelData.path || modelData.path === "recent://" || modelData.path === "trash://") return
+                                    if (!modelData.path || modelData.path === "recent://") return
                                     var urls = []
                                     if (drop.hasUrls) {
                                         for (var i = 0; i < drop.urls.length; i++) urls.push(drop.urls[i].toString())
@@ -794,68 +815,6 @@ ApplicationWindow {
                         id: pillRow
                         height: parent.height
                         spacing: 6
-
-                        Rectangle {
-                            readonly property bool isHubCurr: (backend ? backend.currentPath : "") === "mediahub://"
-                            implicitHeight: Math.round(26 * Theme.scaleFactor)
-                            implicitWidth: hubTopRow.implicitWidth + 14
-                            radius: Theme.radiusMedium
-                            color: isHubCurr ? Theme.accent : (hubTopMouse.containsMouse ? Theme.bgHover : Theme.bgSurface)
-                            border.color: isHubCurr ? Theme.accentHover : "#6638bdf8"
-                            border.width: 1
-
-                            RowLayout {
-                                id: hubTopRow
-                                anchors.centerIn: parent
-                                spacing: 5
-                                Text { text: "🎬"; font.pixelSize: Theme.fontSizeSmall }
-                                Text {
-                                    text: "Media Hub"
-                                    color: parent.parent.isHubCurr ? "#ffffff" : Theme.textPrimary
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    font.bold: true
-                                }
-                            }
-
-                            MouseArea {
-                                id: hubTopMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: if (backend) backend.navigateTo("mediahub://")
-                            }
-                        }
-
-                        Rectangle {
-                            readonly property bool isFavCurr: (backend ? backend.currentPath : "") === "favorites://"
-                            implicitHeight: Math.round(26 * Theme.scaleFactor)
-                            implicitWidth: favTopRow.implicitWidth + 14
-                            radius: Theme.radiusMedium
-                            color: isFavCurr ? Theme.accent : (favTopMouse.containsMouse ? Theme.bgHover : Theme.bgSurface)
-                            border.color: isFavCurr ? Theme.accentHover : "#66fbbf24"
-                            border.width: 1
-
-                            RowLayout {
-                                id: favTopRow
-                                anchors.centerIn: parent
-                                spacing: 5
-                                Text { text: "⭐"; font.pixelSize: Theme.fontSizeSmall }
-                                Text {
-                                    text: "Favorites"
-                                    color: parent.parent.isFavCurr ? "#ffffff" : Theme.textPrimary
-                                    font.pixelSize: Theme.fontSizeSmall
-                                    font.bold: true
-                                }
-                            }
-
-                            MouseArea {
-                                id: favTopMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: if (backend) backend.navigateTo("favorites://")
-                            }
-                        }
 
                         Repeater {
                             model: root.topQuickAccessModel
@@ -1161,51 +1120,6 @@ ApplicationWindow {
             }
         }
 
-        // Floating Drag Ghost Preview (Follows cursor when holding Right Click)
-        Rectangle {
-            id: dragGhostBadge
-            visible: root.isRightDragging
-            x: root.dragCursorX + 14
-            y: root.dragCursorY + 14
-            z: 99999
-            width: Math.min(Math.round(250 * Theme.scaleFactor), ghostRow.implicitWidth + Math.round(22 * Theme.scaleFactor))
-            height: Math.round(40 * Theme.scaleFactor)
-            radius: Theme.radiusLarge
-            color: "#ee1e1e24"
-            border.color: Theme.accent
-            border.width: 2
-
-            RowLayout {
-                id: ghostRow
-                anchors.fill: parent
-                anchors.leftMargin: 12
-                anchors.rightMargin: 12
-                spacing: 10
-
-                Text {
-                    text: root.draggedFileIcon
-                    font.pixelSize: Theme.fontSizeMedium
-                }
-                ColumnLayout {
-                    Layout.fillWidth: true
-                    spacing: 0
-                    Text {
-                        text: root.draggedFileName
-                        color: Theme.textPrimary
-                        font.pixelSize: Theme.fontSizeSmall
-                        font.bold: true
-                        elide: Text.ElideMiddle
-                        Layout.fillWidth: true
-                    }
-                    Text {
-                        text: "Drop to Copy or Move"
-                        color: Theme.accent
-                        font.pixelSize: Math.round(9 * Theme.scaleFactor)
-                        font.bold: true
-                    }
-                }
-            }
-        }
     }
 
     StyledMenu {

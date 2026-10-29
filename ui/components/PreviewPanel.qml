@@ -137,6 +137,7 @@ Rectangle {
             ScrollBar.vertical: ScrollBar {
                 policy: ScrollBar.AsNeeded
             }
+            SmoothScroll { target: detailsFlick; orientation: Qt.Vertical }
 
             ColumnLayout {
                 id: detailsCol

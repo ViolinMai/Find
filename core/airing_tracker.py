@@ -64,7 +64,7 @@ class AiringTracker:
 
     @property
     def mal_username(self) -> str:
-        return str(self.config_mgr.get("mal_username", "CriticalweebR18") or "CriticalweebR18").strip()
+        return str(self.config_mgr.get("mal_username", "") or "").strip()
 
     @property
     def mal_client_id(self) -> str:
@@ -144,6 +144,8 @@ class AiringTracker:
             return False
 
         username = self.mal_username
+        if not username:
+            return False
         token = self.mal_access_token
         client_id = self.mal_client_id
 
@@ -617,12 +619,14 @@ class AiringTracker:
                         event_label=f"📡 Episode {aired_ep} Has Just Aired!"
                     )
 
-            # 3. Unwatched Follow-up Reminder Check (If user hasn't watched the latest aired episode after X hours)
+            # 3. Unwatched Follow-up Reminder Check (Only for linked local works or works with watched_eps > 0 to avoid spam)
+            has_local_link = bool(links_map.get(aid_str)) or (watched_eps > 0)
             last_aired_ep = int(data.get("last_aired_ep") or max(0, int(data.get("next_ep", 1)) - 1))
             last_aired_ts = float(data.get("last_aired_timestamp") or (float(data.get("next_air_timestamp", 0)) - 604800.0))
             if (
                 send_os_notification
                 and unwatched_enabled
+                and has_local_link
                 and last_aired_ep > 0
                 and watched_eps < last_aired_ep
                 and last_aired_ts > 0

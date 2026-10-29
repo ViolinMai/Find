@@ -834,12 +834,17 @@ Dialog {
                                 }
                             }
                             Slider {
+                                id: scrollSpeedSlider
                                 Layout.fillWidth: true
                                 from: 0.4
                                 to: 3.5
                                 stepSize: 0.05
                                 value: backend ? backend.scrollSpeedMultiplier : 1.25
-                                onMoved: if (backend) backend.setScrollSpeedMultiplier(value)
+                                onPressedChanged: {
+                                    if (!pressed && backend) {
+                                        backend.setScrollSpeedMultiplier(value)
+                                    }
+                                }
                             }
                         }
                     }
@@ -871,7 +876,11 @@ Dialog {
                             to: 4000
                             stepSize: 50
                             value: backend ? backend.maxCacheMb : 500
-                            onMoved: if (backend) backend.setMaxCacheMb(Math.round(value))
+                            onPressedChanged: {
+                                if (!pressed && backend) {
+                                    backend.setMaxCacheMb(Math.round(value))
+                                }
+                            }
                         }
                     }
                 }
@@ -1041,8 +1050,8 @@ Dialog {
                     }
 
                     SectionCard {
-                        sectionTitle: "⚡ Quick Access Locations & Ordering"
-                        sectionSubtitle: "Reorder, customize, or add standard Quick Access folders in the sidebar."
+                        sectionTitle: "⚡ Quick Access Locations & Ordering (All Sidebar Items)"
+                        sectionSubtitle: "Toggle visibility, reorder (including Media Hub, Favorites, Recently Added, Trash), edit icons, or add custom folders."
 
                         ColumnLayout {
                             Layout.fillWidth: true
@@ -1051,17 +1060,25 @@ Dialog {
                             Repeater {
                                 model: root.customQAList
                                 delegate: Rectangle {
+                                    readonly property bool isItemVisible: modelData.visible !== false
+                                    readonly property bool isVirtualBuiltIn: modelData.path === "mediahub://" || modelData.path === "favorites://" || modelData.path === "recent://" || modelData.path === "trash://"
                                     Layout.fillWidth: true
-                                    height: Math.round(36 * Theme.scaleFactor)
+                                    height: Math.round(38 * Theme.scaleFactor)
                                     radius: Theme.radiusSmall
                                     color: root.selectedQAIndex === index ? Theme.bgSelected : Theme.bgSurface
-                                    border.color: root.selectedQAIndex === index ? Theme.accent : Theme.borderDim
+                                    border.color: root.selectedQAIndex === index ? Theme.accent : (isItemVisible ? Theme.borderDim : "transparent")
+                                    opacity: isItemVisible ? 1.0 : 0.55
 
                                     RowLayout {
                                         anchors.fill: parent
                                         anchors.leftMargin: 10
                                         anchors.rightMargin: 8
                                         spacing: 8
+
+                                        Switch {
+                                            checked: parent.parent.isItemVisible
+                                            onToggled: if (backend) backend.setQuickAccessItemVisible(index, checked)
+                                        }
 
                                         Item {
                                             width: Math.round(22 * Theme.scaleFactor)
@@ -1086,7 +1103,7 @@ Dialog {
                                             text: modelData.name
                                             color: Theme.textPrimary
                                             font.bold: true
-                                            Layout.preferredWidth: 110
+                                            Layout.preferredWidth: 115
                                             elide: Text.ElideRight
                                         }
                                         Text {
@@ -1116,6 +1133,7 @@ Dialog {
                                             onClicked: if (backend) backend.moveQuickAccessItem(index, index + 1)
                                         }
                                         ActionBtn {
+                                            visible: !parent.parent.isVirtualBuiltIn
                                             text: "✕"
                                             isDanger: true
                                             onClicked: {
@@ -1215,10 +1233,12 @@ Dialog {
                                 onClicked: {
                                     if (root.selectedQAIndex >= 0 && root.selectedQAIndex < root.customQAList.length) {
                                         var list = root.customQAList.slice()
+                                        var prevVis = list[root.selectedQAIndex].visible !== false
                                         list[root.selectedQAIndex] = {
                                             "name": nameInput.text,
                                             "path": pathInput.text,
-                                            "icon": iconInput.text || "📁"
+                                            "icon": iconInput.text || "📁",
+                                            "visible": prevVis
                                         }
                                         root.customQAList = list
                                         backend.saveCustomQuickAccess(list)
@@ -1232,7 +1252,8 @@ Dialog {
                                     list.push({
                                         "name": nameInput.text || "Shortcut",
                                         "path": pathInput.text || backend.currentPath,
-                                        "icon": iconInput.text || "📁"
+                                        "icon": iconInput.text || "📁",
+                                        "visible": true
                                     })
                                     root.customQAList = list
                                     backend.saveCustomQuickAccess(list)
@@ -1588,8 +1609,8 @@ Dialog {
                             TextField {
                                 id: malUserInput
                                 Layout.fillWidth: true
-                                text: backend ? backend.malUsername : "CriticalweebR18"
-                                placeholderText: "CriticalweebR18"
+                                text: backend ? backend.malUsername : ""
+                                placeholderText: "Enter your MyAnimeList username"
                                 color: Theme.textPrimary
                                 font.family: "monospace"
                                 font.pixelSize: Theme.fontSizeSmall
@@ -2233,7 +2254,7 @@ Dialog {
                             onClicked: {
                                 if (backend) {
                                     backend.saveMpvConfigs(mpvBothEditor.text, mpvSdrEditor.text, mpvHdrEditor.text)
-                                    mpvSavedLabel.text = "✔ Updated ~/.config/mpv/mpv.conf"
+                                    mpvSavedLabel.text = "✔ Updated ~/.config/find/mpv_find.conf"
                                 }
                             }
                         }

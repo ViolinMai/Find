@@ -28,6 +28,9 @@ class FileListModel(QAbstractListModel):
     PosterRole = Qt.ItemDataRole.UserRole + 23
     SizeRatioRole = Qt.ItemDataRole.UserRole + 24
     PercentStrRole = Qt.ItemDataRole.UserRole + 25
+    IsSelectedRole = Qt.ItemDataRole.UserRole + 26
+    DurationStrRole = Qt.ItemDataRole.UserRole + 27
+    HasArabicSubRole = Qt.ItemDataRole.UserRole + 28
 
     FIELD_TO_ROLE = {
         "name": NameRole,
@@ -55,12 +58,16 @@ class FileListModel(QAbstractListModel):
         "poster": PosterRole,
         "size_ratio": SizeRatioRole,
         "percent_str": PercentStrRole,
+        "is_selected": IsSelectedRole,
+        "duration_str": DurationStrRole,
+        "has_arabic_sub": HasArabicSubRole,
     }
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._entries = []
         self._path_to_row = {}
+        self._selected_set = set()
         self._current_context_key = ""
 
     def rowCount(self, parent=QModelIndex()):
@@ -121,6 +128,12 @@ class FileListModel(QAbstractListModel):
             return float(entry.get("size_ratio", 0.0))
         elif role == self.PercentStrRole:
             return str(entry.get("percent_str", ""))
+        elif role == self.IsSelectedRole:
+            return entry.get("path", "") in self._selected_set
+        elif role == self.DurationStrRole:
+            return str(entry.get("duration_str", ""))
+        elif role == self.HasArabicSubRole:
+            return bool(entry.get("has_arabic_sub", False))
         return None
 
     def roleNames(self):
@@ -150,7 +163,38 @@ class FileListModel(QAbstractListModel):
             self.PosterRole: b"poster",
             self.SizeRatioRole: b"size_ratio",
             self.PercentStrRole: b"percent_str",
+            self.IsSelectedRole: b"is_selected",
+            self.DurationStrRole: b"duration_str",
+            self.HasArabicSubRole: b"has_arabic_sub",
         }
+
+    def sync_selection_paths(self, new_paths: list):
+        new_set = set(new_paths)
+        diff_paths = self._selected_set.symmetric_difference(new_set)
+        self._selected_set = new_set
+        for p in diff_paths:
+            r = self._path_to_row.get(p)
+            if r is not None and 0 <= r < len(self._entries):
+                m_idx = self.index(r, 0)
+                self.dataChanged.emit(m_idx, m_idx, [self.IsSelectedRole])
+
+    def update_episode_quick_details(self, file_path: str, duration_str: str, size_str: str, has_ar: bool):
+        idx = self._path_to_row.get(file_path)
+        if idx is not None and 0 <= idx < len(self._entries):
+            changed = []
+            ent = self._entries[idx]
+            if duration_str and ent.get("duration_str") != duration_str:
+                ent["duration_str"] = duration_str
+                changed.append(self.DurationStrRole)
+            if size_str and ent.get("size") != size_str:
+                ent["size"] = size_str
+                changed.append(self.SizeRole)
+            if bool(ent.get("has_arabic_sub", False)) != bool(has_ar):
+                ent["has_arabic_sub"] = bool(has_ar)
+                changed.append(self.HasArabicSubRole)
+            if changed:
+                m_idx = self.index(idx, 0)
+                self.dataChanged.emit(m_idx, m_idx, changed)
 
     def _rebuild_index_map(self):
         self._path_to_row = {e.get("path", ""): idx for idx, e in enumerate(self._entries)}
@@ -190,7 +234,30 @@ class FileListModel(QAbstractListModel):
             self.endResetModel()
             return
 
+        old_paths = [e.get("path", "") for e in self._entries]
+        # Fast path: Identical order -> O(n) in-place role updates without moving rows or touching scroll position!
+        if old_paths == new_paths:
+            for idx, new_entry in enumerate(entries):
+                old_entry = self._entries[idx]
+                for preserve_k in ("duration_str", "has_arabic_sub"):
+                    if preserve_k in old_entry and preserve_k not in new_entry:
+                        new_entry[preserve_k] = old_entry[preserve_k]
+                changed_roles = self._diff_entry_roles(old_entry, new_entry)
+                if changed_roles:
+                    self._entries[idx] = new_entry
+                    m_idx = self.index(idx, 0)
+                    self.dataChanged.emit(m_idx, m_idx, changed_roles)
+            return
+
+        # If more than 35% of the list changed or > 400 items reordered, do a single atomic reset (much faster than hundreds of row moves)
         new_path_set = set(new_paths)
+        old_path_set = set(old_paths)
+        if len(entries) > 400 or abs(len(entries) - len(self._entries)) > 80:
+            self.beginResetModel()
+            self._entries = list(entries)
+            self._rebuild_index_map()
+            self.endResetModel()
+            return
 
         # Step 1: Remove deleted items in-place (backwards)
         for i in range(len(self._entries) - 1, -1, -1):

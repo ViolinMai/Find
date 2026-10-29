@@ -292,6 +292,10 @@ class AsyncWorkerSignals(QObject):
     archiveFinished = Signal(bool, str)
     mediaHubSectionsReady = Signal(list)
     storageAnalyzerReady = Signal(str, list, object)
+    episodeQuickDetailsReady = Signal(str, str, str, bool)
+    folderMediaSummaryReady = Signal(str, dict)
+    cacheSizeCalculated = Signal(str)
+    textPreviewReady = Signal(str, str)
     requestRefresh = Signal()
 
 
@@ -852,6 +856,17 @@ class DirectoryLoaderTask(QRunnable):
 
 ISO_LANG_MAP = {
     "ara": "ar", "arabic": "ar", "ar": "ar", "العربية": "ar", "عربي": "ar",
+    "mar": "mr", "marathi": "mr", "bar": "bar", "arg": "an", "arm": "hy", "hye": "hy",
+    "gle": "ga", "bul": "bg", "hrv": "hr", "srp": "sr", "slk": "sk", "slv": "sl",
+    "lit": "lt", "lav": "lv", "est": "et", "isl": "is", "sqi": "sq", "alb": "sq",
+    "mkd": "mk", "mac": "mk", "bos": "bs", "cat": "ca", "glg": "gl", "eus": "eu",
+    "baq": "eu", "aze": "az", "kaz": "kk", "uzb": "uz", "mon": "mn", "mya": "my",
+    "bur": "my", "khm": "km", "lao": "lo", "sin": "si", "nep": "ne", "ben": "bn",
+    "pan": "pa", "guj": "gu", "ori": "or", "tam": "ta", "tel": "te", "kan": "kn",
+    "mal": "ml", "urd": "ur", "pus": "ps", "kur": "ku", "amh": "am", "swa": "sw",
+    "yor": "yo", "ibo": "ig", "hau": "ha", "zul": "zu", "xho": "xh", "afr": "af",
+    "tgl": "tl", "fil": "tl", "ceb": "ceb", "jav": "jv", "sun": "su", "epo": "eo",
+    "lat": "la", "san": "sa", "bel": "be", "kat": "ka", "geo": "ka",
     "eng": "en", "english": "en", "en": "en",
     "jpn": "ja", "japanese": "ja", "ja": "ja", "jp": "ja",
     "spa": "es", "spanish": "es", "es": "es",
@@ -896,7 +911,7 @@ def _normalize_short_lang(raw_lang: str, title_hint: str = "") -> str:
         if len(s) == 2 and s.isalpha():
             return s
         if len(s) == 3 and s.isalpha():
-            return ISO_LANG_MAP.get(s, s[:2])
+            return ISO_LANG_MAP.get(s, s)
     if title_hint:
         th = title_hint.lower()
         for k, v in ISO_LANG_MAP.items():
@@ -1071,16 +1086,27 @@ class MediaInfoTask(QRunnable):
 
 
 class FolderSizeTask(QRunnable):
-    def __init__(self, dir_path: str, signals):
+    def __init__(self, dir_path: str, token: int, get_active_token_fn, signals):
         super().__init__()
         self.dir_path = dir_path
+        self.token = token
+        self.get_active_token_fn = get_active_token_fn
         self.signals = signals
 
     def run(self):
+        if callable(self.get_active_token_fn) and self.get_active_token_fn() != self.token:
+            return
         total = 0
+        visited_files = 0
+        deadline = time.time() + 2.5
         try:
             for root, _, files in os.walk(self.dir_path, followlinks=False):
+                if callable(self.get_active_token_fn) and self.get_active_token_fn() != self.token:
+                    return
+                if time.time() > deadline or visited_files > 60000:
+                    break
                 for f in files:
+                    visited_files += 1
                     try:
                         fp = os.path.join(root, f)
                         if not os.path.islink(fp):
@@ -1091,6 +1117,8 @@ class FolderSizeTask(QRunnable):
                         pass
         except Exception:
             pass
+        if callable(self.get_active_token_fn) and self.get_active_token_fn() != self.token:
+            return
         self.signals.folderSizeReady.emit(self.dir_path, int(max(0, total)))
 
 
@@ -2093,6 +2121,7 @@ class FileManagerBackend(QObject):
     themeColorChanged = Signal()
     windowActivationRequested = Signal()
     notificationSettingsChanged = Signal()
+    folderMediaSummaryChanged = Signal(str, dict)
     requestRefreshSignal = Signal()
 
     def __init__(self, parent=None, is_picker_mode: bool = False, is_mediahub_mode: bool = False):
@@ -2205,14 +2234,22 @@ class FileManagerBackend(QObject):
         self._pending_highlight_paths = []
         self._folder_size_cache = {}
         self._calculating_folders = set()
+        self._folder_calc_token = 0
         self._selection_calc_token = ""
+        self._cached_cache_size_str = "0 B"
         self._trash_total_size_str = "0 B"
         self._trash_item_count = 0
         self._mime_apps_cache = {}
         self._media_info_cache = {}
+        self._ep_quick_details_cache = {}
+        self._probing_ep_details = set()
+        self._folder_summary_cache = {}
 
         self._cached_drives = []
         self._last_drives_ts = 0.0
+        self._disk_usage_cache_file = self.config_mgr.config_dir / "disk_usage_cache.json"
+        self._disk_usage_state = self._load_disk_usage_cache()
+        self._undo_stack = []
 
         self.file_model = FileListModel(self)
         self.media_hub_model = MediaHubSectionModel(self)
@@ -2244,6 +2281,10 @@ class FileManagerBackend(QObject):
         self.signals.archiveFinished.connect(self._on_archive_finished)
         self.signals.mediaHubSectionsReady.connect(self._on_media_hub_sections_ready)
         self.signals.storageAnalyzerReady.connect(self._on_storage_analyzer_ready)
+        self.signals.episodeQuickDetailsReady.connect(self._on_episode_quick_details_ready)
+        self.signals.folderMediaSummaryReady.connect(self._on_folder_media_summary_ready)
+        self.signals.cacheSizeCalculated.connect(self._on_cache_size_calculated)
+        self.signals.textPreviewReady.connect(self._on_text_preview_ready)
 
         # Debounce timers for QFileSystemWatcher so rapid file downloads or daemon writes never thrash the UI
         self._dir_reload_debounce = QTimer(self)
@@ -2292,6 +2333,12 @@ class FileManagerBackend(QObject):
             self.airing_timer.timeout.connect(self._on_airing_minute_tick)
             self.airing_timer.start()
 
+            # Lightweight 10-second smart disk usage tracker
+            self.disk_tracker_timer = QTimer(self)
+            self.disk_tracker_timer.setInterval(10000)
+            self.disk_tracker_timer.timeout.connect(self._trigger_smart_disk_usage_check)
+            self.disk_tracker_timer.start()
+
         self.thumb_mgr = ThumbnailManager(self.config_mgr.cache_dir, self)
         self.thumb_mgr.thumbnailReady.connect(self._on_thumbnail_ready)
         self.thumb_mgr.folderPreviewReady.connect(self._on_folder_preview_ready)
@@ -2302,6 +2349,7 @@ class FileManagerBackend(QObject):
         self.load_directory(self._current_path)
 
         if not self._launched_as_picker:
+            self._refresh_cache_size_async()
             QThreadPool.globalInstance().start(self.config_mgr.clean_cache)
             QThreadPool.globalInstance().start(lambda: self.search_mgr.build_incremental_index(self._get_indexable_roots()))
 
@@ -2429,136 +2477,146 @@ class FileManagerBackend(QObject):
         self._last_drives_ts = 0.0
         self.sidebarUpdated.emit()
 
-    @Slot(str, result=dict)
-    def getEpisodeDetailedInfo(self, file_path_str: str) -> dict:
-        """Retrieves exact duration, formatted size, and checks metadata strictly for Arabic subtitles ('ar')."""
-        if not file_path_str or not os.path.isfile(file_path_str):
-            return {"duration_str": "", "size_str": "", "has_arabic_sub": False, "sub_tag": ""}
-
-        p_info = self.config_mgr.get_media_progress(file_path_str)
-        dur = float(p_info.get("duration", 0.0) or 0.0)
-        if dur <= 0:
-            if file_path_str in self._media_info_cache:
-                c_dur = self._media_info_cache[file_path_str].get("duration_sec", 0.0)
-                dur = float(c_dur or 0.0)
-            if dur <= 0 and shutil.which("ffprobe"):
-                try:
-                    pr = subprocess.run([
-                        "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                        "-of", "default=noprint_wrappers=1:nokey=1", file_path_str
-                    ], capture_output=True, text=True, timeout=1.2)
-                    if pr.returncode == 0 and pr.stdout.strip():
-                        dur = float(pr.stdout.strip())
-                        self.config_mgr.set_media_progress(file_path_str, float(p_info.get("position", 0.0) or 0.0), dur)
-                except Exception:
-                    pass
-
-        mins, secs = divmod(int(dur), 60)
-        hrs, mins = divmod(mins, 60)
-        if hrs > 0:
-            dur_str = f"{hrs}h {mins:02d}m"
-        elif mins > 0:
-            dur_str = f"{mins}m {secs:02d}s"
-        elif secs > 0:
-            dur_str = f"{secs}s"
-        else:
-            dur_str = ""
-
-        size_str = ""
-        try:
-            sz = os.path.getsize(file_path_str)
-            size_str = self._format_size(sz)
-        except OSError:
-            pass
-
-        has_ar = False
-        mi = self._media_info_cache.get(file_path_str)
-        if mi and isinstance(mi.get("sub_langs"), list):
-            has_ar = any("ar" in str(x).lower() for x in mi["sub_langs"])
-        else:
-            # Fallback 1: Check external subtitles
-            matching_exts = find_matching_external_subs_for_video(file_path_str)
-            if matching_exts and any(any(k in Path(x).stem.lower() for k in (".ar", "_ar", "-ar", "arabic", "ara")) for x in matching_exts):
-                has_ar = True
-            elif shutil.which("ffprobe"):
-                # Fallback 2: Direct ffprobe stream metadata check
-                try:
-                    cmd = [
-                        "ffprobe", "-v", "quiet", "-select_streams", "s",
-                        "-show_entries", "stream_tags=language,title", "-of", "json", file_path_str
-                    ]
-                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=1.2)
-                    if res.returncode == 0 and res.stdout:
-                        s_data = json.loads(res.stdout)
-                        for st in s_data.get("streams", []):
-                            tags = st.get("tags") or {}
-                            lang = str(tags.get("language") or "").lower()
-                            title = str(tags.get("title") or "").lower()
-                            if any(k in lang for k in ("ara", "arabic", "ar")) or any(k in title for k in ("arabic", "عربي", "ترجمة")):
-                                has_ar = True
-                                break
-                except Exception:
-                    pass
-
-        return {
+    def _on_episode_quick_details_ready(self, file_path: str, dur_str: str, size_str: str, has_ar: bool):
+        self._probing_ep_details.discard(file_path)
+        self._ep_quick_details_cache[file_path] = {
             "duration_str": dur_str,
             "size_str": size_str,
             "has_arabic_sub": has_ar,
             "sub_tag": "ar" if has_ar else ""
         }
+        self.file_model.update_episode_quick_details(file_path, dur_str, size_str, has_ar)
+
+    @Slot(str)
+    def requestEpisodeDetailedInfoAsync(self, file_path_str: str):
+        if not file_path_str or file_path_str in self._probing_ep_details:
+            return
+        if file_path_str in self._ep_quick_details_cache:
+            c = self._ep_quick_details_cache[file_path_str]
+            self.file_model.update_episode_quick_details(file_path_str, c["duration_str"], c["size_str"], c["has_arabic_sub"])
+            return
+        self._probing_ep_details.add(file_path_str)
+
+        def _probe_worker():
+            if not os.path.isfile(file_path_str):
+                self.signals.episodeQuickDetailsReady.emit(file_path_str, "", "", False)
+                return
+            p_info = self.config_mgr.get_media_progress(file_path_str)
+            dur = float(p_info.get("duration", 0.0) or 0.0)
+            has_ar = False
+
+            matching_exts = find_matching_external_subs_for_video(file_path_str)
+            if matching_exts and any(any(k in Path(x).stem.lower() for k in (".ar", "_ar", "-ar", "arabic", "ara")) for x in matching_exts):
+                has_ar = True
+
+            if (dur <= 0 or not has_ar) and shutil.which("ffprobe"):
+                try:
+                    cmd = [
+                        "ffprobe", "-v", "quiet",
+                        "-show_entries", "format=duration:stream=codec_type:stream_tags=language,title",
+                        "-of", "json", file_path_str
+                    ]
+                    res = subprocess.run(cmd, capture_output=True, text=True, timeout=1.5)
+                    if res.returncode == 0 and res.stdout:
+                        data = json.loads(res.stdout)
+                        if dur <= 0:
+                            raw_d = (data.get("format") or {}).get("duration")
+                            if raw_d:
+                                dur = float(raw_d)
+                                self.config_mgr.set_media_progress(file_path_str, float(p_info.get("position", 0.0) or 0.0), dur)
+                        if not has_ar:
+                            for st in data.get("streams", []):
+                                if st.get("codec_type") == "subtitle":
+                                    tags = st.get("tags") or {}
+                                    lang = _normalize_short_lang(tags.get("language") or "", tags.get("title") or "")
+                                    if lang == "ar":
+                                        has_ar = True
+                                        break
+                except Exception:
+                    pass
+
+            mins, secs = divmod(int(dur), 60)
+            hrs, mins = divmod(mins, 60)
+            dur_str = f"{hrs}h {mins:02d}m" if hrs > 0 else (f"{mins}m {secs:02d}s" if mins > 0 else (f"{secs}s" if secs > 0 else ""))
+            size_str = ""
+            try:
+                size_str = self._format_size(os.path.getsize(file_path_str))
+            except OSError:
+                pass
+            self.signals.episodeQuickDetailsReady.emit(file_path_str, dur_str, size_str, has_ar)
+
+        self._run_bg_task(_probe_worker)
+
+    @Slot(str, result=dict)
+    def getEpisodeDetailedInfo(self, file_path_str: str) -> dict:
+        """Non-blocking instant return from cache; schedules background ffprobe if needed."""
+        if not file_path_str:
+            return {"duration_str": "", "size_str": "", "has_arabic_sub": False, "sub_tag": ""}
+        if file_path_str in self._ep_quick_details_cache:
+            return self._ep_quick_details_cache[file_path_str]
+        self.requestEpisodeDetailedInfoAsync(file_path_str)
+        return {"duration_str": "", "size_str": "", "has_arabic_sub": False, "sub_tag": ""}
+
+    def _on_folder_media_summary_ready(self, folder_path: str, summary: dict):
+        self._folder_summary_cache[folder_path] = summary
+        self.folderMediaSummaryChanged.emit(folder_path, summary)
+
+    def _resolve_folder_poster_candidate(self, target_dir_abs: str) -> str:
+        jf_meta = self.jf_bridge.get_cached_item(target_dir_abs) or {}
+        p_cand = jf_meta.get("poster", "")
+
+        # Fallback 1: If current folder is Season subfolder, check parent series
+        if not p_cand and self.jf_bridge.is_season_folder_name(Path(target_dir_abs).name):
+            parent_dir = str(Path(target_dir_abs).parent)
+            parent_meta = self.jf_bridge.get_cached_item(parent_dir) or {}
+            p_cand = parent_meta.get("poster", "")
+
+        # Fallback 2: Airing Tracker cached poster
+        if not p_cand:
+            links_map = dict(self.config_mgr.get("airing_links", {}) or {})
+            for aid_str, l_path in links_map.items():
+                if l_path:
+                    abs_l = os.path.abspath(l_path)
+                    if abs_l == target_dir_abs or target_dir_abs.startswith(abs_l.rstrip(os.sep) + os.sep) or abs_l.startswith(target_dir_abs.rstrip(os.sep) + os.sep):
+                        p_air = self.airing_tracker.get_cached_poster_path(str(aid_str))
+                        if p_air and os.path.exists(p_air):
+                            p_cand = p_air
+                            break
+
+        # Fallback 3: Local artwork on disk (poster, cover, folder)
+        if not p_cand and os.path.isdir(target_dir_abs):
+            search_dirs = [target_dir_abs]
+            if self.jf_bridge.is_season_folder_name(Path(target_dir_abs).name):
+                search_dirs.append(str(Path(target_dir_abs).parent))
+            for s_dir in search_dirs:
+                for img_name in ("poster.jpg", "poster.png", "cover.jpg", "cover.png", "folder.jpg", "folder.png"):
+                    fp = os.path.join(s_dir, img_name)
+                    if os.path.isfile(fp):
+                        p_cand = fp
+                        break
+                if p_cand:
+                    break
+        return p_cand
 
     @Slot(str, result=dict)
     def getFolderMediaSummary(self, folder_path_str: str) -> dict:
-        """Calculates total episodes, accurate total duration, total disk size, and resume state for Show header."""
+        """Returns cached/fast summary immediately on GUI thread and refines total duration asynchronously."""
         target_dir = os.path.abspath(folder_path_str) if folder_path_str else ""
         if not target_dir or not os.path.isdir(target_dir):
             return {}
 
-        total_bytes = 0
-        total_duration = 0.0
-        episode_count = 0
-        has_watched_any = False
+        jf_meta = self.jf_bridge.get_cached_item(target_dir) or {}
+        is_season = self.jf_bridge.is_season_folder_name(Path(target_dir).name)
+        parent_meta = self.jf_bridge.get_cached_item(str(Path(target_dir).parent)) if is_season else {}
+
+        resolved_poster = self._resolve_folder_poster_candidate(target_dir)
         resume_ep_path = self._find_resume_episode_in_folder(target_dir)
-
-        try:
-            for root, _, files in os.walk(target_dir):
-                for f in files:
-                    ext = Path(f).suffix.lower()
-                    if ext in VIDEO_EXTS and not f.startswith("."):
-                        episode_count += 1
-                        fp = os.path.join(root, f)
-                        try:
-                            st = os.stat(fp)
-                            total_bytes += st.st_size
-                        except OSError:
-                            pass
-                        p_info = self.config_mgr.get_media_progress(fp)
-                        dur = float(p_info.get("duration", 0.0) or 0.0)
-                        if dur <= 0 and shutil.which("ffprobe"):
-                            try:
-                                pr = subprocess.run([
-                                    "ffprobe", "-v", "error", "-show_entries", "format=duration",
-                                    "-of", "default=noprint_wrappers=1:nokey=1", fp
-                                ], capture_output=True, text=True, timeout=1.0)
-                                if pr.returncode == 0 and pr.stdout.strip():
-                                    dur = float(pr.stdout.strip())
-                                    self.config_mgr.set_media_progress(fp, float(p_info.get("position", 0.0) or 0.0), dur)
-                            except Exception:
-                                pass
-                        total_duration += dur
-                        if p_info.get("watched") or float(p_info.get("progress", 0.0) or 0.0) > 0.02:
-                            has_watched_any = True
-        except Exception:
-            pass
-
         resume_info = {}
-        resume_progress_ratio = 0.0
         if resume_ep_path and os.path.exists(resume_ep_path):
             p_inf = self.config_mgr.get_media_progress(resume_ep_path)
             pos = float(p_inf.get("position", 0.0) or 0.0)
             dur = float(p_inf.get("duration", 0.0) or 0.0)
-            if dur > 0:
-                resume_progress_ratio = min(1.0, max(0.0, pos / dur))
+            ratio = min(1.0, max(0.0, pos / dur)) if dur > 0 else 0.0
             badge, ep_v = self._parse_episode_info(Path(resume_ep_path).name)
             mins, secs = divmod(int(pos), 60)
             resume_info = {
@@ -2568,31 +2626,95 @@ class FileManagerBackend(QObject):
                 "position": pos,
                 "duration": dur,
                 "time_str": f"{mins:02d}:{secs:02d}" if pos > 5.0 else "",
-                "ratio": resume_progress_ratio,
+                "ratio": ratio,
                 "is_resumable": pos > 5.0 and not p_inf.get("watched", False)
             }
 
-        # Format Total Duration accurately (e.g. 5h 24m or 48m)
-        tot_mins = int(total_duration // 60)
-        tot_hrs, rem_mins = divmod(tot_mins, 60)
-        dur_str = f"{tot_hrs}h {rem_mins}m" if tot_hrs > 0 else (f"{rem_mins}m" if rem_mins > 0 else "-")
+        def _summary_worker():
+            total_bytes = 0
+            total_duration = 0.0
+            episode_count = 0
+            season_count = 0
+            has_seasons = False
 
-        jf_meta = self.jf_bridge.get_cached_item(target_dir) or {}
-        year = jf_meta.get("year", "")
-        rating = jf_meta.get("rating", "")
-        overview = jf_meta.get("overview", "")
-        poster = jf_meta.get("poster", "")
+            try:
+                # Detect sub-season structure
+                with os.scandir(target_dir) as top_it:
+                    for te in top_it:
+                        if te.is_dir() and not te.name.startswith("."):
+                            if self.jf_bridge.is_season_folder_name(te.name):
+                                season_count += 1
+                                has_seasons = True
+
+                for root_d, _, files in os.walk(target_dir):
+                    for f in files:
+                        if Path(f).suffix.lower() in VIDEO_EXTS and not f.startswith("."):
+                            episode_count += 1
+                            fp = os.path.join(root_d, f)
+                            try:
+                                total_bytes += os.path.getsize(fp)
+                            except OSError:
+                                pass
+                            p_info = self.config_mgr.get_media_progress(fp)
+                            dur = float(p_info.get("duration", 0.0) or 0.0)
+                            total_duration += dur
+            except Exception:
+                pass
+
+            tot_mins = int(total_duration // 60)
+            tot_hrs, rem_mins = divmod(tot_mins, 60)
+            dur_str = f"{tot_hrs}h {rem_mins}m" if tot_hrs > 0 else (f"{rem_mins}m" if rem_mins > 0 else "-")
+
+            disp_title = jf_meta.get("title")
+            if not disp_title:
+                if is_season and parent_meta.get("title"):
+                    disp_title = f"{parent_meta.get('title')} — {Path(target_dir).name}"
+                else:
+                    disp_title = Path(target_dir).name
+
+            disp_overview = jf_meta.get("overview") or parent_meta.get("overview") or ""
+
+            res_summary = {
+                "title": disp_title,
+                "path": target_dir,
+                "episode_count": episode_count,
+                "season_count": season_count,
+                "has_seasons": has_seasons,
+                "total_size": self._format_size(total_bytes),
+                "total_duration": dur_str,
+                "year": str(jf_meta.get("year", "")) if jf_meta.get("year") else (str(parent_meta.get("year", "")) if parent_meta.get("year") else ""),
+                "rating": str(jf_meta.get("rating", "")) if jf_meta.get("rating") else (str(parent_meta.get("rating", "")) if parent_meta.get("rating") else ""),
+                "overview": disp_overview,
+                "poster": resolved_poster,
+                "resume": resume_info
+            }
+            self.signals.folderMediaSummaryReady.emit(target_dir, res_summary)
+
+        self._run_bg_task(_summary_worker)
+
+        if target_dir in self._folder_summary_cache:
+            cached = dict(self._folder_summary_cache[target_dir])
+            cached["resume"] = resume_info
+            if resolved_poster and not cached.get("poster"):
+                cached["poster"] = resolved_poster
+            return cached
+
+        default_title = jf_meta.get("title")
+        if not default_title:
+            default_title = f"{parent_meta.get('title')} — {Path(target_dir).name}" if (is_season and parent_meta.get("title")) else Path(target_dir).name
 
         return {
-            "title": jf_meta.get("title") or Path(target_dir).name,
+            "title": default_title,
             "path": target_dir,
-            "episode_count": episode_count,
-            "total_size": self._format_size(total_bytes),
-            "total_duration": dur_str,
-            "year": str(year) if year else "",
-            "rating": str(rating) if rating else "",
-            "overview": overview,
-            "poster": poster,
+            "episode_count": 0,
+            "season_count": 0,
+            "has_seasons": False,
+            "total_size": "Calculating...",
+            "total_duration": "…",
+            "year": str(jf_meta.get("year", "")) if jf_meta.get("year") else "",
+            "rating": str(jf_meta.get("rating", "")) if jf_meta.get("rating") else "",
+            "overview": jf_meta.get("overview") or parent_meta.get("overview") or "",
+            "poster": resolved_poster,
             "resume": resume_info
         }
 
@@ -3773,21 +3895,22 @@ class FileManagerBackend(QObject):
                 stderr=subprocess.DEVNULL
             )
 
-            # Always run the in-app MPV session monitor alongside the daemon so progress & resume never fail!
-            if use_hdr:
-                self._active_hdr_pids.add(int(proc.pid))
-            monitor = MpvSessionMonitorTask(
-                abs_clicked,
-                sock_path,
-                proc,
-                bool(use_hdr),
-                initial_pos,
-                self.config_mgr.get_media_progress,
-                self.signals,
-                jf_session_meta,
-                stream_to_local
-            )
-            QThreadPool.globalInstance().start(monitor)
+            # Avoid duplicate MPV tracking when background media daemon is alive; run in-app monitor only as fallback
+            if not self._is_daemon_process_alive():
+                if use_hdr:
+                    self._active_hdr_pids.add(int(proc.pid))
+                monitor = MpvSessionMonitorTask(
+                    abs_clicked,
+                    sock_path,
+                    proc,
+                    bool(use_hdr),
+                    initial_pos,
+                    self.config_mgr.get_media_progress,
+                    self.signals,
+                    jf_session_meta,
+                    stream_to_local
+                )
+                QThreadPool.globalInstance().start(monitor)
 
         QThreadPool.globalInstance().start(_worker)
 
@@ -3941,7 +4064,7 @@ class FileManagerBackend(QObject):
         if target_path in ("recent://", "trash://"):
             target_path = str(Path.home())
         main_script = Path(__file__).resolve().parent.parent / "main.py"
-        cmd_detach = [sys.executable, target_path] if getattr(sys, "frozen", False) else [sys.executable, str(main_script), target_path]
+        cmd_detach = [sys.executable, "--new-window", target_path] if getattr(sys, "frozen", False) else [sys.executable, str(main_script), "--new-window", target_path]
         try:
             subprocess.Popen(
                 cmd_detach,
@@ -3956,52 +4079,85 @@ class FileManagerBackend(QObject):
 
     @Slot(str, str, str)
     def startSystemDrag(self, file_path_str: str, display_name: str = "", icon_glyph: str = "📄"):
+        if getattr(self, "_drag_in_progress", False):
+            return
+        p = Path(file_path_str)
+        if not p.exists():
+            return
+        targets = list(self._selected_paths) if (file_path_str in self._selected_paths and len(self._selected_paths) > 1) else [file_path_str]
+        valid_paths = [Path(fp).resolve() for fp in targets if os.path.exists(fp)]
+        if not valid_paths:
+            return
+
+        self._drag_in_progress = True
+
+        def _exec_deferred_drag():
+            try:
+                app_inst = QGuiApplication.instance()
+                dpr = app_inst.primaryScreen().devicePixelRatio() if (app_inst and app_inst.primaryScreen()) else 1.0
+                drag_parent = app_inst.focusWindow() if (app_inst and app_inst.focusWindow()) else self
+                drag = QDrag(drag_parent)
+                mime = QMimeData()
+                urls = [QUrl.fromLocalFile(str(vp)) for vp in valid_paths]
+                mime.setUrls(urls)
+                mime.setText("\n".join(str(vp) for vp in valid_paths))
+                drag.setMimeData(mime)
+
+                label = f"{len(valid_paths)} items selected" if len(valid_paths) > 1 else (display_name if display_name else p.name)
+                if len(label) > 26:
+                    label = label[:23] + "..."
+                w_px, h_px = int(228 * dpr), int(40 * dpr)
+                pm = QPixmap(w_px, h_px)
+                pm.setDevicePixelRatio(dpr)
+                pm.fill(Qt.GlobalColor.transparent)
+                painter = QPainter(pm)
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+                painter.setBrush(QColor(30, 30, 36, 240))
+                painter.setPen(QColor(self.accentColor))
+                painter.drawRoundedRect(1, 1, 226, 38, 8, 8)
+                painter.setPen(QColor(248, 250, 252))
+                font = QFont()
+                font.setPixelSize(13)
+                font.setBold(True)
+                painter.setFont(font)
+                painter.drawText(12, 25, f"{icon_glyph}  {label}")
+                painter.end()
+                drag.setPixmap(pm)
+                drag.setHotSpot(pm.rect().topLeft())
+
+                drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction | Qt.DropAction.LinkAction)
+            except Exception:
+                pass
+            finally:
+                self._drag_in_progress = False
+
+        QTimer.singleShot(0, _exec_deferred_drag)
+
+    @Slot(str, str, result=bool)
+    def isSameFilesystem(self, path_a: str, path_b: str) -> bool:
         try:
-            p = Path(file_path_str)
-            if not p.exists():
-                return
-            targets = list(self._selected_paths) if (file_path_str in self._selected_paths and len(self._selected_paths) > 1) else [file_path_str]
-            valid_paths = [Path(fp).resolve() for fp in targets if os.path.exists(fp)]
-            if not valid_paths:
-                return
-
-            drag = QDrag(self)
-            mime = QMimeData()
-            urls = [QUrl.fromLocalFile(str(vp)) for vp in valid_paths]
-            mime.setUrls(urls)
-            mime.setText("\n".join(str(vp) for vp in valid_paths))
-            drag.setMimeData(mime)
-
-            # Render a clean native drag badge pixmap so external apps & Wayland compositor show it
-            label = f"{len(valid_paths)} items selected" if len(valid_paths) > 1 else (display_name if display_name else p.name)
-            if len(label) > 26:
-                label = label[:23] + "..."
-            pm = QPixmap(220, 38)
-            pm.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(pm)
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-            painter.setBrush(QColor(30, 30, 36, 235))
-            painter.setPen(QColor(0, 120, 212))
-            painter.drawRoundedRect(1, 1, 218, 36, 8, 8)
-            painter.setPen(QColor(248, 250, 252))
-            font = QFont()
-            font.setPixelSize(13)
-            font.setBold(True)
-            painter.setFont(font)
-            painter.drawText(12, 24, f"{icon_glyph}  {label}")
-            painter.end()
-            drag.setPixmap(pm)
-            drag.setHotSpot(pm.rect().topLeft())
-
-            drag.exec(Qt.DropAction.CopyAction | Qt.DropAction.MoveAction | Qt.DropAction.LinkAction)
-        except Exception:
-            pass
+            if not path_a or not path_b:
+                return False
+            return os.stat(path_a).st_dev == os.stat(path_b).st_dev
+        except OSError:
+            return False
 
     @Slot(list, str, result=list)
     def filterValidDropSources(self, urls_list: list, dest_dir_str: str) -> list:
         """Filters out any source files that already reside directly inside dest_dir_str."""
-        if not dest_dir_str or dest_dir_str in ("recent://", "trash://"):
+        if not dest_dir_str or dest_dir_str == "recent://":
             return []
+        if dest_dir_str == "trash://":
+            valid_trash = []
+            for raw_u in urls_list:
+                u = str(raw_u).strip()
+                if u.startswith("file://"):
+                    u = QUrl(u).toLocalFile() or u[7:]
+                if u and os.path.exists(u):
+                    abs_u = os.path.abspath(u)
+                    if abs_u not in PROTECTED_SYSTEM_PATHS and abs_u not in valid_trash:
+                        valid_trash.append(abs_u)
+            return valid_trash
         try:
             dest_resolved = os.path.abspath(dest_dir_str)
         except Exception:
@@ -4153,9 +4309,20 @@ class FileManagerBackend(QObject):
     def searchResults(self):
         return self._search_results
 
+    def _on_cache_size_calculated(self, size_str: str):
+        if self._cached_cache_size_str != size_str:
+            self._cached_cache_size_str = size_str
+            self.cacheSizeChanged.emit()
+
+    def _refresh_cache_size_async(self):
+        def _calc():
+            sz = self.config_mgr.get_cache_size_bytes()
+            self.signals.cacheSizeCalculated.emit(self._format_size(sz))
+        self._run_bg_task(_calc)
+
     @Property(str, notify=cacheSizeChanged)
     def currentCacheSize(self):
-        return self._format_size(self.config_mgr.get_cache_size_bytes())
+        return self._cached_cache_size_str
 
     @Property(int, notify=maxCacheMbChanged)
     def maxCacheMb(self):
@@ -4744,6 +4911,7 @@ class FileManagerBackend(QObject):
             self._pending_highlight_paths = []
             if to_sel:
                 self._selected_paths = to_sel
+                self.file_model.sync_selection_paths(self._selected_paths)
                 first_r = self.file_model.get_row_for_path(to_sel[0])
                 ent = self.file_model.get_entry_at(first_r)
                 if ent:
@@ -4755,6 +4923,7 @@ class FileManagerBackend(QObject):
             surviving = [p for p in self._selected_paths if self.file_model.get_row_for_path(p) >= 0]
             if surviving != self._selected_paths:
                 self._selected_paths = surviving
+                self.file_model.sync_selection_paths(self._selected_paths)
                 if surviving:
                     first_r = self.file_model.get_row_for_path(surviving[0])
                     ent = self.file_model.get_entry_at(first_r)
@@ -4769,6 +4938,7 @@ class FileManagerBackend(QObject):
         elif not is_same_dir:
             self._selected_item = {}
             self._selected_paths = []
+            self.file_model.sync_selection_paths([])
             self._last_selected_row = -1
             self.selectedItemChanged.emit()
             self.selectedPathsChanged.emit()
@@ -4898,8 +5068,14 @@ class FileManagerBackend(QObject):
         return f"{val:.1f} PB"
 
     @Slot(str)
-    def requestItemThumbnail(self, file_path_str: str):
-        self.thumb_mgr.request_thumbnail(file_path_str)
+    @Slot(str, bool)
+    def requestItemThumbnail(self, file_path_str: str, is_high_priority: bool = False):
+        self.thumb_mgr.request_thumbnail(file_path_str, is_high_priority=is_high_priority)
+
+    @Slot(list)
+    def updateActiveVisibleWindow(self, visible_paths: list):
+        if visible_paths:
+            self.thumb_mgr.prune_stale_requests(set(visible_paths))
 
     @Slot(str)
     def requestFolderPreview(self, folder_path_str: str):
@@ -4925,12 +5101,13 @@ class FileManagerBackend(QObject):
         QThreadPool.globalInstance().start(_bg_worker)
 
     def _on_airing_minute_tick(self):
-        # Fast local timer check + trigger background sync only if 30m/6h TTL expired
+        # Fast local timer check (only send OS notification from app if background daemon is not running, preventing duplicates!)
         try:
-            aired = self.airing_tracker.check_and_advance_airing_timers_sync(send_os_notification=True)
+            daemon_alive = self._is_daemon_process_alive()
+            aired = self.airing_tracker.check_and_advance_airing_timers_sync(send_os_notification=not daemon_alive)
             if str(self._current_path) == "mediahub://":
                 self.refreshMediaHub()
-            if self.airing_tracker.needs_background_sync():
+            if not daemon_alive and self.airing_tracker.needs_background_sync():
                 self._trigger_background_airing_sync(force=False)
         except Exception:
             pass
@@ -5423,34 +5600,37 @@ class FileManagerBackend(QObject):
                 else:
                     subprocess.Popen(["xdg-open", str(path)], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-        @Slot(str, bool)
-        def runExecutable(self, file_path_str: str, in_terminal: bool = False):
-            if not file_path_str or not os.path.isfile(file_path_str):
-                return
-            try:
-                abs_p = os.path.abspath(file_path_str)
-                parent_d = os.path.dirname(abs_p)
-                if not os.access(abs_p, os.X_OK):
-                    st = os.stat(abs_p)
-                    os.chmod(abs_p, st.st_mode | stat_mod.S_IXUSR)
-                if in_terminal:
-                    term_env = os.environ.get("TERMINAL")
-                    terms = [[term_env, "-e", abs_p]] if term_env else []
-                    terms += [
-                        ["kitty", abs_p],
-                        ["alacritty", "-e", abs_p],
-                        ["ghostty", "-e", abs_p],
-                        ["konsole", "-e", abs_p],
-                        ["gnome-terminal", "--", abs_p],
-                        ["xterm", "-e", abs_p],
-                    ]
-                    for t in terms:
-                        if t[0] and shutil.which(t[0]):
-                            subprocess.Popen(t, cwd=parent_d, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                            return
-                subprocess.Popen([abs_p], cwd=parent_d, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            except Exception as e:
-                self.toastMessage.emit(f"⚠️ Failed to run executable: {e}")
+    @Slot(str, bool)
+    def runExecutable(self, file_path_str: str, in_terminal: bool = False):
+        if not file_path_str or not os.path.isfile(file_path_str):
+            return
+        try:
+            abs_p = os.path.abspath(file_path_str)
+            parent_d = os.path.dirname(abs_p)
+            if not os.access(abs_p, os.X_OK):
+                st = os.stat(abs_p)
+                os.chmod(abs_p, st.st_mode | stat_mod.S_IXUSR)
+            if in_terminal:
+                term_env = os.environ.get("TERMINAL")
+                terms = [[term_env, "-e", abs_p]] if term_env else []
+                terms += [
+                    ["xdg-terminal-exec", abs_p],
+                    ["kitty", abs_p],
+                    ["foot", abs_p],
+                    ["wezterm", "start", "--", abs_p],
+                    ["alacritty", "-e", abs_p],
+                    ["ghostty", "-e", abs_p],
+                    ["konsole", "-e", abs_p],
+                    ["gnome-terminal", "--", abs_p],
+                    ["xterm", "-e", abs_p],
+                ]
+                for t in terms:
+                    if t[0] and shutil.which(t[0]):
+                        subprocess.Popen(t, cwd=parent_d, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        return
+            subprocess.Popen([abs_p], cwd=parent_d, start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            self.toastMessage.emit(f"⚠️ Failed to run executable: {e}")
 
     @Slot(str, result=bool)
     def isVideoFile(self, file_path_str: str) -> bool:
@@ -5493,16 +5673,6 @@ class FileManagerBackend(QObject):
             return
         if shutil.which("mpv"):
             self._launch_in_mpv_with_tracking(file_path_str, hdr_mode=hdr_mode)
-
-    @Slot(str, str)
-    def openWithApp(self, file_path_str: str, app_cmd: str):
-        try:
-            if app_cmd == "mpv" and Path(file_path_str).suffix.lower() in VIDEO_EXTS:
-                self._launch_in_mpv_with_tracking(file_path_str, hdr_mode=False)
-                return
-            subprocess.Popen([app_cmd, file_path_str], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        except Exception:
-            pass
 
     @Slot(str, result=str)
     def getDefaultApp(self, file_path_str: str):
@@ -5701,11 +5871,45 @@ class FileManagerBackend(QObject):
             if target.exists():
                 self.renameConflictDetected.emit(str(p), clean_new, str(target))
                 return
+            old_abs = str(p)
+            new_abs = str(target)
             p.rename(target)
-            self.toastMessage.emit(f"✔ Renamed to '{clean_new}'")
+            self._undo_stack.append({"type": "rename", "old_path": old_abs, "new_path": new_abs})
+            self.toastMessage.emit(f"✔ Renamed to '{clean_new}' (Ctrl+Z to Undo)")
+            self.selectMultiplePaths([new_abs])
             self.refresh()
         except Exception as e:
             self.toastMessage.emit(f"⚠️ Rename failed: {e}")
+
+    @Slot()
+    def undoLastAction(self):
+        if not self._undo_stack:
+            self.toastMessage.emit("ℹ️ Nothing to undo")
+            return
+        act = self._undo_stack.pop()
+        kind = act.get("type")
+        try:
+            if kind == "rename":
+                np = Path(act["new_path"])
+                op = Path(act["old_path"])
+                if np.exists() and not op.exists():
+                    np.rename(op)
+                    self.toastMessage.emit(f"↩ Undid rename: restored '{op.name}'")
+                    self.refresh()
+            elif kind == "move":
+                src = Path(act["src"])
+                dst = Path(act["dst"])
+                if dst.exists() and not src.exists():
+                    shutil.move(str(dst), str(src))
+                    self.toastMessage.emit(f"↩ Undid move: restored '{src.name}'")
+                    self.refresh()
+            elif kind == "trash":
+                trashed_items = act.get("items") or []
+                for t_path in trashed_items:
+                    if os.path.exists(t_path):
+                        self.restoreFromTrash(t_path)
+        except Exception as e:
+            self.toastMessage.emit(f"⚠️ Undo failed: {e}")
 
     @Slot(str, str, str)
     def resolveRenameByRenamingConflict(self, original_path_str: str, desired_name: str, new_name_for_conflicting: str):
@@ -5902,6 +6106,7 @@ class FileManagerBackend(QObject):
                     else:
                         if operation == "move":
                             shutil.move(str(src), str(target))
+                            self._undo_stack.append({"type": "move", "src": str(src), "dst": str(target)})
                         elif operation == "copy":
                             if src.is_dir():
                                 shutil.copytree(str(src), str(target), symlinks=True)
@@ -6205,7 +6410,23 @@ class FileManagerBackend(QObject):
         self.config_mgr.set_folder_view(str(self._current_path), self._view_mode, self._sort_by, self._sort_ascending)
         self.sortByChanged.emit()
         self.sortOrderChanged.emit()
-        self.refresh()
+
+        # Sort in-memory immediately without re-scanning the disk!
+        if self.file_model._entries and str(self._current_path) not in ("mediahub://", "favorites://"):
+            entries_copy = [dict(e) for e in self.file_model._entries]
+            in_lib, is_movie = self._check_path_in_media_library(str(self._current_path))
+            is_ep_folder = (in_lib and not is_movie and self._is_predominantly_video_folder(entries_copy))
+            if is_ep_folder:
+                for e in entries_copy:
+                    if not e["is_dir"] and Path(e["name"]).suffix.lower() in VIDEO_EXTS:
+                        _, ep_s = self._parse_episode_info(e["name"])
+                        e["_ep_sort"] = ep_s
+            self._sort_entries(entries_copy, is_series_lib=is_ep_folder)
+            for e in entries_copy:
+                e.pop("_ep_sort", None)
+            self.file_model.set_entries(entries_copy, context_key=str(self._current_path), force_reset=True)
+        else:
+            self.refresh()
 
     @Slot()
     def applyCurrentLayoutToSubfolders(self):
@@ -6235,6 +6456,7 @@ class FileManagerBackend(QObject):
                 self._selected_paths = merged
             else:
                 self._selected_paths = range_paths
+            self.file_model.sync_selection_paths(self._selected_paths)
             self.selectedPathsChanged.emit()
         elif ctrl_pressed:
             updated_list = list(self._selected_paths)
@@ -6245,6 +6467,7 @@ class FileManagerBackend(QObject):
             self._selected_paths = updated_list
             if row_idx >= 0:
                 self._last_selected_row = row_idx
+            self.file_model.sync_selection_paths(self._selected_paths)
             self.selectedPathsChanged.emit()
             if not self._selected_paths:
                 self._selected_item = {}
@@ -6262,6 +6485,7 @@ class FileManagerBackend(QObject):
             self._selected_paths = [path]
             if row_idx >= 0:
                 self._last_selected_row = row_idx
+            self.file_model.sync_selection_paths(self._selected_paths)
             self.selectedPathsChanged.emit()
 
         if self.picker_ctx.isActive:
@@ -6297,10 +6521,16 @@ class FileManagerBackend(QObject):
                             task = MediaInfoTask(path, saved_prog.get("ext_sub", ""), self.signals)
                             self.thread_pool.start(task)
                     elif st.st_size <= 64 * 1024:
-                        with open(p, "rb") as f:
-                            chunk = f.read(1500)
-                            if b"\0" not in chunk:
-                                preview_text = chunk.decode("utf-8", errors="ignore")
+                        target_txt_p = str(p)
+                        def _read_txt_async(tp=target_txt_p):
+                            try:
+                                with open(tp, "rb") as f:
+                                    chunk = f.read(1500)
+                                    if b"\0" not in chunk:
+                                        self.signals.textPreviewReady.emit(tp, chunk.decode("utf-8", errors="ignore"))
+                            except Exception:
+                                pass
+                        self._run_bg_task(_read_txt_async)
             except Exception:
                 pass
         elif is_dir and p.exists():
@@ -6313,10 +6543,11 @@ class FileManagerBackend(QObject):
                 size = self._format_size(cached_sz)
             else:
                 size = "Calculating..."
-                if str(p) not in self._calculating_folders:
-                    self._calculating_folders.add(str(p))
-                    task = FolderSizeTask(str(p), self.signals)
-                    self.thread_pool.start(task)
+                self._folder_calc_token += 1
+                cur_tok = self._folder_calc_token
+                self._calculating_folders.add(str(p))
+                task = FolderSizeTask(str(p), cur_tok, lambda: self._folder_calc_token, self.signals)
+                self.thread_pool.start(task)
 
         # Multi-selection combined count & recursive subfolder size calculation
         if len(self._selected_paths) > 1:
@@ -6388,7 +6619,16 @@ class FileManagerBackend(QObject):
         }
         self.selectedItemChanged.emit()
 
+    def _on_text_preview_ready(self, file_path_str: str, preview_txt: str):
+        if self._selected_item.get("path") == file_path_str:
+            updated = dict(self._selected_item)
+            updated["preview_text"] = preview_txt
+            self._selected_item = updated
+            self.selectedItemChanged.emit()
+
     def _on_media_info_ready(self, file_path_str, info):
+        if len(self._media_info_cache) > 500:
+            self._media_info_cache.clear()
         self._media_info_cache[file_path_str] = dict(info)
         if self._selected_item.get("path") == file_path_str:
             updated = dict(self._selected_item)
@@ -6456,7 +6696,8 @@ class FileManagerBackend(QObject):
         return self.file_model.get_row_for_path(cur_path)
 
     @Slot(list, bool)
-    def setRubberBandSelection(self, row_indices: list, append_ctrl: bool = False):
+    @Slot(list, bool, list)
+    def setRubberBandSelection(self, row_indices: list, append_ctrl: bool = False, base_paths: list = None):
         paths = []
         last_ent = None
         for r in row_indices:
@@ -6467,14 +6708,18 @@ class FileManagerBackend(QObject):
                 self._last_selected_row = int(r)
 
         if append_ctrl:
-            merged = list(self._selected_paths)
+            seed = list(base_paths) if base_paths is not None else list(self._selected_paths)
             for p in paths:
-                if p not in merged:
-                    merged.append(p)
-            self._selected_paths = merged
+                if p not in seed:
+                    seed.append(p)
+            self._selected_paths = seed
         else:
             self._selected_paths = paths
 
+        if self.file_model._selected_set == set(self._selected_paths):
+            return
+
+        self.file_model.sync_selection_paths(self._selected_paths)
         self.selectedPathsChanged.emit()
         if self.picker_ctx.isActive:
             file_sels = [sp for sp in self._selected_paths if os.path.isfile(sp)]
@@ -6532,6 +6777,7 @@ class FileManagerBackend(QObject):
             if ent:
                 all_paths.append(ent["path"])
         self._selected_paths = all_paths
+        self.file_model.sync_selection_paths(self._selected_paths)
         self.selectedPathsChanged.emit()
         if not self._selected_item and total > 0:
             first = self.file_model.get_entry_at(0)
@@ -6542,6 +6788,7 @@ class FileManagerBackend(QObject):
     def clearSelection(self):
         self._selected_item = {}
         self._selected_paths = []
+        self.file_model.sync_selection_paths([])
         self._last_selected_row = -1
         self.selectedItemChanged.emit()
         self.selectedPathsChanged.emit()
@@ -6644,6 +6891,7 @@ class FileManagerBackend(QObject):
             if matched:
                 self._pending_highlight_paths = []
                 self._selected_paths = matched
+                self.file_model.sync_selection_paths(self._selected_paths)
                 r = self.file_model.get_row_for_path(matched[0])
                 ent = self.file_model.get_entry_at(r)
                 if ent:
@@ -6932,16 +7180,20 @@ class FileManagerBackend(QObject):
     def setMaxCacheMb(self, mb: int):
         self.config_mgr.set("max_cache_mb", mb)
         self.maxCacheMbChanged.emit()
-        self.config_mgr.clean_cache()
-        self.cacheSizeChanged.emit()
+        def _clean_async():
+            self.config_mgr.clean_cache()
+            self._refresh_cache_size_async()
+        self._run_bg_task(_clean_async)
 
     @Slot()
     def clearCache(self):
-        self.config_mgr.clean_cache(force_all=True)
         self.thumb_mgr.folder_cache.clear()
         self.thumb_mgr.requested.clear()
         self.thumb_mgr.requested_folders.clear()
-        self.cacheSizeChanged.emit()
+        def _clear_all_async():
+            self.config_mgr.clean_cache(force_all=True)
+            self._refresh_cache_size_async()
+        self._run_bg_task(_clear_all_async)
 
     @Property(str, notify=searchScopeChanged)
     def searchScope(self) -> str:
@@ -7063,24 +7315,70 @@ class FileManagerBackend(QObject):
     def getHiddenSidebarItems(self):
         return self.config_mgr.get("hidden_sidebar_paths", [])
 
+    def _ensure_unified_quick_access(self) -> list:
+        raw = list(self.config_mgr.get("custom_quick_access", []) or [])
+        virtual_defaults = [
+            {"name": "Media Hub", "path": "mediahub://", "icon": "🎬", "visible": True},
+            {"name": "Favorites", "path": "favorites://", "icon": "⭐", "visible": True},
+            {"name": "Recently Added", "path": "recent://", "icon": "🕒", "visible": True},
+        ]
+        trash_default = {"name": "Trash", "path": "trash://", "icon": "🗑️", "visible": True}
+
+        existing_paths = {str(x.get("path", "")) for x in raw if isinstance(x, dict)}
+        changed = False
+        for vd in reversed(virtual_defaults):
+            if vd["path"] not in existing_paths:
+                raw.insert(0, dict(vd))
+                existing_paths.add(vd["path"])
+                changed = True
+        if trash_default["path"] not in existing_paths:
+            raw.append(dict(trash_default))
+            changed = True
+
+        for item in raw:
+            if isinstance(item, dict) and "visible" not in item:
+                item["visible"] = True
+                changed = True
+
+        if changed:
+            self.config_mgr.set("custom_quick_access", raw)
+        return raw
+
     @Slot(result=list)
     def getQuickAccessLocations(self):
         hidden = set(self.config_mgr.get("hidden_sidebar_paths", []))
-        configured = self.config_mgr.get("custom_quick_access", [])
-        return [item for item in configured if item["path"] not in hidden and Path(item["path"]).exists()]
+        configured = self._ensure_unified_quick_access()
+        out = []
+        for item in configured:
+            if not isinstance(item, dict):
+                continue
+            p = str(item.get("path", ""))
+            if not p or p in hidden or not item.get("visible", True):
+                continue
+            if p in ("mediahub://", "favorites://", "recent://", "trash://") or Path(p).exists():
+                out.append(item)
+        return out
 
     @Slot(result=list)
     def getAllCustomQuickAccess(self):
-        return self.config_mgr.get("custom_quick_access", [])
+        return self._ensure_unified_quick_access()
 
     @Slot(list)
     def saveCustomQuickAccess(self, items: list):
         self.config_mgr.set("custom_quick_access", items)
         self.sidebarUpdated.emit()
 
+    @Slot(int, bool)
+    def setQuickAccessItemVisible(self, idx: int, visible: bool):
+        items = self._ensure_unified_quick_access()
+        if 0 <= idx < len(items):
+            items[idx]["visible"] = bool(visible)
+            self.config_mgr.set("custom_quick_access", items)
+            self.sidebarUpdated.emit()
+
     @Slot(int, int)
     def moveQuickAccessItem(self, from_idx: int, to_idx: int):
-        items = list(self.config_mgr.get("custom_quick_access", []))
+        items = self._ensure_unified_quick_access()
         if not (0 <= from_idx < len(items)) or not (0 <= to_idx < len(items)) or from_idx == to_idx:
             return
         entry = items.pop(from_idx)
@@ -7739,3 +8037,99 @@ class FileManagerBackend(QObject):
         self._cached_drives = drives
         self._last_drives_ts = now
         return [d for d in drives if d["path"] not in hidden]
+
+    def _load_disk_usage_cache(self) -> dict:
+        if hasattr(self, "_disk_usage_cache_file") and self._disk_usage_cache_file.exists():
+            try:
+                with open(self._disk_usage_cache_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, dict):
+                        return data
+            except Exception:
+                pass
+        return {}
+
+    def _save_disk_usage_cache(self):
+        if hasattr(self, "_disk_usage_cache_file"):
+            self.config_mgr._atomic_write_json(self._disk_usage_cache_file, self._disk_usage_state, indent=2)
+
+    def _trigger_smart_disk_usage_check(self):
+        """
+        Runs every 10 seconds in background:
+        - Checks top-level directory mtimes on each mounted drive.
+        - If a directory mtime changed, computes smart delta or refreshes usage;
+        - Every 60 seconds, verifies exact numbers from the OS (shutil.disk_usage) and saves to disk_usage_cache.json.
+        """
+        def _smart_disk_worker():
+            now_t = time.time()
+            changed_any = False
+            cache_dirty = False
+            drives_snapshot = list(self._cached_drives) if self._cached_drives else []
+
+            for d in drives_snapshot:
+                mount = d.get("path", "")
+                if not mount or not os.path.isdir(mount):
+                    continue
+                rec = self._disk_usage_state.get(mount, {})
+                last_sys_sync = float(rec.get("last_sys_sync", 0.0) or 0.0)
+                saved_dir_mtimes = dict(rec.get("dir_mtimes", {}) or {})
+                cur_dir_mtimes = {}
+                changed_dirs = []
+
+                try:
+                    root_st = os.stat(mount)
+                    cur_dir_mtimes["__root__"] = round(root_st.st_mtime, 2)
+                    if saved_dir_mtimes.get("__root__") != cur_dir_mtimes["__root__"]:
+                        changed_dirs.append(mount)
+                    with os.scandir(mount) as it:
+                        for entry in it:
+                            if entry.is_dir(follow_symlinks=False) and not entry.name.startswith("."):
+                                try:
+                                    st = entry.stat(follow_symlinks=False)
+                                    mt = round(st.st_mtime, 2)
+                                    cur_dir_mtimes[entry.name] = mt
+                                    if saved_dir_mtimes.get(entry.name) != mt:
+                                        changed_dirs.append(entry.path)
+                                except OSError:
+                                    pass
+                except OSError:
+                    continue
+
+                need_os_verify = (now_t - last_sys_sync) >= 60.0 or not rec.get("total_bytes")
+
+                if changed_dirs or need_os_verify:
+                    try:
+                        usage = shutil.disk_usage(mount)
+                        if usage.total > 0:
+                            ratio = round(min(1.0, max(0.0, usage.used / usage.total)), 3)
+                            used_s = self._format_size(usage.used).replace(" ", "")
+                            tot_s = self._format_size(usage.total).replace(" ", "")
+                            u_text = f"{used_s}/{tot_s}"
+
+                            if d.get("usage_text") != u_text or d.get("usage_ratio") != ratio:
+                                d["usage_text"] = u_text
+                                d["total"] = u_text
+                                d["usage_ratio"] = ratio
+                                changed_any = True
+
+                            self._disk_usage_state[mount] = {
+                                "used_bytes": int(usage.used),
+                                "total_bytes": int(usage.total),
+                                "free_bytes": int(usage.free),
+                                "usage_text": u_text,
+                                "usage_ratio": ratio,
+                                "dir_mtimes": cur_dir_mtimes,
+                                "last_changed_dirs": [os.path.basename(p) for p in changed_dirs[:5]],
+                                "last_sys_sync": round(now_t, 2),
+                                "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            }
+                            cache_dirty = True
+                    except Exception:
+                        pass
+
+            if cache_dirty:
+                self._save_disk_usage_cache()
+            if changed_any:
+                self.sidebarUpdated.emit()
+
+        self._run_bg_task(_smart_disk_worker)

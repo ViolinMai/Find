@@ -20,7 +20,8 @@ Rectangle {
             var fn = saveNameInput.text.trim()
             if (fn === "") return
             var targetFull = backend.currentPath + "/" + fn
-            if (backend.checkTransferConflict(targetFull, backend.currentPath)) {
+            var props = backend.getItemProperties(targetFull)
+            if (props && props.path) {
                 saveOverwriteDialog.open()
                 return
             }

@@ -24,6 +24,7 @@ RowLayout {
     readonly property bool isUltraCompactBar: !showNewBtn
 
     function focusPathInput() {
+        pathInput.text = backend ? backend.currentPath : ""
         root.isEditingPath = true
         pathInput.forceActiveFocus()
         pathInput.selectAll()
@@ -981,7 +982,7 @@ RowLayout {
         ToolBtn {
             visible: root.showSettingsBtn
             iconText: "⚙️"
-            onClicked: settingsDialog.open()
+            onClicked: if (root.appWindow) root.appWindow.openSettings()
         }
 
         // Compact Overflow Menu Button (Appears automatically as items hide in reverse priority order)
@@ -1073,13 +1074,9 @@ RowLayout {
                 StyledMenuItem {
                     iconGlyph: "⚙️"
                     text: "Settings"
-                    onTriggered: settingsDialog.open()
+                    onTriggered: if (root.appWindow) root.appWindow.openSettings()
                 }
             }
         }
-    }
-
-    SettingsDialog {
-        id: settingsDialog
     }
 }

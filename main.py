@@ -8,8 +8,9 @@ from urllib.parse import unquote, urlparse
 from pathlib import Path
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtQml import QQmlApplicationEngine
-from PySide6.QtCore import QUrl, QObject, QEvent, Qt, QTimer, qInstallMessageHandler
-from PySide6.QtQuick import QQuickWindow, QQuickItem
+from logging.handlers import RotatingFileHandler
+from PySide6.QtCore import QUrl, QObject, Qt, qInstallMessageHandler
+from PySide6.QtQuick import QQuickWindow
 from PySide6.QtQuickControls2 import QQuickStyle
 from PySide6.QtNetwork import QLocalSocket, QLocalServer
 from core.backend import FileManagerBackend
@@ -20,10 +21,11 @@ def _setup_logging():
     log_dir = Path(xdg_cache) / "find"
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "error.log"
+    rot_handler = RotatingFileHandler(str(log_file), maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8")
     logging.basicConfig(
-        filename=str(log_file),
+        handlers=[rot_handler],
         level=logging.WARNING,
-        format="%(asctime)s [%(levelname)s] %(message)s"
+        format="%(asctime)s [%(levelname)s] [%(name)s] %(message)s"
     )
 
     def _handle_exception(exc_type, exc_value, exc_tb):
@@ -84,171 +86,13 @@ def _normalize_cli_target(raw_arg: str) -> str:
 def _qt_message_filter(mode, context, message):
     if "qt.qpa.wayland.textinput" in message or "disableSurface" in message:
         return
+    logging.warning("Qt/QML: %s", message)
     sys.stderr.write(f"{message}\n")
 
 
-class FastWheelInterceptor(QObject):
-    """
-    High-refresh-rate (240Hz/280Hz) smooth inertial wheel animator.
-    Instead of teleporting contentY in choppy jumps, accumulates target scroll delta
-    and interpolates smoothly every 4ms with exponential easing.
-    """
-    def __init__(self, backend_ref, parent=None):
-        super().__init__(parent)
-        self.backend = backend_ref
-        self._active_anims = {}  # id(flick) -> {"flick": flick, "horiz": bool, "target": float}
-        self._timer = QTimer(self)
-        self._timer.setTimerType(Qt.TimerType.PreciseTimer)
-        self._timer.setInterval(4)  # ~250 FPS smooth interpolation
-        self._timer.timeout.connect(self._tick_smooth_scroll)
-
-    def _is_item_scrollable(self, item: QQuickItem, horiz: bool) -> bool:
-        if not item or not item.isVisible() or not item.isEnabled():
-            return False
-        meta = item.metaObject()
-        cls_name = meta.className() if meta else ""
-        if not any(k in cls_name for k in ("QQuickListView", "QQuickGridView", "QQuickFlickable")):
-            return False
-        try:
-            if horiz:
-                cw = float(item.property("contentWidth") or 0.0)
-                w = float(item.width() or 0.0)
-                return cw > w + 2.0
-            else:
-                ch = float(item.property("contentHeight") or 0.0)
-                h = float(item.height() or 0.0)
-                return ch > h + 2.0
-        except Exception:
-            return False
-
-    def _find_scrollable_at(self, root_item: QQuickItem, pos, horiz: bool):
-        # Scan from deepest visual item upward, or find candidates under cursor
-        candidates = []
-        def _collect(parent_it, cur_p):
-            for child in parent_it.childItems():
-                if not child.isVisible():
-                    continue
-                cp = parent_it.mapToItem(child, cur_p)
-                if child.contains(cp):
-                    if self._is_item_scrollable(child, horiz):
-                        candidates.append((child, cp))
-                    _collect(child, cp)
-
-        _collect(root_item, pos)
-        if candidates:
-            return candidates[-1][0]
-
-        # Upward fallback
-        target = root_item
-        curr_pt = pos
-        while target is not None:
-            child = target.childAt(curr_pt.x(), curr_pt.y())
-            if child is None or not child.isVisible():
-                break
-            curr_pt = target.mapToItem(child, curr_pt)
-            target = child
-
-        curr = target
-        while curr is not None:
-            if self._is_item_scrollable(curr, horiz):
-                return curr
-            curr = curr.parentItem()
-        return None
-
-    def _tick_smooth_scroll(self):
-        if not self._active_anims:
-            self._timer.stop()
-            return
-        finished_keys = []
-        for k, st in list(self._active_anims.items()):
-            flick = st["flick"]
-            horiz = st["horiz"]
-            prop_pos = "contentX" if horiz else "contentY"
-            prop_size = "contentWidth" if horiz else "contentHeight"
-            try:
-                if not flick.isVisible():
-                    finished_keys.append(k)
-                    continue
-                cur = float(flick.property(prop_pos) or 0.0)
-                view_dim = float(flick.width() if horiz else flick.height())
-                max_pos = max(0.0, float(flick.property(prop_size) or 0.0) - view_dim)
-                target = max(0.0, min(max_pos, st["target"]))
-                st["target"] = target
-
-                diff = target - cur
-                if abs(diff) < 0.6:
-                    flick.setProperty(prop_pos, target)
-                    finished_keys.append(k)
-                else:
-                    flick.setProperty(prop_pos, cur + diff * 0.28)
-            except Exception:
-                finished_keys.append(k)
-
-        for fk in finished_keys:
-            self._active_anims.pop(fk, None)
-        if not self._active_anims:
-            self._timer.stop()
-
-    def eventFilter(self, watched, event):
-        if event.type() == QEvent.Type.Wheel and isinstance(watched, QQuickWindow):
-            try:
-                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
-                    return False
-                angle = event.angleDelta()
-                dx = angle.x()
-                dy = angle.y()
-                if dx == 0 and dy == 0:
-                    return False
-
-                pos = event.position()
-                root_item = watched.contentItem()
-                if root_item is None:
-                    return False
-
-                horiz_prefer = abs(dx) > abs(dy)
-                flick = self._find_scrollable_at(root_item, pos, horiz=horiz_prefer)
-                if flick is None and not horiz_prefer:
-                    flick = self._find_scrollable_at(root_item, pos, horiz=True)
-                    if flick is not None:
-                        horiz_prefer = True
-                elif flick is None and horiz_prefer:
-                    flick = self._find_scrollable_at(root_item, pos, horiz=False)
-                    if flick is not None:
-                        horiz_prefer = False
-
-                if flick is not None:
-                    scale = float(self.backend.uiScaleFactor) if self.backend else 1.35
-                    mult = float(self.backend.scrollSpeedMultiplier) if self.backend else 1.25
-                    raw_delta = dx if (horiz_prefer and dx != 0) else dy
-                    notches = raw_delta / 120.0
-                    step = notches * (185.0 * scale * mult)
-
-                    key = (id(flick), horiz_prefer)
-                    prop_pos = "contentX" if horiz_prefer else "contentY"
-                    prop_size = "contentWidth" if horiz_prefer else "contentHeight"
-                    cur_pos = float(flick.property(prop_pos) or 0.0)
-                    view_dim = float(flick.width() if horiz_prefer else flick.height())
-                    max_pos = max(0.0, float(flick.property(prop_size) or 0.0) - view_dim)
-
-                    base_target = self._active_anims[key]["target"] if key in self._active_anims else cur_pos
-                    new_target = max(0.0, min(max_pos, base_target - step))
-                    self._active_anims[key] = {
-                        "flick": flick,
-                        "horiz": horiz_prefer,
-                        "target": new_target
-                    }
-                    if not self._timer.isActive():
-                        self._timer.start()
-                    event.accept()
-                    return True
-            except Exception:
-                pass
-        return False
-
-
 def main():
-    os.environ["QT_QPA_PLATFORM"] = "wayland;xcb"
-    os.environ["QT_LOGGING_RULES"] = "qt.qpa.wayland.textinput=false;qt.qpa.wayland.textinput.warning=false"
+    os.environ.setdefault("QT_QPA_PLATFORM", "wayland;xcb")
+    os.environ.setdefault("QT_LOGGING_RULES", "qt.qpa.wayland.textinput=false;qt.qpa.wayland.textinput.warning=false")
     qInstallMessageHandler(_qt_message_filter)
 
     QQuickWindow.setDefaultAlphaBuffer(True)
@@ -256,6 +100,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="Find - Modern Linux Wayland File Manager & Picker")
     parser.add_argument("--daemon", action="store_true", help="Run background media daemon loop")
+    parser.add_argument("--new-window", action="store_true", help="Force open in a new standalone Find window")
     parser.add_argument("--mh", action="store_true", help="Launch directly in standalone MediaHub Window")
     parser.add_argument("--picker", action="store_true", help="Launch in File/Folder Picker mode")
     parser.add_argument("--folder", action="store_true", help="Select directory only")
@@ -283,8 +128,8 @@ def main():
     app.setOrganizationName("Find")
     app.setDesktopFileName("find")
 
-    # Single-instance check for normal file manager launches (skip for standalone picker dialogs and standalone mediahub)
-    if not is_picker_launch and not is_mediahub_launch:
+    # Single-instance check for normal file manager launches (skip for standalone picker, mediahub, or explicit --new-window)
+    if not is_picker_launch and not is_mediahub_launch and not getattr(args, "new_window", False):
         if _try_send_to_existing_instance(cleaned_paths, bool(args.select)):
             sys.exit(0)
 
@@ -370,9 +215,6 @@ def main():
                 backend.selectMultiplePaths(cleaned_paths)
 
     app.setQuitOnLastWindowClosed(is_mediahub_launch or is_picker_launch)
-    wheel_filter = FastWheelInterceptor(backend, app)
-    app.installEventFilter(wheel_filter)
-
     engine.rootContext().setContextProperty("backend", backend)
 
     qml_dir = Path(__file__).resolve().parent / "ui"

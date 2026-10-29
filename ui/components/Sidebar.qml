@@ -220,37 +220,21 @@ Rectangle {
         clip: true
         boundsBehavior: Flickable.StopAtBounds
 
+        SmoothScroll { target: sideFlick; orientation: Qt.Vertical }
+
         ColumnLayout {
             id: sideCol
             width: sideFlick.width
             spacing: 3
 
-            // QUICK ACCESS SECTION (Includes Virtual Favorites Folder & Recently Added)
+            // UNIFIED QUICK ACCESS SECTION (Fully Reorderable & Hideable in Settings)
             Text {
-                visible: !root.compactMode
+                visible: !root.compactMode && root.quickAccessList.length > 0
                 text: "  QUICK ACCESS"
                 color: Theme.textTertiary
                 font.pixelSize: Math.round(9.5 * Theme.scaleFactor)
                 font.bold: true
                 font.letterSpacing: 0.7
-            }
-
-            SidebarEntry {
-                itemName: "Media Hub"
-                itemPath: "mediahub://"
-                itemIcon: "🎬"
-            }
-
-            SidebarEntry {
-                itemName: "Favorites"
-                itemPath: "favorites://"
-                itemIcon: "⭐"
-            }
-
-            SidebarEntry {
-                itemName: "Recently Added"
-                itemPath: "recent://"
-                itemIcon: "🕒"
             }
 
             Repeater {
@@ -264,6 +248,7 @@ Rectangle {
 
             // DRIVES & MOUNTS SECTION
             Rectangle {
+                visible: root.drivesList.length > 0
                 Layout.fillWidth: true
                 height: 1
                 color: Theme.borderDim
@@ -272,7 +257,7 @@ Rectangle {
             }
 
             Text {
-                visible: !root.compactMode
+                visible: !root.compactMode && root.drivesList.length > 0
                 text: "  DRIVES & MOUNTS"
                 color: Theme.textTertiary
                 font.pixelSize: Math.round(9.5 * Theme.scaleFactor)
@@ -289,20 +274,6 @@ Rectangle {
                     usageText: modelData.usage_text || ""
                     usageRatio: modelData.usage_ratio !== undefined ? modelData.usage_ratio : -1.0
                 }
-            }
-
-            Rectangle {
-                Layout.fillWidth: true
-                height: 1
-                color: Theme.borderDim
-                Layout.topMargin: 4
-                Layout.bottomMargin: 4
-            }
-
-            SidebarEntry {
-                itemName: "Trash"
-                itemPath: "trash://"
-                itemIcon: "🗑️"
             }
         }
     }

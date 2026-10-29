@@ -27,7 +27,7 @@ Rectangle {
     }
 
     function currentGridColumns() {
-        return fileGridView.targetCols > 0 ? fileGridView.targetCols : 1
+        return fileGridView.actualCols > 0 ? fileGridView.actualCols : 1
     }
 
     function syncViewScrollToSelection() {
@@ -58,11 +58,6 @@ Rectangle {
 
     PropertiesDialog {
         id: propertiesModal
-    }
-
-    SettingsDialog {
-        id: mhEmbeddedSettingsDialog
-        mediaOnlyMode: true
     }
 
     function openPropertiesForSelected() {
@@ -509,7 +504,7 @@ Rectangle {
                 return
             }
             var curDir = backend.currentPath
-            if (curDir === "recent://" || curDir === "trash://") {
+            if (curDir === "recent://") {
                 root.hoveredSubfolderPath = ""
                 canAcceptCurrentDrag = false
                 return
@@ -522,6 +517,22 @@ Rectangle {
             var subTarget = ""
             if (hoveredItem && hoveredItem.itemIsDir && hoveredItem.itemPath !== "") {
                 subTarget = hoveredItem.itemPath
+            }
+
+            if (subTarget !== "" && springLoadTimer.targetFolder !== subTarget) {
+                springLoadTimer.targetFolder = subTarget
+                springLoadTimer.restart()
+            } else if (subTarget === "") {
+                springLoadTimer.stop()
+                springLoadTimer.targetFolder = ""
+            }
+
+            // Edge Autoscroll during Drag
+            var edgeMargin = Math.round(38 * Theme.scaleFactor)
+            if (viewPt.y < edgeMargin && activeView.contentY > 0) {
+                activeView.contentY = Math.max(0, activeView.contentY - 12)
+            } else if (viewPt.y > activeView.height - edgeMargin && activeView.contentY < activeView.contentHeight - activeView.height) {
+                activeView.contentY = Math.min(Math.max(0, activeView.contentHeight - activeView.height), activeView.contentY + 12)
             }
 
             var urls = root.extractDropUrls(drag)
@@ -553,12 +564,29 @@ Rectangle {
             updateDragTargetState(drag)
         }
 
+        Timer {
+            id: springLoadTimer
+            interval: 700
+            repeat: false
+            property string targetFolder: ""
+            onTriggered: {
+                if (backend && targetFolder !== "" && root.hoveredSubfolderPath === targetFolder) {
+                    backend.navigateTo(targetFolder)
+                    root.hoveredSubfolderPath = ""
+                }
+            }
+        }
+
         onExited: {
+            springLoadTimer.stop()
+            springLoadTimer.targetFolder = ""
             root.hoveredSubfolderPath = ""
             canAcceptCurrentDrag = false
         }
 
         onDropped: function(drop) {
+            springLoadTimer.stop()
+            springLoadTimer.targetFolder = ""
             var subPath = root.hoveredSubfolderPath
             root.hoveredSubfolderPath = ""
             canAcceptCurrentDrag = false
@@ -575,12 +603,12 @@ Rectangle {
             }
 
             var targetFolder = subPath !== "" ? subPath : backend.currentPath
-            if (targetFolder === "recent://" || targetFolder === "trash://") return
+            if (targetFolder === "recent://") return
 
             var valid = backend.filterValidDropSources(urls, targetFolder)
             if (valid && valid.length > 0 && root.appWindow) {
                 var winPt = root.mapToItem(root.appWindow.contentItem, drop.x, drop.y)
-                root.appWindow.requestSmartDrop(valid, targetFolder, winPt.x, winPt.y)
+                root.appWindow.requestSmartDrop(valid, targetFolder, winPt.x, winPt.y, drop.modifiers)
                 drop.acceptProposedAction()
             }
         }
@@ -985,6 +1013,7 @@ Rectangle {
                             policy: ScrollBar.AsNeeded
                             minimumSize: 0.08
                         }
+                        SmoothScroll { target: mediaHubFlick; orientation: Qt.Vertical }
 
                         ColumnLayout {
                             id: hubMainCol
@@ -1057,7 +1086,7 @@ Rectangle {
 
                                         Button {
                                             text: "⚙️ Media Settings"
-                                            onClicked: mhEmbeddedSettingsDialog.openMediaSettings()
+                                            onClicked: if (root.appWindow) root.appWindow.openSettings(true)
                                             contentItem: Text {
                                                 text: parent.text
                                                 color: "#ffffff"
@@ -1194,6 +1223,7 @@ Rectangle {
                                         reuseItems: false
                                         cacheBuffer: 3000
                                         model: sectionBlock.cards_model
+                                        SmoothScroll { target: rowHorizList; orientation: Qt.Horizontal }
 
                                         delegate: Rectangle {
                                             id: hubCard
@@ -1633,158 +1663,158 @@ Rectangle {
                         visible: backend ? (backend.viewMode === "details" && !backend.isMediaHubView) : true
                         model: visible && backend ? backend.files : null
                         clip: true
-                        interactive: !fileListScrollBar.pressed
+                        interactive: false
+                        currentIndex: -1
+                        highlightFollowsCurrentItem: false
+                        keyNavigationWraps: false
                         flickableDirection: Flickable.VerticalFlick
-                        contentWidth: width
                         boundsBehavior: Flickable.StopAtBounds
-                        pixelAligned: false
-                        reuseItems: true
-                        cacheBuffer: 3200
-                        flickDeceleration: 4500
-                        maximumFlickVelocity: 14000
+                        pixelAligned: true
+                        reuseItems: false
+                        cacheBuffer: 720
                         focus: true
 
-                        Rectangle {
-                            id: listRubberBand
-                            parent: fileListView.contentItem
-                            visible: false
-                            z: 999
-                            color: "#280078d4"
-                            border.color: Theme.accent
-                            border.width: 1
-                            radius: 4
+                        onCountChanged: {
+                            if (backend && (!backend.selectedPaths || backend.selectedPaths.length === 0)) {
+                                fileListView.currentIndex = -1
+                            }
+                            listViewportProbeTimer.restart()
+                        }
+                        onContentYChanged: {
+                            // Quick Scroll Guard: Don't spawn workers while moving fast; wait for slowdown
+                            if (!fileListView.moving) {
+                                listViewportProbeTimer.restart()
+                            } else {
+                                listFastScrollDebounce.restart()
+                            }
                         }
 
-                        MouseArea {
-                            id: listBgMarqueeArea
-                            anchors.fill: parent
-                            anchors.rightMargin: 16
-                            z: -1
-                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        Timer {
+                            id: listFastScrollDebounce
+                            interval: 80
+                            repeat: false
+                            onTriggered: listViewportProbeTimer.restart()
+                        }
 
-                            property real startContentX: 0
-                            property real startContentY: 0
-                            property bool isMarqueeActive: false
+                        Timer {
+                            id: listViewportProbeTimer
+                            interval: 40
+                            repeat: false
+                            onTriggered: {
+                                if (!backend || !fileListView.visible || fileListView.count === 0) return
+                                var vH = fileListView.height
+                                var startY = fileListView.contentY
+                                // Windowing: Strictly 1 Page Above and 1 Page Below the current viewport
+                                var windowStartY = Math.max(0, startY - vH)
+                                var windowEndY = Math.min(fileListView.contentHeight, startY + vH * 2)
 
-                            onPressed: function(mouse) {
-                                if (!backend) return
-                                var swapped = backend.swapMouseButtons
-                                var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
-                                if (isPrimary) {
-                                    startContentX = mouse.x + fileListView.contentX
-                                    startContentY = mouse.y + fileListView.contentY
-                                    isMarqueeActive = false
-                                    if (!(mouse.modifiers & Qt.ControlModifier)) {
-                                        backend.clearSelection()
-                                    }
-                                }
-                            }
+                                var rowH = Math.max(1, fileListView.uniformRowHeight)
+                                var firstWindowIdx = Math.max(0, Math.floor(windowStartY / rowH))
+                                var lastWindowIdx = Math.min(fileListView.count - 1, Math.ceil(windowEndY / rowH))
 
-                            onPositionChanged: function(mouse) {
-                                if (!pressed || !backend) return
-                                var swapped = backend.swapMouseButtons
-                                var primaryBtn = swapped ? Qt.RightButton : Qt.LeftButton
-                                if (!(mouse.buttons & primaryBtn)) return
+                                var firstScreenIdx = Math.max(0, Math.floor(startY / rowH))
+                                var lastScreenIdx = Math.min(fileListView.count - 1, Math.ceil((startY + vH) / rowH))
 
-                                var curX = mouse.x + fileListView.contentX
-                                var curY = mouse.y + fileListView.contentY
-                                if (!isMarqueeActive && (Math.abs(curX - startContentX) > 10 || Math.abs(curY - startContentY) > 10)) {
-                                    isMarqueeActive = true
-                                    listRubberBand.visible = true
-                                }
-                                if (isMarqueeActive) {
-                                    if (mouse.y > fileListView.height - 24) {
-                                        fileListView.contentY = Math.min(Math.max(0, fileListView.contentHeight - fileListView.height), fileListView.contentY + 14)
-                                    } else if (mouse.y < 24) {
-                                        fileListView.contentY = Math.max(0, fileListView.contentY - 14)
-                                    }
-                                    curY = mouse.y + fileListView.contentY
-                                    var rx = Math.min(startContentX, curX)
-                                    var ry = Math.min(startContentY, curY)
-                                    var rw = Math.abs(curX - startContentX)
-                                    var rh = Math.abs(curY - startContentY)
-                                    listRubberBand.x = rx
-                                    listRubberBand.y = ry
-                                    listRubberBand.width = rw
-                                    listRubberBand.height = rh
+                                var activeWindowPaths = []
 
-                                    var total = fileListView.count
-                                    if (total > 0) {
-                                        var avgH = fileListView.contentHeight / total
-                                        var firstIdx = Math.max(0, Math.floor(ry / Math.max(1, avgH)))
-                                        var lastIdx = Math.min(total - 1, Math.floor((ry + rh) / Math.max(1, avgH)))
-                                        var indices = []
-                                        for (var i = firstIdx; i <= lastIdx; i++) {
-                                            indices.push(i)
+                                // Pass 1: Screen-visible items get immediate HIGHEST priority
+                                for (var i = firstScreenIdx; i <= lastScreenIdx; i++) {
+                                    var scrEnt = backend.files.get_entry_at(i)
+                                    if (scrEnt && scrEnt.path) {
+                                        activeWindowPaths.push(scrEnt.path)
+                                        if (scrEnt.is_dir) {
+                                            if (!scrEnt.folder_previews || scrEnt.folder_previews.length === 0) {
+                                                backend.requestFolderPreview(scrEnt.path)
+                                            }
+                                        } else if (!scrEnt.thumb || scrEnt.thumb === "") {
+                                            backend.requestItemThumbnail(scrEnt.path, true)
                                         }
-                                        backend.setRubberBandSelection(indices, Boolean(mouse.modifiers & Qt.ControlModifier))
                                     }
                                 }
-                            }
 
-                            onReleased: function(mouse) {
-                                if (isMarqueeActive) {
-                                    isMarqueeActive = false
-                                    listRubberBand.visible = false
-                                    return
+                                // Pass 2: 1-Page buffer above/below gets secondary priority
+                                for (var j = firstWindowIdx; j <= lastWindowIdx; j++) {
+                                    if (j >= firstScreenIdx && j <= lastScreenIdx) continue
+                                    var bufEnt = backend.files.get_entry_at(j)
+                                    if (bufEnt && bufEnt.path) {
+                                        activeWindowPaths.push(bufEnt.path)
+                                        if (bufEnt.is_dir) {
+                                            if (!bufEnt.folder_previews || bufEnt.folder_previews.length === 0) {
+                                                backend.requestFolderPreview(bufEnt.path)
+                                            }
+                                        } else if (!bufEnt.thumb || bufEnt.thumb === "") {
+                                            backend.requestItemThumbnail(bufEnt.path, false)
+                                        }
+                                    }
                                 }
-                                if (!backend) return
-                                var swapped = backend.swapMouseButtons
-                                var isSecondary = swapped ? (mouse.button === Qt.LeftButton) : (mouse.button === Qt.RightButton)
-                                if (isSecondary) {
-                                    backgroundMenu.popup()
-                                }
-                            }
 
-                            onCanceled: {
-                                isMarqueeActive = false
-                                listRubberBand.visible = false
+                                // Cancel out-of-window requests from memory
+                                backend.updateActiveVisibleWindow(activeWindowPaths)
                             }
+                        }
+
+                        readonly property int uniformRowHeight: {
+                            if (!backend) return Math.round(38 * Theme.scaleFactor)
+                            if (backend.isStorageAnalyzerView) return Math.round(48 * Theme.scaleFactor)
+                            if (backend.isMovieFolderView) return Math.round(118 * Theme.scaleFactor)
+                            if (backend.isMediaLibraryView) return Math.round(74 * Theme.scaleFactor)
+                            return Math.round(38 * Theme.scaleFactor)
+                        }
+
+                        SmoothScroll {
+                            id: listSmoothScroller
+                            target: fileListView
+                            orientation: Qt.Vertical
+                            enableCtrlZoom: true
                         }
 
                         ScrollBar.vertical: ScrollBar {
                             id: fileListScrollBar
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            anchors.right: parent.right
+                            width: Math.round((hovered || pressed ? 13 : 9) * Theme.scaleFactor)
                             active: true
                             policy: ScrollBar.AsNeeded
                             minimumSize: 0.06
+                            z: 120
+                            onPressedChanged: if (pressed) listSmoothScroller.stopScroll()
+
+                            contentItem: Rectangle {
+                                implicitWidth: parent.width
+                                radius: width / 2
+                                color: fileListScrollBar.pressed ? Theme.accent : (fileListScrollBar.hovered ? Theme.accentHover : "#66a1a1aa")
+                            }
                         }
 
                         delegate: Item {
                             id: rowContainer
-                            width: fileListView.width
-                            readonly property bool isSeriesFolderWithPoster: (backend ? (backend.isMediaLibraryView && !backend.isMovieFolderView && backend.showSeriesPosters) : false) && model.is_dir && model.poster !== undefined && model.poster !== ""
-                            readonly property bool isMovieRow: ((backend ? backend.isMovieFolderView : false) && model.is_movie_item && (model.type === "Video" || (model.is_dir && model.poster !== ""))) || isSeriesFolderWithPoster
+                            width: fileListView.width - Math.round(12 * Theme.scaleFactor)
+                            readonly property bool isSeriesFolderWithPoster: (backend ? (backend.isMediaLibraryView && !backend.isMovieFolderView && backend.showSeriesPosters) : false) && model.is_dir
+                            readonly property bool isMovieRow: (backend ? backend.isMovieFolderView : false) && model.is_movie_item
                             readonly property bool isAnalyzerRow: backend ? backend.isStorageAnalyzerView : false
-                            readonly property bool isMediaVideoRow: ((backend ? backend.isMediaLibraryView : false) && !model.is_dir && model.type === "Video") || isMovieRow
+                            readonly property bool isMediaVideoRow: (backend ? backend.isMediaLibraryView : false) && (!model.is_dir && model.type === "Video" || isSeriesFolderWithPoster || isMovieRow)
                             readonly property bool showMovieSeparator: isMovieRow
-                            height: Math.round((isMovieRow ? 124 : (isMediaVideoRow ? 72 : (isAnalyzerRow ? 48 : 38))) * Theme.scaleFactor)
+                            height: fileListView.uniformRowHeight
 
                             readonly property string itemPath: model.path
                             readonly property bool itemIsDir: model.is_dir
                             readonly property bool isHiddenEntry: model.name !== undefined && model.name.startsWith(".")
                             opacity: isHiddenEntry ? 0.52 : 1.0
 
-                            Timer {
-                                id: listLazyThumbTimer
-                                interval: (fileListScrollBar.pressed || fileListView.moving) ? 180 : 16
-                                repeat: false
-                                onTriggered: {
-                                    if (!backend || !rowContainer.visible) return
-                                    if (fileListScrollBar.pressed || fileListView.moving) {
-                                        listLazyThumbTimer.restart()
-                                        return
-                                    }
-                                    if (model.is_dir) {
+                            function triggerRowPreview() {
+                                if (!backend || !model.path) return
+                                if (model.is_dir) {
+                                    if (!model.folder_previews || model.folder_previews.length === 0) {
                                         backend.requestFolderPreview(model.path)
-                                    } else if (model.thumb === "") {
-                                        backend.requestItemThumbnail(model.path)
                                     }
+                                } else if (!model.thumb || model.thumb === "") {
+                                    backend.requestItemThumbnail(model.path)
                                 }
                             }
 
-                            Component.onCompleted: listLazyThumbTimer.restart()
-                            ListView.onPooled: listLazyThumbTimer.stop()
-                            ListView.onReused: listLazyThumbTimer.restart()
+                            Component.onCompleted: triggerRowPreview()
+                            onItemPathChanged: triggerRowPreview()
 
                             Rectangle {
                                 visible: rowContainer.showMovieSeparator && index > 0
@@ -1806,12 +1836,7 @@ Rectangle {
                                 anchors.bottomMargin: rowContainer.showMovieSeparator ? 9 : 1
                                 radius: Theme.radiusMedium
 
-                                readonly property bool isSelected: {
-                                    if (!backend) return false
-                                    var sList = backend.selectedPaths
-                                    if (sList && sList.indexOf(model.path) !== -1) return true
-                                    return (backend.selectedItem && backend.selectedItem.path === model.path) ? true : false
-                                }
+                                readonly property bool isSelected: Boolean(model.is_selected)
                                 readonly property bool isDropHovered: model.is_dir && root.hoveredSubfolderPath === model.path
                                 color: isDropHovered ? "#350078d4" : (isSelected ? Theme.bgSelected : (itemArea.containsMouse ? Theme.bgHover : "transparent"))
                                 border.color: isDropHovered || isSelected ? Theme.accent : "transparent"
@@ -1848,6 +1873,7 @@ Rectangle {
                                                         : ""
                                                 fillMode: parent.parent.hasVerticalPoster ? Image.PreserveAspectFit : (rowContainer.isMediaVideoRow ? Image.PreserveAspectCrop : Image.PreserveAspectFit)
                                                 asynchronous: true
+                                                cache: false
                                                 smooth: true
                                                 mipmap: true
                                             }
@@ -2004,21 +2030,12 @@ Rectangle {
                                                 border.color: "#34d399"
                                                 border.width: 1
 
-                                                Canvas {
-                                                    anchors.fill: parent
-                                                    onPaint: {
-                                                        var ctx = getContext("2d")
-                                                        ctx.reset()
-                                                        ctx.strokeStyle = "#ffffff"
-                                                        ctx.lineWidth = Math.max(1.8, width * 0.12)
-                                                        ctx.lineCap = "round"
-                                                        ctx.lineJoin = "round"
-                                                        ctx.beginPath()
-                                                        ctx.moveTo(width * 0.27, height * 0.52)
-                                                        ctx.lineTo(width * 0.44, height * 0.70)
-                                                        ctx.lineTo(width * 0.75, height * 0.32)
-                                                        ctx.stroke()
-                                                    }
+                                                Text {
+                                                    anchors.centerIn: parent
+                                                    text: "✓"
+                                                    color: "#ffffff"
+                                                    font.pixelSize: Math.round(11 * Theme.scaleFactor)
+                                                    font.bold: true
                                                 }
                                             }
                                         }
@@ -2096,6 +2113,7 @@ Rectangle {
                                     id: itemArea
                                     anchors.fill: parent
                                     hoverEnabled: true
+                                    preventStealing: true
                                     acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
 
                                     property point pressPos: Qt.point(0, 0)
@@ -2103,6 +2121,7 @@ Rectangle {
                                     property bool isReorderingFav: false
 
                                     onPressed: function(mouse) {
+                                        fileListView.forceActiveFocus()
                                         pressPos = Qt.point(mouse.x, mouse.y)
                                         isHoldingDrag = false
                                         isReorderingFav = false
@@ -2206,137 +2225,132 @@ Rectangle {
                         visible: backend ? (backend.viewMode === "grid" && !backend.isMediaHubView) : false
                         model: visible && backend ? backend.files : null
                         clip: true
-                        interactive: !fileGridScrollBar.pressed
+                        interactive: false
+                        currentIndex: -1
+                        highlightFollowsCurrentItem: false
+                        keyNavigationWraps: false
                         flickableDirection: Flickable.VerticalFlick
-                        contentWidth: width
                         boundsBehavior: Flickable.StopAtBounds
-                        pixelAligned: false
-                        reuseItems: true
-                        cacheBuffer: 3600
-                        flickDeceleration: 4500
-                        maximumFlickVelocity: 14000
+                        pixelAligned: true
+                        reuseItems: false
+                        cacheBuffer: 720
                         focus: true
 
-                        Rectangle {
-                            id: gridRubberBand
-                            parent: fileGridView.contentItem
-                            visible: false
-                            z: 999
-                            color: "#280078d4"
-                            border.color: Theme.accent
-                            border.width: 1
-                            radius: 4
+                        onCountChanged: {
+                            if (backend && (!backend.selectedPaths || backend.selectedPaths.length === 0)) {
+                                fileGridView.currentIndex = -1
+                            }
+                            gridViewportProbeTimer.restart()
+                        }
+                        onContentYChanged: {
+                            // Quick Scroll Guard for Grid View
+                            if (!fileGridView.moving) {
+                                gridViewportProbeTimer.restart()
+                            } else {
+                                gridFastScrollDebounce.restart()
+                            }
                         }
 
-                        MouseArea {
-                            id: gridBgMarqueeArea
-                            anchors.fill: parent
-                            anchors.rightMargin: 16
-                            z: -1
-                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                        Timer {
+                            id: gridFastScrollDebounce
+                            interval: 80
+                            repeat: false
+                            onTriggered: gridViewportProbeTimer.restart()
+                        }
 
-                            property real startContentX: 0
-                            property real startContentY: 0
-                            property bool isMarqueeActive: false
+                        Timer {
+                            id: gridViewportProbeTimer
+                            interval: 40
+                            repeat: false
+                            onTriggered: {
+                                if (!backend || !fileGridView.visible || fileGridView.count === 0) return
+                                var gH = fileGridView.height
+                                var startY = fileGridView.contentY
+                                var windowStartY = Math.max(0, startY - gH)
+                                var windowEndY = Math.min(fileGridView.contentHeight, startY + gH * 2)
 
-                            onPressed: function(mouse) {
-                                if (!backend) return
-                                var swapped = backend.swapMouseButtons
-                                var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
-                                if (isPrimary) {
-                                    startContentX = mouse.x + fileGridView.contentX
-                                    startContentY = mouse.y + fileGridView.contentY
-                                    isMarqueeActive = false
-                                    if (!(mouse.modifiers & Qt.ControlModifier)) {
-                                        backend.clearSelection()
-                                    }
-                                }
-                            }
+                                var ch = Math.max(1, fileGridView.cellHeight)
+                                var cols = Math.max(1, fileGridView.actualCols)
 
-                            onPositionChanged: function(mouse) {
-                                if (!pressed || !backend) return
-                                var swapped = backend.swapMouseButtons
-                                var primaryBtn = swapped ? Qt.RightButton : Qt.LeftButton
-                                if (!(mouse.buttons & primaryBtn)) return
+                                var rScrStart = Math.max(0, Math.floor(startY / ch))
+                                var rScrEnd = Math.floor((startY + gH) / ch) + 1
+                                var firstScrIdx = rScrStart * cols
+                                var lastScrIdx = Math.min(fileGridView.count - 1, rScrEnd * cols - 1)
 
-                                var curX = mouse.x + fileGridView.contentX
-                                var curY = mouse.y + fileGridView.contentY
-                                if (!isMarqueeActive && (Math.abs(curX - startContentX) > 10 || Math.abs(curY - startContentY) > 10)) {
-                                    isMarqueeActive = true
-                                    gridRubberBand.visible = true
-                                }
-                                if (isMarqueeActive) {
-                                    if (mouse.y > fileGridView.height - 24) {
-                                        fileGridView.contentY = Math.min(Math.max(0, fileGridView.contentHeight - fileGridView.height), fileGridView.contentY + 16)
-                                    } else if (mouse.y < 24) {
-                                        fileGridView.contentY = Math.max(0, fileGridView.contentY - 16)
-                                    }
-                                    curY = mouse.y + fileGridView.contentY
-                                    var rx = Math.min(startContentX, curX)
-                                    var ry = Math.min(startContentY, curY)
-                                    var rw = Math.abs(curX - startContentX)
-                                    var rh = Math.abs(curY - startContentY)
-                                    gridRubberBand.x = rx
-                                    gridRubberBand.y = ry
-                                    gridRubberBand.width = rw
-                                    gridRubberBand.height = rh
+                                var rWinStart = Math.max(0, Math.floor(windowStartY / ch))
+                                var rWinEnd = Math.floor(windowEndY / ch) + 1
+                                var firstWinIdx = rWinStart * cols
+                                var lastWinIdx = Math.min(fileGridView.count - 1, rWinEnd * cols - 1)
 
-                                    var cols = Math.max(1, fileGridView.targetCols)
-                                    var cw = Math.max(1, fileGridView.cellWidth)
-                                    var ch = Math.max(1, fileGridView.cellHeight)
-                                    var cStart = Math.max(0, Math.floor(rx / cw))
-                                    var cEnd = Math.min(cols - 1, Math.floor((rx + rw) / cw))
-                                    var rStart = Math.max(0, Math.floor(ry / ch))
-                                    var rEnd = Math.floor((ry + rh) / ch)
-                                    var total = fileGridView.count
-                                    var indices = []
-                                    for (var r = rStart; r <= rEnd; r++) {
-                                        for (var c = cStart; c <= cEnd; c++) {
-                                            var idx = r * cols + c
-                                            if (idx >= 0 && idx < total) {
-                                                indices.push(idx)
+                                var activeWindowPaths = []
+
+                                // Pass 1: Active visible screen items
+                                for (var i = firstScrIdx; i <= lastScrIdx; i++) {
+                                    var scrEnt = backend.files.get_entry_at(i)
+                                    if (scrEnt && scrEnt.path) {
+                                        activeWindowPaths.push(scrEnt.path)
+                                        if (scrEnt.is_dir) {
+                                            if (!scrEnt.folder_previews || scrEnt.folder_previews.length === 0) {
+                                                backend.requestFolderPreview(scrEnt.path)
                                             }
+                                        } else if (!scrEnt.thumb || scrEnt.thumb === "") {
+                                            backend.requestItemThumbnail(scrEnt.path, true)
                                         }
                                     }
-                                    backend.setRubberBandSelection(indices, Boolean(mouse.modifiers & Qt.ControlModifier))
                                 }
-                            }
 
-                            onReleased: function(mouse) {
-                                if (isMarqueeActive) {
-                                    isMarqueeActive = false
-                                    gridRubberBand.visible = false
-                                    return
+                                // Pass 2: 1-Page buffer above and below
+                                for (var j = firstWinIdx; j <= lastWinIdx; j++) {
+                                    if (j >= firstScrIdx && j <= lastScrIdx) continue
+                                    var bufEnt = backend.files.get_entry_at(j)
+                                    if (bufEnt && bufEnt.path) {
+                                        activeWindowPaths.push(bufEnt.path)
+                                        if (bufEnt.is_dir) {
+                                            if (!bufEnt.folder_previews || bufEnt.folder_previews.length === 0) {
+                                                backend.requestFolderPreview(bufEnt.path)
+                                            }
+                                        } else if (!bufEnt.thumb || bufEnt.thumb === "") {
+                                            backend.requestItemThumbnail(bufEnt.path, false)
+                                        }
+                                    }
                                 }
-                                if (!backend) return
-                                var swapped = backend.swapMouseButtons
-                                var isSecondary = swapped ? (mouse.button === Qt.LeftButton) : (mouse.button === Qt.RightButton)
-                                if (isSecondary) {
-                                    backgroundMenu.popup()
-                                }
-                            }
 
-                            onCanceled: {
-                                isMarqueeActive = false
-                                gridRubberBand.visible = false
+                                backend.updateActiveVisibleWindow(activeWindowPaths)
                             }
                         }
 
                         readonly property bool isMoviePosterGrid: backend ? (backend.isMovieFolderView || (backend.isMediaLibraryView && backend.showSeriesPosters)) : false
+                        readonly property int availGridWidth: Math.max(100, fileGridView.width - Math.round(14 * Theme.scaleFactor))
                         readonly property int minCardSize: Math.round((isMoviePosterGrid ? 165 : 145) * Theme.scaleFactor)
-                        readonly property int targetCols: (backend && backend.gridColumns > 0) ? backend.gridColumns : Math.max(1, Math.floor(fileGridView.width / minCardSize))
-                        cellWidth: Math.max(Math.round(115 * Theme.scaleFactor), Math.floor(fileGridView.width / Math.max(1, targetCols)))
+                        readonly property int targetCols: (backend && backend.gridColumns > 0) ? backend.gridColumns : Math.max(1, Math.floor(availGridWidth / minCardSize))
+                        cellWidth: Math.max(Math.round(115 * Theme.scaleFactor), Math.floor(availGridWidth / Math.max(1, targetCols)))
                         cellHeight: Math.round(cellWidth * (isMoviePosterGrid ? 1.44 : 1.02))
+                        readonly property int actualCols: Math.max(1, Math.floor(availGridWidth / Math.max(1, cellWidth)))
+
+                        SmoothScroll {
+                            id: gridSmoothScroller
+                            target: fileGridView
+                            orientation: Qt.Vertical
+                            enableCtrlZoom: true
+                        }
 
                         ScrollBar.vertical: ScrollBar {
                             id: fileGridScrollBar
+                            anchors.top: parent.top
+                            anchors.bottom: parent.bottom
+                            anchors.right: parent.right
+                            width: Math.round((hovered || pressed ? 13 : 9) * Theme.scaleFactor)
                             active: true
                             policy: ScrollBar.AsNeeded
                             minimumSize: 0.06
-                        }
-                        ScrollBar.horizontal: ScrollBar {
-                            active: true
-                            policy: ScrollBar.AsNeeded
+                            z: 120
+                            onPressedChanged: if (pressed) gridSmoothScroller.stopScroll()
+
+                            contentItem: Rectangle {
+                                implicitWidth: parent.width
+                                radius: width / 2
+                                color: fileGridScrollBar.pressed ? Theme.accent : (fileGridScrollBar.hovered ? Theme.accentHover : "#66a1a1aa")
+                            }
                         }
 
                         delegate: Item {
@@ -2348,37 +2362,24 @@ Rectangle {
                             readonly property bool itemIsDir: model.is_dir
                             readonly property bool isHiddenEntry: model.name !== undefined && model.name.startsWith(".")
                             opacity: isHiddenEntry ? 0.52 : 1.0
-                            readonly property bool isSelected: {
-                                if (!backend) return false
-                                var sList = backend.selectedPaths
-                                if (sList && sList.indexOf(model.path) !== -1) return true
-                                return (backend.selectedItem && backend.selectedItem.path === model.path) ? true : false
-                            }
+                            readonly property bool isSelected: Boolean(model.is_selected)
                             readonly property bool isFloatingStyle: backend ? (backend.gridStyle === "floating") : true
                             readonly property bool hasMoviePoster: model.poster !== undefined && model.poster !== "" && (!model.is_dir || (backend && backend.showSeriesPosters))
                             readonly property bool hasMediaThumb: hasMoviePoster || (!model.is_dir && (model.thumb !== "" || (model.icon && (model.icon.indexOf("/") !== -1 || model.icon.indexOf(".") !== -1))))
 
-                            Timer {
-                                id: gridLazyThumbTimer
-                                interval: (fileGridScrollBar.pressed || fileGridView.moving) ? 180 : 16
-                                repeat: false
-                                onTriggered: {
-                                    if (!backend || !gridContainer.visible) return
-                                    if (fileGridScrollBar.pressed || fileGridView.moving) {
-                                        gridLazyThumbTimer.restart()
-                                        return
-                                    }
-                                    if (model.is_dir) {
+                            function triggerGridPreview() {
+                                if (!backend || !model.path) return
+                                if (model.is_dir) {
+                                    if (!model.folder_previews || model.folder_previews.length === 0) {
                                         backend.requestFolderPreview(model.path)
-                                    } else if (model.thumb === "") {
-                                        backend.requestItemThumbnail(model.path)
                                     }
+                                } else if (!model.thumb || model.thumb === "") {
+                                    backend.requestItemThumbnail(model.path)
                                 }
                             }
 
-                            Component.onCompleted: gridLazyThumbTimer.restart()
-                            GridView.onPooled: gridLazyThumbTimer.stop()
-                            GridView.onReused: gridLazyThumbTimer.restart()
+                            Component.onCompleted: triggerGridPreview()
+                            onItemPathChanged: triggerGridPreview()
 
                             Rectangle {
                                 id: gridDelegate
@@ -2434,6 +2435,8 @@ Rectangle {
                                                         : ""
                                                 fillMode: Image.PreserveAspectFit
                                                 asynchronous: true
+                                                cache: false
+                                                smooth: true
                                                 mipmap: true
                                             }
 
@@ -2536,6 +2539,7 @@ Rectangle {
                                     id: gridMouseArea
                                     anchors.fill: parent
                                     hoverEnabled: true
+                                    preventStealing: true
                                     acceptedButtons: Qt.LeftButton | Qt.RightButton | Qt.MiddleButton
 
                                     property point pressPos: Qt.point(0, 0)
@@ -2543,6 +2547,7 @@ Rectangle {
                                     property bool isReorderingFav: false
 
                                     onPressed: function(mouse) {
+                                        fileGridView.forceActiveFocus()
                                         pressPos = Qt.point(mouse.x, mouse.y)
                                         isHoldingDrag = false
                                         isReorderingFav = false
@@ -2637,6 +2642,152 @@ Rectangle {
                                     }
                                 }
                             }
+                        }
+                    }
+
+                    // Viewport-Level Marquee Selection Overlay & Empty-Space Handler (Sibling to ListView/GridView)
+                    Rectangle {
+                        id: marqueeBoxOverlay
+                        visible: false
+                        z: 80
+                        color: "#280078d4"
+                        border.color: Theme.accent
+                        border.width: 1
+                        radius: 4
+                    }
+
+                    MouseArea {
+                        id: viewportMarqueeArea
+                        anchors.fill: parent
+                        anchors.rightMargin: Math.round(18 * Theme.scaleFactor)
+                        z: 10
+                        enabled: (backend ? !backend.isMediaHubView : true) && !fileListScrollBar.pressed && !fileGridScrollBar.pressed
+                        preventStealing: true
+                        propagateComposedEvents: true
+                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+
+                        property real startContentX: 0
+                        property real startContentY: 0
+                        property bool isMarqueeActive: false
+                        property var baseSelectedPaths: []
+
+                        function activeFlick() {
+                            return (backend && backend.viewMode === "grid") ? fileGridView : fileListView
+                        }
+
+                        onPressed: function(mouse) {
+                            if (!backend || backend.isMediaHubView || fileListScrollBar.pressed || fileGridScrollBar.pressed) {
+                                mouse.accepted = false
+                                return
+                            }
+                            var av = activeFlick()
+                            av.forceActiveFocus()
+                            var cx = mouse.x + av.contentX
+                            var cy = mouse.y + av.contentY
+                            var hitItem = av.itemAt(cx, cy)
+
+                            // If pressed directly on an item delegate, let the item's MouseArea handle click/drag
+                            if (hitItem !== null) {
+                                mouse.accepted = false
+                                return
+                            }
+
+                            var swapped = backend.swapMouseButtons
+                            var isPrimary = swapped ? (mouse.button === Qt.RightButton) : (mouse.button === Qt.LeftButton)
+                            if (isPrimary) {
+                                startContentX = cx
+                                startContentY = cy
+                                isMarqueeActive = false
+                                if (mouse.modifiers & Qt.ControlModifier) {
+                                    baseSelectedPaths = backend.selectedPaths ? backend.selectedPaths.slice() : []
+                                } else {
+                                    baseSelectedPaths = []
+                                    backend.clearSelection()
+                                }
+                                mouse.accepted = true
+                            } else {
+                                mouse.accepted = true
+                            }
+                        }
+
+                        onPositionChanged: function(mouse) {
+                            if (!pressed || !backend) return
+                            var swapped = backend.swapMouseButtons
+                            var primaryBtn = swapped ? Qt.RightButton : Qt.LeftButton
+                            if (!(mouse.buttons & primaryBtn)) return
+
+                            var av = activeFlick()
+                            if (mouse.y > av.height - 24) {
+                                av.contentY = Math.min(Math.max(0, av.contentHeight - av.height), av.contentY + 14)
+                            } else if (mouse.y < 24) {
+                                av.contentY = Math.max(0, av.contentY - 14)
+                            }
+
+                            var curX = mouse.x + av.contentX
+                            var curY = mouse.y + av.contentY
+                            if (!isMarqueeActive && (Math.abs(curX - startContentX) > 6 || Math.abs(curY - startContentY) > 6)) {
+                                isMarqueeActive = true
+                                marqueeBoxOverlay.visible = true
+                            }
+
+                            if (isMarqueeActive) {
+                                var rx = Math.min(startContentX, curX)
+                                var ry = Math.min(startContentY, curY)
+                                var rw = Math.abs(curX - startContentX)
+                                var rh = Math.abs(curY - startContentY)
+
+                                marqueeBoxOverlay.x = rx - av.contentX
+                                marqueeBoxOverlay.y = ry - av.contentY
+                                marqueeBoxOverlay.width = rw
+                                marqueeBoxOverlay.height = rh
+
+                                var total = av.count
+                                var indices = []
+                                if (total > 0) {
+                                    if (backend.viewMode === "grid") {
+                                        var cols = Math.max(1, fileGridView.actualCols)
+                                        var cw = Math.max(1, fileGridView.cellWidth)
+                                        var ch = Math.max(1, fileGridView.cellHeight)
+                                        var cStart = Math.max(0, Math.floor(rx / cw))
+                                        var cEnd = Math.min(cols - 1, Math.floor((rx + rw) / cw))
+                                        var rStart = Math.max(0, Math.floor(ry / ch))
+                                        var rEnd = Math.floor((ry + rh) / ch)
+                                        for (var r = rStart; r <= rEnd; r++) {
+                                            for (var c = cStart; c <= cEnd; c++) {
+                                                var gIdx = r * cols + c
+                                                if (gIdx >= 0 && gIdx < total) indices.push(gIdx)
+                                            }
+                                        }
+                                    } else {
+                                        var rowH = Math.max(1, fileListView.uniformRowHeight)
+                                        var firstIdx = Math.max(0, Math.floor(ry / rowH))
+                                        var lastIdx = Math.min(total - 1, Math.floor((ry + rh) / rowH))
+                                        for (var i = firstIdx; i <= lastIdx; i++) {
+                                            indices.push(i)
+                                        }
+                                    }
+                                    backend.setRubberBandSelection(indices, Boolean(mouse.modifiers & Qt.ControlModifier), viewportMarqueeArea.baseSelectedPaths)
+                                }
+                            }
+                        }
+
+                        onReleased: function(mouse) {
+                            if (isMarqueeActive) {
+                                isMarqueeActive = false
+                                marqueeBoxOverlay.visible = false
+                                return
+                            }
+                            if (!backend) return
+                            var swapped = backend.swapMouseButtons
+                            var isSecondary = swapped ? (mouse.button === Qt.LeftButton) : (mouse.button === Qt.RightButton)
+                            if (isSecondary) {
+                                backgroundMenu.popup()
+                            }
+                        }
+
+                        onCanceled: {
+                            isMarqueeActive = false
+                            marqueeBoxOverlay.visible = false
                         }
                     }
 

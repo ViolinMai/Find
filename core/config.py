@@ -45,7 +45,7 @@ class ConfigManager:
         "jellyfin_stream_mode": False,
         "show_series_posters": True,
         "anonymous_mode": False,
-        "mal_username": "CriticalweebR18",
+        "mal_username": "",
         "mal_client_id": "",
         "mal_access_token": "",
         "airing_links": {},
@@ -148,13 +148,17 @@ class ConfigManager:
         "saved_desktop_apps": [],
         "fonts_install_dir": str(Path.home() / ".local" / "share" / "fonts"),
         "custom_quick_access": [
-            {"name": "Home", "path": str(Path.home()), "icon": "🏠"},
-            {"name": "Desktop", "path": str(Path.home() / "Desktop"), "icon": "🖥️"},
-            {"name": "Documents", "path": str(Path.home() / "Documents"), "icon": "📄"},
-            {"name": "Downloads", "path": str(Path.home() / "Downloads"), "icon": "📥"},
-            {"name": "Pictures", "path": str(Path.home() / "Pictures"), "icon": "🖼️"},
-            {"name": "Videos", "path": str(Path.home() / "Videos"), "icon": "🎬"},
-            {"name": "Music", "path": str(Path.home() / "Music"), "icon": "🎵"},
+            {"name": "Media Hub", "path": "mediahub://", "icon": "🎬", "visible": True},
+            {"name": "Favorites", "path": "favorites://", "icon": "⭐", "visible": True},
+            {"name": "Recently Added", "path": "recent://", "icon": "🕒", "visible": True},
+            {"name": "Home", "path": str(Path.home()), "icon": "🏠", "visible": True},
+            {"name": "Desktop", "path": str(Path.home() / "Desktop"), "icon": "🖥️", "visible": True},
+            {"name": "Documents", "path": str(Path.home() / "Documents"), "icon": "📄", "visible": True},
+            {"name": "Downloads", "path": str(Path.home() / "Downloads"), "icon": "📥", "visible": True},
+            {"name": "Pictures", "path": str(Path.home() / "Pictures"), "icon": "🖼️", "visible": True},
+            {"name": "Videos", "path": str(Path.home() / "Videos"), "icon": "🎬", "visible": True},
+            {"name": "Music", "path": str(Path.home() / "Music"), "icon": "🎵", "visible": True},
+            {"name": "Trash", "path": "trash://", "icon": "🗑️", "visible": True},
         ],
         "default_type_icons": {
             "folder": "📁",
@@ -250,19 +254,38 @@ class ConfigManager:
             return self._config.get(key, default)
 
     def set(self, key, value):
+        lock_path = self.config_file.with_suffix(self.config_file.suffix + ".lock")
         with self._lock:
-            # Read-merge-write from disk so multi-instance changes are not clobbered
-            if self.config_file.exists():
-                try:
-                    with open(self.config_file, "r", encoding="utf-8") as f:
-                        disk_data = json.load(f)
-                        if isinstance(disk_data, dict):
-                            self._config.update(disk_data)
-                except Exception:
-                    pass
-            self._config[key] = value
-            snapshot = dict(self._config)
-        self._atomic_write_json(self.config_file, snapshot, indent=2, secure_perms=True)
+            try:
+                with open(lock_path, "w", encoding="utf-8") as lf:
+                    if os.name != "nt":
+                        fcntl.flock(lf, fcntl.LOCK_EX)
+                    try:
+                        if self.config_file.exists():
+                            try:
+                                with open(self.config_file, "r", encoding="utf-8") as f:
+                                    disk_data = json.load(f)
+                                    if isinstance(disk_data, dict):
+                                        self._config.update(disk_data)
+                            except Exception:
+                                pass
+                        self._config[key] = value
+                        snapshot = dict(self._config)
+                        tmp_path = self.config_file.with_suffix(f".tmp.{os.getpid()}.{threading.get_ident()}")
+                        with open(tmp_path, "w", encoding="utf-8") as wf:
+                            json.dump(snapshot, wf, indent=2)
+                            wf.flush()
+                            os.fsync(wf.fileno())
+                        try:
+                            os.chmod(tmp_path, 0o600)
+                        except OSError:
+                            pass
+                        os.replace(tmp_path, self.config_file)
+                    finally:
+                        if os.name != "nt":
+                            fcntl.flock(lf, fcntl.LOCK_UN)
+            except Exception:
+                pass
 
     def _load_progress(self):
         if self.progress_file.exists():

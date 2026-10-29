@@ -7,7 +7,7 @@ import subprocess
 import shutil
 from pathlib import Path
 from PySide6.QtCore import QObject, Signal, QRunnable, QThreadPool
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageChops
 
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".ico", ".svg"}
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".m4v"}
@@ -18,25 +18,48 @@ TEXT_EXTS = {
     ".srt", ".ass", ".sub"
 }
 
-EPHEMERAL_DIR = Path(tempfile.gettempdir()) / "find_ephemeral_previews"
-EPHEMERAL_DIR.mkdir(parents=True, exist_ok=True)
+def _get_ephemeral_preview_dir() -> Path:
+    xdg_run = os.environ.get("XDG_RUNTIME_DIR", "")
+    if xdg_run and os.path.isdir(xdg_run):
+        d = Path(xdg_run) / "find" / "folder_previews"
+    else:
+        d = Path(tempfile.gettempdir()) / f"find_ephemeral_previews_{os.getuid()}"
+    d.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(d, 0o700)
+    except OSError:
+        pass
+    return d
+
+
+EPHEMERAL_DIR = _get_ephemeral_preview_dir()
 
 
 def _apply_rounded_corners_to_file(img_path: Path, radius: int = 18):
-    """Applies clean anti-aliased rounded corners to a generated thumbnail image."""
+    """Applies clean anti-aliased rounded corners while preserving transparent PNG alpha channels!"""
     try:
         if not img_path.exists():
             return
         with Image.open(img_path) as im:
             im_rgba = im.convert("RGBA")
             w, h = im_rgba.size
+            orig_alpha = im_rgba.getchannel("A")
+            # If the image already has transparency (e.g. transparent PNG icon/sprite), preserve its alpha!
+            extrema = orig_alpha.getextrema()
+            has_transparency = extrema is not None and extrema[0] < 250
+
             scale = 2
             mask = Image.new("L", (w * scale, h * scale), 0)
             draw = ImageDraw.Draw(mask)
             r = max(6, int(min(w, h) * 0.08)) * scale
             draw.rounded_rectangle((0, 0, w * scale - 1, h * scale - 1), radius=r, fill=255)
             mask = mask.resize((w, h), Image.Resampling.LANCZOS)
-            im_rgba.putalpha(mask)
+
+            if has_transparency:
+                combined_alpha = ImageChops.multiply(orig_alpha, mask)
+                im_rgba.putalpha(combined_alpha)
+            else:
+                im_rgba.putalpha(mask)
             im_rgba.save(str(img_path), "PNG", optimize=True)
     except Exception:
         pass
@@ -73,7 +96,7 @@ def generate_single_thumbnail_sync(file_path: str, cache_dir: Path, save_to_cach
             return str(p)
 
         mtime = p.stat().st_mtime
-        key = f"{file_path}_{mtime}_v2_rounded".encode("utf-8")
+        key = f"{file_path}_{mtime}_v3_alpha".encode("utf-8")
         hash_base = hashlib.md5(key).hexdigest()
 
         target_dir = cache_dir if save_to_cache else EPHEMERAL_DIR
@@ -160,16 +183,25 @@ def generate_single_thumbnail_sync(file_path: str, cache_dir: Path, save_to_cach
 
 
 class ThumbnailTask(QRunnable):
-    def __init__(self, file_path: str, cache_dir: Path, callback_signal):
+    def __init__(self, file_path: str, cache_dir: Path, callback_signal, is_valid_fn=None):
         super().__init__()
         self.file_path = file_path
         self.cache_dir = cache_dir
         self.callback_signal = callback_signal
+        self.is_valid_fn = is_valid_fn
 
     def run(self):
+        # Drop the task if the user scrolled past this window and invalidated it
+        if callable(self.is_valid_fn) and not self.is_valid_fn(self.file_path):
+            return
         res = generate_single_thumbnail_sync(self.file_path, self.cache_dir, save_to_cache=True)
         if res:
-            self.callback_signal.emit(self.file_path, res)
+            if callable(self.is_valid_fn) and not self.is_valid_fn(self.file_path):
+                return
+            if hasattr(self.callback_signal, "emit"):
+                self.callback_signal.emit(self.file_path, res)
+            elif callable(self.callback_signal):
+                self.callback_signal(self.file_path, res)
 
 
 class FolderPreviewTask(QRunnable):
@@ -274,7 +306,10 @@ class FolderPreviewTask(QRunnable):
                     })
 
             if previews:
-                self.callback_signal.emit(self.folder_path, previews)
+                if hasattr(self.callback_signal, "emit"):
+                    self.callback_signal.emit(self.folder_path, previews)
+                elif callable(self.callback_signal):
+                    self.callback_signal(self.folder_path, previews)
         except Exception:
             pass
 
@@ -282,15 +317,22 @@ class FolderPreviewTask(QRunnable):
 class ThumbnailManager(QObject):
     thumbnailReady = Signal(str, str)
     folderPreviewReady = Signal(str, list)
+    _internalThumbnailDone = Signal(str, str)
+    _internalFolderPreviewDone = Signal(str, list)
 
     def __init__(self, cache_dir: Path, parent=None):
         super().__init__(parent)
         self.cache_dir = cache_dir / "thumbs"
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.thread_pool = QThreadPool.globalInstance()
+        self.thread_pool = QThreadPool(self)
+        self.thread_pool.setMaxThreadCount(4)
+        self.folder_pool = QThreadPool(self)
+        self.folder_pool.setMaxThreadCount(2)
         self.requested = set()
         self.requested_folders = set()
         self.folder_cache = {}
+        self._internalThumbnailDone.connect(self._on_thumb_task_done)
+        self._internalFolderPreviewDone.connect(self._on_folder_task_done)
 
     def remove_thumbnail_for_path(self, file_path: str):
         try:
@@ -326,7 +368,7 @@ class ThumbnailManager(QObject):
             return file_path
         try:
             st = os.stat(file_path)
-            key = f"{file_path}_{st.st_mtime}_v2_rounded".encode("utf-8")
+            key = f"{file_path}_{st.st_mtime}_v3_alpha".encode("utf-8")
             hash_base = hashlib.md5(key).hexdigest()
             for ext in (".png", ".jpg"):
                 thumb_path = self.cache_dir / f"{hash_base}{ext}"
@@ -339,8 +381,11 @@ class ThumbnailManager(QObject):
     def get_cached_folder_preview(self, folder_path: str):
         return self.folder_cache.get(folder_path, [])
 
-    def request_thumbnail(self, file_path: str):
-        if not file_path or file_path in self.requested:
+    def is_path_still_active(self, file_path: str) -> bool:
+        return file_path in self.requested
+
+    def request_thumbnail(self, file_path: str, is_high_priority: bool = False):
+        if not file_path:
             return
 
         ext = Path(file_path).suffix.lower()
@@ -352,9 +397,29 @@ class ThumbnailManager(QObject):
             self.thumbnailReady.emit(file_path, existing)
             return
 
+        if file_path in self.requested:
+            return
+
         self.requested.add(file_path)
-        task = ThumbnailTask(file_path, self.cache_dir, self.thumbnailReady)
-        self.thread_pool.start(task)
+        task = ThumbnailTask(file_path, self.cache_dir, self._internalThumbnailDone, self.is_path_still_active)
+        # QRunnable priority: Higher priority tasks run first in QThreadPool!
+        prio = 100 if is_high_priority else 10
+        self.thread_pool.start(task, priority=prio)
+
+    def prune_stale_requests(self, active_window_paths: set):
+        """Cancels queue backlog for items that left the 1-page buffer during quick scrolling."""
+        if not active_window_paths:
+            return
+        to_drop = [p for p in self.requested if p not in active_window_paths]
+        # Keep recent set compact so memory remains low
+        if len(to_drop) > 150:
+            for p in to_drop[:120]:
+                self.requested.discard(p)
+
+    def _on_thumb_task_done(self, file_path: str, thumb_path: str):
+        self.requested.discard(file_path)
+        if thumb_path:
+            self.thumbnailReady.emit(file_path, thumb_path)
 
     def request_folder_preview(self, folder_path: str, show_hidden: bool = False):
         if not folder_path:
@@ -366,8 +431,8 @@ class ThumbnailManager(QObject):
             return
 
         self.requested_folders.add(folder_path)
-        task = FolderPreviewTask(folder_path, self.cache_dir, show_hidden, self._on_folder_task_done)
-        self.thread_pool.start(task)
+        task = FolderPreviewTask(folder_path, self.cache_dir, show_hidden, self._internalFolderPreviewDone)
+        self.folder_pool.start(task)
 
     def _on_folder_task_done(self, folder_path: str, previews: list):
         self.folder_cache[folder_path] = previews

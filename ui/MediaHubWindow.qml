@@ -15,7 +15,7 @@ ApplicationWindow {
     title: "Find — Media Hub"
     flags: Qt.Window | Qt.FramelessWindowHint
 
-    color: (backend && backend.transparentBlur) ? "transparent" : Theme.bgBase
+    color: (backend && backend.transparentBlur) ? "transparent" : Theme.mhBgBase
 
     LayoutMirroring.enabled: false
     LayoutMirroring.childrenInherit: true
@@ -114,10 +114,15 @@ ApplicationWindow {
         onActivated: if (backend) backend.toggleAnonymousMode()
     }
 
+    SettingsDialog {
+        id: mhSettingsDialog
+        mediaOnlyMode: true
+    }
+
     Rectangle {
         id: mhContainer
         anchors.fill: parent
-        color: Theme.bgBase
+        color: (backend && backend.transparentBlur) ? "transparent" : Theme.mhBgBase
 
         // Completely Transparent Floating Window Drag/Control Area (No solid header bar)
         Item {
@@ -170,6 +175,40 @@ ApplicationWindow {
                 anchors.rightMargin: Math.round(18 * Theme.scaleFactor)
                 anchors.verticalCenter: parent.verticalCenter
                 spacing: Math.round(8 * Theme.scaleFactor)
+
+                // Media Settings Tab Button
+                Rectangle {
+                    height: Math.round(34 * Theme.scaleFactor)
+                    implicitWidth: mhSetRow.implicitWidth + Math.round(20 * Theme.scaleFactor)
+                    radius: height / 2
+                    color: mhSetMouse.containsMouse ? Qt.rgba(Theme.mhAccent.r, Theme.mhAccent.g, Theme.mhAccent.b, 0.28) : "#2a12121c"
+                    border.color: mhSetMouse.containsMouse ? Theme.mhAccent : "#35ffffff"
+                    border.width: 1
+
+                    RowLayout {
+                        id: mhSetRow
+                        anchors.centerIn: parent
+                        spacing: 6
+                        Text {
+                            text: "⚙️"
+                            font.pixelSize: Math.round(12 * Theme.scaleFactor)
+                        }
+                        Text {
+                            text: "Media Settings"
+                            color: Theme.textPrimary
+                            font.pixelSize: Theme.fontSizeSmall
+                            font.bold: true
+                        }
+                    }
+
+                    MouseArea {
+                        id: mhSetMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: mhSettingsDialog.openMediaSettings()
+                    }
+                }
 
                 // Maximize / Restore Button
                 Rectangle {

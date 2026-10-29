@@ -1810,6 +1810,96 @@ class MediaHubBuilderTask(QRunnable):
         # Sort all individual episode/movie additions strictly by timestamp (Newest first)
         raw_recent_events.sort(key=lambda e: e["ts"], reverse=True)
 
+        # 3b. Per-Library Recently Added Rows (Each library in Media Libraries / Jellyfin)
+        per_lib_rows = {}
+        for lib in libs:
+            lp = lib.get("path", "")
+            lib_name = lib.get("name") or Path(lp).name or "Library"
+            is_movie_lib = (lib.get("mode") == "movies")
+            if not lp or not os.path.isdir(lp):
+                continue
+            row_id = f"lib_recent_{hashlib.md5(os.path.abspath(lp).encode('utf-8')).hexdigest()[:8]}"
+            lib_events = []
+            try:
+                with os.scandir(lp) as it:
+                    for entry in it:
+                        if entry.name.startswith("."):
+                            continue
+                        try:
+                            st = entry.stat()
+                            mtime = max(st.st_mtime, getattr(st, "st_birthtime", st.st_ctime))
+                        except OSError:
+                            continue
+                        if is_movie_lib and entry.is_file() and Path(entry.name).suffix.lower() in VIDEO_EXTS:
+                            lib_events.append((mtime, entry.path, True, entry.path))
+                        elif entry.is_dir():
+                            latest_ep_ts = mtime
+                            latest_ep_file = ""
+                            try:
+                                with os.scandir(entry.path) as sub_it:
+                                    for sub_e in sub_it:
+                                        if sub_e.name.startswith("."):
+                                            continue
+                                        if sub_e.is_file() and Path(sub_e.name).suffix.lower() in VIDEO_EXTS:
+                                            sst = sub_e.stat()
+                                            ts = max(sst.st_mtime, getattr(sst, "st_birthtime", sst.st_ctime))
+                                            if ts >= latest_ep_ts or not latest_ep_file:
+                                                latest_ep_ts = max(latest_ep_ts, ts)
+                                                latest_ep_file = sub_e.path
+                                        elif sub_e.is_dir() and self.backend.jf_bridge.is_season_folder_name(sub_e.name):
+                                            with os.scandir(sub_e.path) as s_it:
+                                                for se in s_it:
+                                                    if se.is_file() and not se.name.startswith(".") and Path(se.name).suffix.lower() in VIDEO_EXTS:
+                                                        sst = se.stat()
+                                                        ts = max(sst.st_mtime, getattr(sst, "st_birthtime", sst.st_ctime))
+                                                        if ts >= latest_ep_ts or not latest_ep_file:
+                                                            latest_ep_ts = max(latest_ep_ts, ts)
+                                                            latest_ep_file = se.path
+                            except OSError:
+                                pass
+                            lib_events.append((latest_ep_ts, entry.path, False, latest_ep_file))
+            except OSError:
+                pass
+
+            lib_events.sort(key=lambda x: x[0], reverse=True)
+            lib_cards = []
+            for ts, target_p, is_mov, latest_file in lib_events[:25]:
+                p_info = self.backend.config_mgr.get_media_progress(target_p) if not os.path.isdir(target_p) else {"progress": 0.0, "position": 0.0}
+                if _is_hidden_item(target_p, float(p_info.get("progress", 0.0)), float(p_info.get("position", 0.0))):
+                    continue
+                show_jf = self.backend.jf_bridge.get_cached_item(target_p)
+                poster_p = show_jf.get("poster", "") if show_jf else ""
+                show_title = (show_jf.get("title") if show_jf else "") or (Path(target_p).stem if is_mov else ((show_jf.get("title") if show_jf else "") or Path(target_p).name))
+                if is_mov:
+                    badge_s = "MOVIE"
+                    sub_d = lib_name
+                else:
+                    if latest_file:
+                        ep_b, _ = self.backend._parse_episode_info(Path(latest_file).name)
+                        badge_s = f"Latest EP {ep_b.lstrip('0') or '1'}" if ep_b else "SERIES"
+                    else:
+                        badge_s = "SERIES"
+                    sub_d = lib_name
+                card = self._build_entry_dict(
+                    target_p,
+                    badge_text=badge_s,
+                    subtitle_text=sub_d,
+                    override_poster=poster_p
+                )
+                card["display_title"] = show_title
+                card["subtitle"] = sub_d
+                card["show_path"] = target_p
+                card["is_movie_item"] = True
+                card["is_recently_added_card"] = not is_mov
+                lib_cards.append(card)
+
+            per_lib_rows[row_id] = {
+                "id": row_id,
+                "title": f"📂  Recently Added — {lib_name}",
+                "subtitle": f"Latest titles added to {lib_name} ({lp})",
+                "items": lib_cards
+            }
+
         # Sequential Run-Length Grouping: only merge consecutive events that belong to the same show_path!
         chronological_runs = []
         for ev in raw_recent_events:
@@ -1927,7 +2017,8 @@ class MediaHubBuilderTask(QRunnable):
                 "title": "📡  Airing Weekly Tracker",
                 "subtitle": f"Live airing schedule & episode progress ({self.backend.airing_tracker.mal_username})",
                 "items": airing_items
-            }
+            },
+            **per_lib_rows
         }
 
         final_sections = []
@@ -2256,6 +2347,21 @@ class FileManagerBackend(QObject):
         if category == "clipboard" and not ncfg.get("toast_clipboard", True):
             return
         self.toastMessage.emit(msg)
+
+    @Property(str, notify=mediaHubConfigChanged)
+    def mediaHubTheme(self) -> str:
+        return str(self.config_mgr.get("media_hub_theme", "obsidian") or "obsidian")
+
+    @Slot(str)
+    def setMediaHubTheme(self, theme_id: str):
+        valid_themes = ("obsidian", "oled", "crimson", "violet", "emerald", "ocean", "match_app")
+        clean_id = str(theme_id or "obsidian").strip().lower()
+        if clean_id not in valid_themes:
+            clean_id = "obsidian"
+        if self.config_mgr.get("media_hub_theme") != clean_id:
+            self.config_mgr.set("media_hub_theme", clean_id)
+            self.mediaHubConfigChanged.emit()
+            self.toastMessage.emit(f"🎨 Media Hub theme set to '{clean_id.replace('_', ' ').title()}'")
 
     @Property(str, notify=themeColorChanged)
     def accentColor(self) -> str:
@@ -3033,18 +3139,33 @@ class FileManagerBackend(QObject):
             {"id": "next_up", "title": "Next Up", "visible": True},
             {"id": "airing", "title": "Airing Weekly Tracker", "visible": True},
         ]
+        for lib in self.getMediaLibraries():
+            lp = lib.get("path", "")
+            if not lp:
+                continue
+            lib_name = lib.get("name") or Path(lp).name or "Library"
+            rid = f"lib_recent_{hashlib.md5(os.path.abspath(lp).encode("utf-8")).hexdigest()[:8]}"
+            defaults.append({
+                "id": rid,
+                "title": f"Recently Added — {lib_name}",
+                "visible": True
+            })
+
+        valid_ids = {d["id"]: d["title"] for d in defaults}
         if not isinstance(raw, list) or not raw:
             return defaults
         seen = set()
         out = []
         for item in raw:
-            if isinstance(item, dict) and item.get("id") in ("continue_watching", "recently_added", "next_up", "airing"):
+            if isinstance(item, dict) and item.get("id") in valid_ids:
                 rid = item["id"]
                 if rid not in seen:
                     seen.add(rid)
-                    raw_t = str(item.get("title") or rid.replace("_", " ").title())
+                    raw_t = str(item.get("title") or valid_ids[rid])
                     if rid == "recently_added" and raw_t == "Recently Added Episodes":
                         raw_t = "New Episodes"
+                    elif rid.startswith("lib_recent_"):
+                        raw_t = valid_ids[rid]
                     out.append({
                         "id": rid,
                         "title": raw_t,
@@ -3196,6 +3317,7 @@ class FileManagerBackend(QObject):
                 entry["mode"] = mode if mode in ("series", "movies") else "series"
                 self.config_mgr.set("media_libraries", libs)
                 self.mediaLibraryStateChanged.emit()
+                self.mediaHubConfigChanged.emit()
                 self.refresh()
                 return
         libs.append({
@@ -3205,6 +3327,7 @@ class FileManagerBackend(QObject):
         })
         self.config_mgr.set("media_libraries", libs)
         self.mediaLibraryStateChanged.emit()
+        self.mediaHubConfigChanged.emit()
         self.refresh()
 
     @Slot(str)
@@ -3213,6 +3336,7 @@ class FileManagerBackend(QObject):
         libs = [x for x in self.getMediaLibraries() if x["path"] != norm_p and x["path"] != folder_path]
         self.config_mgr.set("media_libraries", libs)
         self.mediaLibraryStateChanged.emit()
+        self.mediaHubConfigChanged.emit()
         self.refresh()
 
     @Slot(str, str)

@@ -1,6 +1,6 @@
 {
   "modified": [
-    "core/models.py"
+    "ui/Theme.qml"
   ],
   "created": []
 }

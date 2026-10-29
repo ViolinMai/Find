@@ -5,14 +5,21 @@ import ".."
 
 Dialog {
     id: root
-    title: "Find — Settings"
+    title: root.mediaOnlyMode ? "Find — Media Settings" : "Find — Settings"
     width: Overlay.overlay ? Math.min(Math.round(880 * Theme.scaleFactor), Overlay.overlay.width - 20) : 900
     height: Overlay.overlay ? Math.min(Math.round(580 * Theme.scaleFactor), Overlay.overlay.height - 20) : 600
     modal: true
     anchors.centerIn: Overlay.overlay
     padding: 0
 
-    property int currentCategory: 0
+    property bool mediaOnlyMode: false
+    property int currentCategory: mediaOnlyMode ? 2 : 0
+
+    function openMediaSettings() {
+        root.mediaOnlyMode = true
+        root.currentCategory = 2
+        root.open()
+    }
     property var hiddenItemsList: backend ? backend.getHiddenSidebarItems() : []
     property var customQAList: backend ? backend.getAllCustomQuickAccess() : []
     property var favoritesList: backend ? backend.getFavorites() : []
@@ -263,7 +270,7 @@ Dialog {
             spacing: 12
 
             Text {
-                text: "⚙️  Find Preferences & System Integration"
+                text: root.mediaOnlyMode ? "🎬  Media Hub & Playback Settings" : "⚙️  Find Preferences & System Integration"
                 color: Theme.textPrimary
                 font.pixelSize: Theme.fontSizeTitle
                 font.bold: true
@@ -319,21 +326,22 @@ Dialog {
 
                 Repeater {
                     model: [
-                        { icon: "🎨", title: "Appearance & UI" },
-                        { icon: "⭐", title: "Quick Access & Favs" },
-                        { icon: "📺", title: "Media Library & HDR" },
-                        { icon: "🔔", title: "Notification Center" },
-                        { icon: "🎬", title: "MPV Profiles" },
-                        { icon: "🚀", title: "System & .desktop" },
-                        { icon: "🔤", title: "Fonts & Icons" }
+                        { icon: "🎨", title: "Appearance & UI", isMedia: false },
+                        { icon: "⭐", title: "Quick Access & Favs", isMedia: false },
+                        { icon: "📺", title: "Media Hub & Rows", isMedia: true },
+                        { icon: "🔔", title: "Notification Center", isMedia: true },
+                        { icon: "🎬", title: "MPV Profiles", isMedia: true },
+                        { icon: "🚀", title: "System & .desktop", isMedia: false },
+                        { icon: "🔤", title: "Fonts & Icons", isMedia: false }
                     ]
 
                     delegate: Rectangle {
                         readonly property bool activeCat: root.currentCategory === index
+                        visible: !root.mediaOnlyMode || modelData.isMedia
                         Layout.fillWidth: true
-                        height: Math.round(36 * Theme.scaleFactor)
+                        height: visible ? Math.round(36 * Theme.scaleFactor) : 0
                         radius: Theme.radiusMedium
-                        color: activeCat ? Theme.accent : (navMouse.containsMouse ? Theme.bgHover : "transparent")
+                        color: activeCat ? (root.mediaOnlyMode ? Theme.mhAccent : Theme.accent) : (navMouse.containsMouse ? Theme.bgHover : "transparent")
 
                         RowLayout {
                             anchors.fill: parent
@@ -1419,6 +1427,63 @@ Dialog {
                             ActionBtn {
                                 text: "⏹ Stop"
                                 onClicked: if (backend) backend.stopMediaDaemon()
+                            }
+                        }
+                    }
+
+                    SectionCard {
+                        sectionTitle: "🎨 Media Hub Exclusive Theme (--mh & Media Hub View)"
+                        sectionSubtitle: "Changes background, card, and accent colors strictly inside Media Hub without modifying your primary file manager theme."
+
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Repeater {
+                                model: [
+                                    { id: "obsidian", name: "Obsidian Indigo", card: "#161924", acc: "#6366f1" },
+                                    { id: "oled", name: "OLED Pitch Black", card: "#0f0f12", acc: "#38bdf8" },
+                                    { id: "crimson", name: "Cinema Crimson", card: "#241117", acc: "#f43f5e" },
+                                    { id: "violet", name: "Amethyst Night", card: "#1c1430", acc: "#a855f7" },
+                                    { id: "emerald", name: "Emerald Matrix", card: "#102620", acc: "#10b981" },
+                                    { id: "ocean", name: "Deep Ocean", card: "#102232", acc: "#0ea5e9" },
+                                    { id: "match_app", name: "Match Main App", card: Theme.bgCard, acc: Theme.accent }
+                                ]
+
+                                delegate: Rectangle {
+                                    width: Math.round(145 * Theme.scaleFactor)
+                                    height: Math.round(38 * Theme.scaleFactor)
+                                    radius: Theme.radiusMedium
+                                    color: modelData.card
+                                    border.color: (backend && backend.mediaHubTheme === modelData.id) ? modelData.acc : Theme.borderDim
+                                    border.width: (backend && backend.mediaHubTheme === modelData.id) ? 2 : 1
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.margins: 8
+                                        spacing: 8
+                                        Rectangle {
+                                            width: Math.round(12 * Theme.scaleFactor)
+                                            height: width
+                                            radius: width / 2
+                                            color: modelData.acc
+                                        }
+                                        Text {
+                                            text: modelData.name
+                                            color: Theme.textPrimary
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            font.bold: backend && backend.mediaHubTheme === modelData.id
+                                            elide: Text.ElideRight
+                                            Layout.fillWidth: true
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: if (backend) backend.setMediaHubTheme(modelData.id)
+                                    }
+                                }
                             }
                         }
                     }

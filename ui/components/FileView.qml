@@ -60,6 +60,11 @@ Rectangle {
         id: propertiesModal
     }
 
+    SettingsDialog {
+        id: mhEmbeddedSettingsDialog
+        mediaOnlyMode: true
+    }
+
     function openPropertiesForSelected() {
         if (!backend) return
         var p = (backend.selectedItem && backend.selectedItem.path) ? backend.selectedItem.path : backend.currentPath
@@ -971,9 +976,15 @@ Rectangle {
                         contentWidth: width
                         contentHeight: hubMainCol.implicitHeight + Math.round(36 * Theme.scaleFactor)
                         clip: true
+                        interactive: !hubFlickScrollBar.pressed
                         boundsBehavior: Flickable.StopAtBounds
+                        pixelAligned: false
 
-                        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                        ScrollBar.vertical: ScrollBar {
+                            id: hubFlickScrollBar
+                            policy: ScrollBar.AsNeeded
+                            minimumSize: 0.08
+                        }
 
                         ColumnLayout {
                             id: hubMainCol
@@ -1041,21 +1052,45 @@ Rectangle {
                                         }
                                     }
 
-                                    Button {
-                                        text: "🔄 Sync Hub"
-                                        onClicked: if (backend) backend.syncJellyfinAndRefresh()
-                                        contentItem: Text {
-                                            text: parent.text
-                                            color: "#ffffff"
-                                            font.bold: true
-                                            font.pixelSize: Theme.fontSizeSmall
-                                            horizontalAlignment: Text.AlignHCenter
+                                    RowLayout {
+                                        spacing: 8
+
+                                        Button {
+                                            text: "⚙️ Media Settings"
+                                            onClicked: mhEmbeddedSettingsDialog.openMediaSettings()
+                                            contentItem: Text {
+                                                text: parent.text
+                                                color: "#ffffff"
+                                                font.bold: true
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                horizontalAlignment: Text.AlignHCenter
+                                            }
+                                            background: Rectangle {
+                                                implicitWidth: Math.round(120 * Theme.scaleFactor)
+                                                implicitHeight: Math.round(30 * Theme.scaleFactor)
+                                                radius: Theme.radiusMedium
+                                                color: parent.hovered ? Qt.rgba(Theme.mhAccent.r, Theme.mhAccent.g, Theme.mhAccent.b, 0.4) : Qt.rgba(Theme.mhAccent.r, Theme.mhAccent.g, Theme.mhAccent.b, 0.22)
+                                                border.color: Theme.mhAccent
+                                                border.width: 1
+                                            }
                                         }
-                                        background: Rectangle {
-                                            implicitWidth: Math.round(92 * Theme.scaleFactor)
-                                            implicitHeight: Math.round(30 * Theme.scaleFactor)
-                                            radius: Theme.radiusMedium
-                                            color: parent.hovered ? Theme.accentHover : Theme.accent
+
+                                        Button {
+                                            text: "🔄 Sync Hub"
+                                            onClicked: if (backend) backend.syncJellyfinAndRefresh()
+                                            contentItem: Text {
+                                                text: parent.text
+                                                color: "#ffffff"
+                                                font.bold: true
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                horizontalAlignment: Text.AlignHCenter
+                                            }
+                                            background: Rectangle {
+                                                implicitWidth: Math.round(92 * Theme.scaleFactor)
+                                                implicitHeight: Math.round(30 * Theme.scaleFactor)
+                                                radius: Theme.radiusMedium
+                                                color: parent.hovered ? Theme.accentHover : Theme.accent
+                                            }
                                         }
                                     }
                                 }
@@ -1155,7 +1190,9 @@ Rectangle {
                                         spacing: Math.round(12 * Theme.scaleFactor)
                                         clip: true
                                         boundsBehavior: Flickable.StopAtBounds
+                                        pixelAligned: false
                                         reuseItems: false
+                                        cacheBuffer: 3000
                                         model: sectionBlock.cards_model
 
                                         delegate: Rectangle {
@@ -1596,11 +1633,13 @@ Rectangle {
                         visible: backend ? (backend.viewMode === "details" && !backend.isMediaHubView) : true
                         model: visible && backend ? backend.files : null
                         clip: true
-                        interactive: true
+                        interactive: !fileListScrollBar.pressed
                         flickableDirection: Flickable.VerticalFlick
                         contentWidth: width
                         boundsBehavior: Flickable.StopAtBounds
-                        pixelAligned: true
+                        pixelAligned: false
+                        reuseItems: true
+                        cacheBuffer: 3200
                         flickDeceleration: 4500
                         maximumFlickVelocity: 14000
                         focus: true
@@ -1704,8 +1743,10 @@ Rectangle {
                         }
 
                         ScrollBar.vertical: ScrollBar {
+                            id: fileListScrollBar
                             active: true
                             policy: ScrollBar.AsNeeded
+                            minimumSize: 0.06
                         }
 
                         delegate: Item {
@@ -1723,14 +1764,27 @@ Rectangle {
                             readonly property bool isHiddenEntry: model.name !== undefined && model.name.startsWith(".")
                             opacity: isHiddenEntry ? 0.52 : 1.0
 
-                            Component.onCompleted: {
-                                if (!backend) return
-                                if (model.is_dir) {
-                                    backend.requestFolderPreview(model.path)
-                                } else if (model.thumb === "") {
-                                    backend.requestItemThumbnail(model.path)
+                            Timer {
+                                id: listLazyThumbTimer
+                                interval: (fileListScrollBar.pressed || fileListView.moving) ? 180 : 16
+                                repeat: false
+                                onTriggered: {
+                                    if (!backend || !rowContainer.visible) return
+                                    if (fileListScrollBar.pressed || fileListView.moving) {
+                                        listLazyThumbTimer.restart()
+                                        return
+                                    }
+                                    if (model.is_dir) {
+                                        backend.requestFolderPreview(model.path)
+                                    } else if (model.thumb === "") {
+                                        backend.requestItemThumbnail(model.path)
+                                    }
                                 }
                             }
+
+                            Component.onCompleted: listLazyThumbTimer.restart()
+                            ListView.onPooled: listLazyThumbTimer.stop()
+                            ListView.onReused: listLazyThumbTimer.restart()
 
                             Rectangle {
                                 visible: rowContainer.showMovieSeparator && index > 0
@@ -2152,11 +2206,13 @@ Rectangle {
                         visible: backend ? (backend.viewMode === "grid" && !backend.isMediaHubView) : false
                         model: visible && backend ? backend.files : null
                         clip: true
-                        interactive: true
+                        interactive: !fileGridScrollBar.pressed
                         flickableDirection: Flickable.VerticalFlick
                         contentWidth: width
                         boundsBehavior: Flickable.StopAtBounds
-                        pixelAligned: true
+                        pixelAligned: false
+                        reuseItems: true
+                        cacheBuffer: 3600
                         flickDeceleration: 4500
                         maximumFlickVelocity: 14000
                         focus: true
@@ -2273,8 +2329,10 @@ Rectangle {
                         cellHeight: Math.round(cellWidth * (isMoviePosterGrid ? 1.44 : 1.02))
 
                         ScrollBar.vertical: ScrollBar {
+                            id: fileGridScrollBar
                             active: true
                             policy: ScrollBar.AsNeeded
+                            minimumSize: 0.06
                         }
                         ScrollBar.horizontal: ScrollBar {
                             active: true
@@ -2300,14 +2358,27 @@ Rectangle {
                             readonly property bool hasMoviePoster: model.poster !== undefined && model.poster !== "" && (!model.is_dir || (backend && backend.showSeriesPosters))
                             readonly property bool hasMediaThumb: hasMoviePoster || (!model.is_dir && (model.thumb !== "" || (model.icon && (model.icon.indexOf("/") !== -1 || model.icon.indexOf(".") !== -1))))
 
-                            Component.onCompleted: {
-                                if (!backend) return
-                                if (model.is_dir) {
-                                    backend.requestFolderPreview(model.path)
-                                } else if (model.thumb === "") {
-                                    backend.requestItemThumbnail(model.path)
+                            Timer {
+                                id: gridLazyThumbTimer
+                                interval: (fileGridScrollBar.pressed || fileGridView.moving) ? 180 : 16
+                                repeat: false
+                                onTriggered: {
+                                    if (!backend || !gridContainer.visible) return
+                                    if (fileGridScrollBar.pressed || fileGridView.moving) {
+                                        gridLazyThumbTimer.restart()
+                                        return
+                                    }
+                                    if (model.is_dir) {
+                                        backend.requestFolderPreview(model.path)
+                                    } else if (model.thumb === "") {
+                                        backend.requestItemThumbnail(model.path)
+                                    }
                                 }
                             }
+
+                            Component.onCompleted: gridLazyThumbTimer.restart()
+                            GridView.onPooled: gridLazyThumbTimer.stop()
+                            GridView.onReused: gridLazyThumbTimer.restart()
 
                             Rectangle {
                                 id: gridDelegate

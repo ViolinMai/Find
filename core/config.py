@@ -147,6 +147,7 @@ class ConfigManager:
         "folder_visit_counts": {},
         "favorites": [],
         "saved_desktop_apps": [],
+        "custom_automations": [],
         "custom_open_rules": {
             "groups": {},
             "extensions": {}

@@ -351,7 +351,8 @@ Dialog {
                                { icon: "🔔", title: "Notification Center", pageIdx: 3 },
                                { icon: "🎬", title: "MPV Profiles", pageIdx: 4 },
                                { icon: "🚀", title: "System & .desktop", pageIdx: 5 },
-                               { icon: "📂", title: "Default Open & Fonts", pageIdx: 6 }
+                               { icon: "📂", title: "Default Open & Fonts", pageIdx: 6 },
+                               { icon: "🐍", title: "Python Automations", pageIdx: 7 }
                              ]
 
                     delegate: Rectangle {
@@ -2482,6 +2483,231 @@ Dialog {
                                         onClicked: {
                                             backend.restoreSidebarItem(modelData)
                                             root.hiddenItemsList = backend.getHiddenSidebarItems()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // =================================================================
+            // PAGE 7: PYTHON AUTOMATIONS & SCRIPTING ENGINE
+            // =================================================================
+            ScrollView {
+                clip: true
+                contentWidth: availableWidth
+
+                ColumnLayout {
+                    width: parent.width - 28
+                    x: 14
+                    y: 14
+                    spacing: 14
+
+                    SectionCard {
+                        sectionTitle: "🐍 Deep Python Automation & Batch Scripts"
+                        sectionSubtitle: "Create custom Python scripts to manipulate selected files, batch rename, transcode via FFmpeg, or fetch metadata. Scripts receive the current directory and selections via Environment Variables."
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: autoInfoCol.implicitHeight + 16
+                            color: Theme.bgSurface
+                            radius: Theme.radiusMedium
+                            border.color: Theme.borderDim
+
+                            ColumnLayout {
+                                id: autoInfoCol
+                                anchors.fill: parent
+                                anchors.margins: 10
+                                spacing: 4
+
+                                Text {
+                                    text: "Script Execution Context & Environment Variables:"
+                                    color: Theme.accent
+                                    font.bold: true
+                                    font.pixelSize: Theme.fontSizeSmall
+                                }
+                                Text {
+                                    text: "• os.environ['FIND_CURRENT_PATH']   → Absolute path of active folder\n• os.environ['FIND_SELECTED_PATHS'] → Multi-line list of selected items\n• os.environ['FIND_SELECTED_FILE']  → Primary selected file path"
+                                    color: Theme.textPrimary
+                                    font.family: "monospace"
+                                    font.pixelSize: Math.round(9.5 * Theme.scaleFactor)
+                                }
+                                Text {
+                                    text: "Scripts Folder: " + (backend ? backend.getAutomationsDirectory() : "~/.config/find/scripts")
+                                    color: Theme.textTertiary
+                                    font.family: "monospace"
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    elide: Text.ElideMiddle
+                                    Layout.fillWidth: true
+                                }
+                            }
+                        }
+
+                        GridLayout {
+                            columns: 3
+                            Layout.fillWidth: true
+                            rowSpacing: 8
+                            columnSpacing: 10
+
+                            Text { text: "Automation Name:"; color: Theme.textSecondary; font.bold: true }
+                            TextField {
+                                id: autoNameInput
+                                Layout.columnSpan: 2
+                                Layout.fillWidth: true
+                                placeholderText: "e.g. Extract Subs & Audio / Batch WebP Convert"
+                                color: Theme.textPrimary
+                                selectByMouse: true
+                                background: Rectangle { color: Theme.bgSurface; radius: 4; border.color: Theme.borderDim }
+                            }
+
+                            Text { text: "Script Path (.py):"; color: Theme.textSecondary; font.bold: true }
+                            TextField {
+                                id: autoPathInput
+                                Layout.fillWidth: true
+                                placeholderText: "/home/user/.config/find/scripts/task.py"
+                                color: Theme.textPrimary
+                                font.family: "monospace"
+                                selectByMouse: true
+                                background: Rectangle { color: Theme.bgSurface; radius: 4; border.color: Theme.borderDim }
+                            }
+                            ActionBtn {
+                                text: "Browse Script..."
+                                isPrimary: true
+                                onClicked: {
+                                    root.activePickerTarget = "custom_script_pick"
+                                    backend.openInternalPicker("file", "*.py;*.sh", "Select Script File")
+                                }
+                            }
+
+                            Text { text: "Shortcut Key:"; color: Theme.textSecondary; font.bold: true }
+                            TextField {
+                                id: autoShortcutInput
+                                Layout.columnSpan: 2
+                                Layout.fillWidth: true
+                                placeholderText: "e.g. Ctrl+Shift+E (Optional)"
+                                color: Theme.textPrimary
+                                selectByMouse: true
+                                background: Rectangle { color: Theme.bgSurface; radius: 4; border.color: Theme.borderDim }
+                            }
+
+                            Text { text: "Description:"; color: Theme.textSecondary }
+                            TextField {
+                                id: autoDescInput
+                                Layout.columnSpan: 2
+                                Layout.fillWidth: true
+                                placeholderText: "Short description of what the automation does"
+                                color: Theme.textPrimary
+                                selectByMouse: true
+                                background: Rectangle { color: Theme.bgSurface; radius: 4; border.color: Theme.borderDim }
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "Run in visible Terminal window (for interactive scripts / CLI prompts):"
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeSmall
+                                Layout.fillWidth: true
+                            }
+                            Switch {
+                                id: autoTermSwitch
+                                checked: false
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            ActionBtn {
+                                text: "💾 Save Automation"
+                                isPrimary: true
+                                enabled: autoNameInput.text.trim() !== "" && autoPathInput.text.trim() !== ""
+                                onClicked: {
+                                    if (backend) {
+                                        backend.saveCustomAutomation(
+                                            autoNameInput.text,
+                                            autoPathInput.text,
+                                            autoShortcutInput.text,
+                                            autoDescInput.text,
+                                            autoTermSwitch.checked
+                                        )
+                                        autoNameInput.text = ""
+                                        autoPathInput.text = ""
+                                        autoShortcutInput.text = ""
+                                        autoDescInput.text = ""
+                                    }
+                                }
+                            }
+                            ActionBtn {
+                                text: "📂 Open Scripts Folder in Find"
+                                onClicked: if (backend) backend.navigateTo(backend.getAutomationsDirectory())
+                            }
+                        }
+                    }
+
+                    SectionCard {
+                        sectionTitle: "⚡ Registered Automations"
+                        sectionSubtitle: "Your installed automation tasks. Click Run to test on active directory/selection."
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Repeater {
+                                model: backend ? backend.getCustomAutomations() : []
+                                delegate: Rectangle {
+                                    Layout.fillWidth: true
+                                    height: Math.round(44 * Theme.scaleFactor)
+                                    radius: Theme.radiusSmall
+                                    color: Theme.bgSurface
+                                    border.color: Theme.borderDim
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 12
+                                        anchors.rightMargin: 10
+                                        spacing: 10
+
+                                        Text { text: "🐍"; font.pixelSize: Theme.fontSizeMedium }
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 1
+                                            RowLayout {
+                                                spacing: 8
+                                                Text { text: modelData.name; color: Theme.textPrimary; font.bold: true; font.pixelSize: Theme.fontSizeNormal }
+                                                Rectangle {
+                                                    visible: modelData.shortcut !== ""
+                                                    implicitWidth: scTxtAuto.implicitWidth + 8
+                                                    implicitHeight: Math.round(18 * Theme.scaleFactor)
+                                                    radius: Theme.radiusSmall
+                                                    color: Theme.bgCard
+                                                    border.color: Theme.borderDim
+                                                    Text {
+                                                        id: scTxtAuto
+                                                        anchors.centerIn: parent
+                                                        text: modelData.shortcut
+                                                        color: Theme.accent
+                                                        font.bold: true
+                                                        font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
+                                                    }
+                                                }
+                                            }
+                                            Text { text: modelData.description || modelData.script_path; color: Theme.textTertiary; font.pixelSize: Theme.fontSizeSmall; elide: Text.ElideRight; Layout.fillWidth: true }
+                                        }
+
+                                        ActionBtn {
+                                            text: "▶ Run"
+                                            isPrimary: true
+                                            onClicked: if (backend) backend.runAutomationByName(modelData.name)
+                                        }
+
+                                        ActionBtn {
+                                            text: "🗑️"
+                                            isDanger: true
+                                            onClicked: if (backend) backend.removeCustomAutomation(modelData.name)
                                         }
                                     }
                                 }

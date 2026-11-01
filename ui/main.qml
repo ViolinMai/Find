@@ -241,6 +241,16 @@ ApplicationWindow {
         }
     }
 
+    // Dynamic Custom Automation Shortcuts (Loaded directly from Python Automations Engine)
+    Repeater {
+        model: backend ? backend.getCustomAutomations() : []
+        delegate: Shortcut {
+            sequence: modelData.shortcut || ""
+            enabled: sequence !== "" && !addressBar.isEditingPath && !addressBar.isSearchActive && !root.isModalOpen && !root.isTextInputFocused
+            onActivated: if (backend) backend.runAutomationByName(modelData.name)
+        }
+    }
+
     // Global Window Shortcuts (Active when no modal dialog or text input is capturing keys)
     Shortcut {
         sequences: ["F", "F11"]

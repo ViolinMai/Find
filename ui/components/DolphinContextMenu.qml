@@ -380,6 +380,13 @@ StyledMenu {
 
 
     StyledMenuItem {
+        iconGlyph: "🛡️"
+        text: "Open as Administrator (Root / Polkit)"
+        font.bold: true
+        onTriggered: if (backend) backend.openAsAdmin(root.targetPath)
+    }
+
+    StyledMenuItem {
         iconGlyph: "💻"
         text: "Open Terminal Here"
         visible: root.isDir

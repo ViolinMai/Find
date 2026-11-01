@@ -1121,7 +1121,7 @@ class DirectoryLoaderTask(QRunnable):
                             "poster": ""
                         })
         except PermissionError:
-            self.signals.directoryLoadError.emit(self.target_path_str, f"🔒 Permission denied: {self.target_path_str}")
+            self.signals.directoryLoadError.emit(self.target_path_str, f"🔒 Permission denied: {self.target_path_str} (Use 'Open as Admin')")
         except Exception as e:
             self.signals.directoryLoadError.emit(self.target_path_str, f"⚠️ Failed to read folder: {e}")
 
@@ -1800,12 +1800,12 @@ class MediaHubBuilderTask(QRunnable):
         poster = override_poster or (jf_meta.get("poster") if jf_meta else "") or (parent_jf.get("poster") if parent_jf else "")
         if not poster:
             if is_dir:
-                poster = self._resolve_folder_poster_candidate(target_path)
+                poster = self.backend._resolve_folder_poster_candidate(target_path)
             elif not is_movie_flag:
-                cand_show_dir = str(p_obj.parent.parent if self.jf_bridge.is_season_folder_name(p_obj.parent.name) else p_obj.parent)
-                poster = self._resolve_folder_poster_candidate(cand_show_dir)
+                cand_show_dir = str(p_obj.parent.parent if self.backend.jf_bridge.is_season_folder_name(p_obj.parent.name) else p_obj.parent)
+                poster = self.backend._resolve_folder_poster_candidate(cand_show_dir)
             else:
-                poster = self._resolve_folder_poster_candidate(str(p_obj.parent))
+                poster = self.backend._resolve_folder_poster_candidate(str(p_obj.parent))
 
         series_title = (jf_meta.get("series_name") if jf_meta else "") or (parent_jf.get("title") if parent_jf else "")
 
@@ -2408,6 +2408,8 @@ class FileManagerBackend(QObject):
     requestRefreshSignal = Signal()
     scrollToSelectionRequested = Signal()
     defaultOpenRulesChanged = Signal()
+    automationsChanged = Signal()
+    privilegeElevationRequired = Signal(str, str)
 
     def __init__(self, parent=None, is_picker_mode: bool = False, is_mediahub_mode: bool = False):
         super().__init__(parent)
@@ -4705,7 +4707,120 @@ class FileManagerBackend(QObject):
     def files(self):
         return self.file_model
 
-    def _run_bg_task(self, fn):
+    def _execute_privileged_command(self, cmd_args: list) -> tuple:
+        """Executes a command via pkexec (Polkit GUI auth dialog)."""
+        pkexec_bin = shutil.which("pkexec")
+        if not pkexec_bin:
+            return False, "pkexec (Polkit) not installed on this system."
+        full_cmd = [pkexec_bin] + cmd_args
+        try:
+            res = subprocess.run(full_cmd, capture_output=True, text=True, timeout=120)
+            if res.returncode == 0:
+                return True, res.stdout.strip()
+            return False, res.stderr.strip() or "Authorization cancelled or failed."
+        except Exception as e:
+            return False, str(e)
+
+    @Slot(str)
+    def openAsAdmin(self, path_str: str):
+        """Launches directory or file with root authorization via Polkit / Terminal."""
+        target = os.path.abspath(path_str) if path_str else str(self._current_path)
+        main_script = str(Path(__file__).resolve().parent.parent / "main.py")
+        exec_args = [sys.executable, target] if getattr(sys, "frozen", False) else [sys.executable, main_script, target]
+        def _launch():
+            ok, msg = self._execute_privileged_command(exec_args)
+            if not ok:
+                self.toastMessage.emit(f"⚠️ Elevation failed: {msg}")
+        self._run_bg_task(_launch)
+
+    # ==========================================================================
+    # Python Scripting & Automation Engine
+    # ==========================================================================
+
+    @Slot(result=str)
+    def getAutomationsDirectory(self) -> str:
+        s_dir = self.config_mgr.config_dir / "scripts"
+        s_dir.mkdir(parents=True, exist_ok=True)
+        return str(s_dir)
+
+    @Slot(result=list)
+    def getCustomAutomations(self) -> list:
+        return list(self.config_mgr.get("custom_automations", []))
+
+    @Slot(str, str, str, str, bool)
+    def saveCustomAutomation(self, name: str, script_path: str, shortcut_key: str, description: str, run_in_term: bool):
+        clean_name = name.strip()
+        clean_path = script_path.strip()
+        if not clean_name or not clean_path:
+            return
+        automations = list(self.config_mgr.get("custom_automations", []))
+        rec = {
+            "name": clean_name,
+            "script_path": os.path.abspath(os.path.expanduser(clean_path)),
+            "shortcut": shortcut_key.strip(),
+            "description": description.strip(),
+            "run_in_term": bool(run_in_term)
+        }
+        replaced = False
+        for i, a in enumerate(automations):
+            if a.get("name") == clean_name:
+                automations[i] = rec
+                replaced = True
+                break
+        if not replaced:
+            automations.append(rec)
+        self.config_mgr.set("custom_automations", automations)
+        self.automationsChanged.emit()
+        self.toastMessage.emit(f"✔ Automation '{clean_name}' saved")
+
+    @Slot(str)
+    def removeCustomAutomation(self, name: str):
+        automations = [a for a in self.config_mgr.get("custom_automations", []) if a.get("name") != name]
+        self.config_mgr.set("custom_automations", automations)
+        self.automationsChanged.emit()
+        self.toastMessage.emit(f"🗑️ Removed automation '{name}'")
+
+    @Slot(str)
+    def runAutomationByName(self, name: str):
+        automations = self.config_mgr.get("custom_automations", [])
+        matched = next((a for a in automations if a.get("name") == name), None)
+        if not matched:
+            return
+        script_file = matched.get("script_path", "")
+        if not os.path.isfile(script_file):
+            self.toastMessage.emit(f"⚠️ Script file not found: {script_file}")
+            return
+
+        cur_dir = str(self._current_path)
+        selected = list(self._selected_paths)
+        env = dict(os.environ)
+        env["FIND_CURRENT_PATH"] = cur_dir
+        env["FIND_SELECTED_PATHS"] = "\n".join(selected)
+        env["FIND_SELECTED_FILE"] = selected[0] if selected else ""
+        env["FIND_ANONYMOUS_MODE"] = "1" if self._anonymous_mode else "0"
+
+        args = [sys.executable, script_file] if script_file.endswith(".py") else [script_file]
+        run_in_term = bool(matched.get("run_in_term", False))
+
+        def _exec_script():
+            try:
+                if run_in_term:
+                    term_bin = os.environ.get("TERMINAL") or "kitty"
+                    cmd_term = [term_bin, "-e"] + args if shutil.which(term_bin) else args
+                    subprocess.Popen(cmd_term, cwd=cur_dir, env=env, start_new_session=True)
+                else:
+                    res = subprocess.run(args, cwd=cur_dir, env=env, capture_output=True, text=True, timeout=180)
+                    if res.returncode == 0:
+                        out_msg = res.stdout.strip().splitlines()[-1] if res.stdout.strip() else f"✔ Automation '{name}' finished"
+                        self.toastMessage.emit(out_msg[:120])
+                        self.signals.requestRefresh.emit()
+                    else:
+                        err_msg = res.stderr.strip().splitlines()[-1] if res.stderr.strip() else f"Automation '{name}' failed"
+                        self.toastMessage.emit(f"⚠️ {err_msg[:120]}")
+            except Exception as e:
+                self.toastMessage.emit(f"⚠️ Automation error: {e}")
+
+        self._run_bg_task(_exec_script)
         task = CallableTask(fn, on_done=lambda t: self._active_bg_tasks.discard(t))
         self._active_bg_tasks.add(task)
         self.thread_pool.start(task)

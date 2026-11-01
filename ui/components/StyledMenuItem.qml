@@ -15,21 +15,63 @@ MenuItem {
     height: visible ? implicitHeight : 0
     padding: 0
 
-    readonly property bool isHighlighted: (itemHover.hovered || (menuItem.subMenu && menuItem.subMenu.visible)) && menuItem.enabled
+    property bool pointerInside: false
+    readonly property bool isHighlighted: (pointerInside || (menuItem.subMenu && menuItem.subMenu.visible)) && menuItem.enabled
 
-    HoverHandler {
-        id: itemHover
-        onHoveredChanged: {
-            if (hovered && menuItem.menu) {
-                for (var i = 0; i < menuItem.menu.count; ++i) {
-                    if (menuItem.menu.itemAt(i) === menuItem) {
-                        menuItem.menu.currentIndex = i
-                        break
-                    }
+    onVisibleChanged: {
+        if (!visible) pointerInside = false
+    }
+
+    Connections {
+        target: menuItem.menu
+        function onAboutToShow() {
+            menuItem.pointerInside = false
+        }
+        function onClosed() {
+            menuItem.pointerInside = false
+        }
+    }
+
+    Timer {
+        id: subMenuOpenTimer
+        interval: 120
+        repeat: false
+        onTriggered: {
+            if (menuItem.pointerInside && menuItem.subMenu && !menuItem.subMenu.visible && menuItem.enabled) {
+                menuItem.subMenu.popup(menuItem, menuItem.width - 2, 0)
+            }
+        }
+    }
+
+    MouseArea {
+        id: itemHoverArea
+        anchors.fill: parent
+        hoverEnabled: true
+        acceptedButtons: Qt.LeftButton
+        onEntered: {
+            menuItem.pointerInside = true
+            if (menuItem.menu && typeof menuItem.menu.closeOtherSubMenus === "function") {
+                menuItem.menu.closeOtherSubMenus(menuItem)
+            }
+            if (menuItem.subMenu) {
+                subMenuOpenTimer.restart()
+            }
+        }
+        onExited: {
+            menuItem.pointerInside = false
+            subMenuOpenTimer.stop()
+        }
+        onClicked: function(mouse) {
+            if (!menuItem.enabled) return
+            if (menuItem.subMenu) {
+                if (!menuItem.subMenu.visible) {
+                    menuItem.subMenu.popup(menuItem, menuItem.width - 2, 0)
                 }
-            } else if (!hovered && menuItem.menu && menuItem.highlighted) {
-                if (!menuItem.subMenu || !menuItem.subMenu.visible) {
-                    menuItem.menu.currentIndex = -1
+            } else {
+                menuItem.pointerInside = false
+                menuItem.triggered()
+                if (menuItem.menu) {
+                    menuItem.menu.close()
                 }
             }
         }

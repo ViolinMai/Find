@@ -9,7 +9,7 @@ from pathlib import Path
 from PySide6.QtCore import QObject, Signal, QRunnable, QThreadPool
 from PIL import Image, ImageDraw, ImageChops
 
-IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".ico", ".svg"}
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".ico"}
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".m4v"}
 TEXT_EXTS = {
     ".txt", ".md", ".py", ".rs", ".json", ".toml", ".yaml", ".yml",
@@ -329,7 +329,9 @@ class ThumbnailManager(QObject):
         self.folder_pool = QThreadPool(self)
         self.folder_pool.setMaxThreadCount(2)
         self.requested = set()
+        self.in_flight = set()
         self.requested_folders = set()
+        self.in_flight_folders = set()
         self.folder_cache = {}
         self._internalThumbnailDone.connect(self._on_thumb_task_done)
         self._internalFolderPreviewDone.connect(self._on_folder_task_done)
@@ -362,10 +364,10 @@ class ThumbnailManager(QObject):
         if not file_path:
             return ""
         ext_low = os.path.splitext(file_path)[1].lower()
-        if ext_low not in IMAGE_EXTS and ext_low not in VIDEO_EXTS:
-            return ""
         if ext_low == ".svg":
             return file_path
+        if ext_low not in IMAGE_EXTS and ext_low not in VIDEO_EXTS:
+            return ""
         try:
             st = os.stat(file_path)
             key = f"{file_path}_{st.st_mtime}_v3_alpha".encode("utf-8")
@@ -384,6 +386,12 @@ class ThumbnailManager(QObject):
     def is_path_still_active(self, file_path: str) -> bool:
         return file_path in self.requested
 
+    def _mark_in_flight(self, file_path: str) -> bool:
+        if file_path not in self.requested:
+            return False
+        self.in_flight.add(file_path)
+        return True
+
     def request_thumbnail(self, file_path: str, is_high_priority: bool = False):
         if not file_path:
             return
@@ -394,46 +402,54 @@ class ThumbnailManager(QObject):
 
         existing = self.get_existing_thumbnail(file_path)
         if existing:
+            self.requested.discard(file_path)
+            self.in_flight.discard(file_path)
             self.thumbnailReady.emit(file_path, existing)
             return
 
-        if file_path in self.requested:
+        if file_path in self.in_flight:
+            return
+        if file_path in self.requested and not is_high_priority:
             return
 
         self.requested.add(file_path)
-        task = ThumbnailTask(file_path, self.cache_dir, self._internalThumbnailDone, self.is_path_still_active)
-        # QRunnable priority: Higher priority tasks run first in QThreadPool!
+        task = ThumbnailTask(file_path, self.cache_dir, self._internalThumbnailDone, self._mark_in_flight)
         prio = 100 if is_high_priority else 10
         self.thread_pool.start(task, priority=prio)
 
     def prune_stale_requests(self, active_window_paths: set):
-        """Cancels queue backlog for items that left the 1-page buffer during quick scrolling."""
+        """Cancels queued (not yet running) tasks that scrolled out of the active viewport window."""
         if not active_window_paths:
             return
-        to_drop = [p for p in self.requested if p not in active_window_paths]
-        # Keep recent set compact so memory remains low
-        if len(to_drop) > 150:
-            for p in to_drop[:120]:
-                self.requested.discard(p)
+        to_drop = [p for p in list(self.requested) if p not in active_window_paths and p not in self.in_flight]
+        for p in to_drop:
+            self.requested.discard(p)
 
     def _on_thumb_task_done(self, file_path: str, thumb_path: str):
         self.requested.discard(file_path)
+        self.in_flight.discard(file_path)
         if thumb_path:
             self.thumbnailReady.emit(file_path, thumb_path)
 
-    def request_folder_preview(self, folder_path: str, show_hidden: bool = False):
+    def request_folder_preview(self, folder_path: str, show_hidden: bool = False, is_high_priority: bool = False):
         if not folder_path:
             return
         if folder_path in self.folder_cache:
-            self.folderPreviewReady.emit(folder_path, self.folder_cache[folder_path])
+            if self.folder_cache[folder_path]:
+                self.folderPreviewReady.emit(folder_path, self.folder_cache[folder_path])
             return
-        if folder_path in self.requested_folders:
+        if folder_path in self.in_flight_folders or folder_path in self.requested_folders:
             return
 
         self.requested_folders.add(folder_path)
+        self.in_flight_folders.add(folder_path)
         task = FolderPreviewTask(folder_path, self.cache_dir, show_hidden, self._internalFolderPreviewDone)
-        self.folder_pool.start(task)
+        prio = 90 if is_high_priority else 10
+        self.folder_pool.start(task, priority=prio)
 
     def _on_folder_task_done(self, folder_path: str, previews: list):
-        self.folder_cache[folder_path] = previews
-        self.folderPreviewReady.emit(folder_path, previews)
+        self.requested_folders.discard(folder_path)
+        self.in_flight_folders.discard(folder_path)
+        self.folder_cache[folder_path] = previews if previews else []
+        if previews:
+            self.folderPreviewReady.emit(folder_path, previews)

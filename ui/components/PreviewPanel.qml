@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Effects
 import ".."
 
 Rectangle {
@@ -44,7 +45,7 @@ Rectangle {
                 previews: (root.hasSelection && root.item.folder_previews) ? root.item.folder_previews : []
             }
 
-            // Image, Video, or Jellyfin Vertical Movie Poster Preview
+            // Image, Video, or Jellyfin Vertical Movie Poster Preview (With Rounded Corners Mask Matching Exact Painted Bounds)
             Item {
                 visible: root.hasSelection && (parent.hasPosterImg || root.item.is_image === true || (root.item.is_video === true && root.safeVal(root.item.thumb) !== ""))
                 anchors.fill: parent
@@ -54,6 +55,7 @@ Rectangle {
                     anchors.centerIn: parent
                     width: parent.width
                     height: parent.height
+                    visible: false
                     source: parent.visible
                             ? (parent.parent.hasPosterImg
                                ? ("file://" + root.safeVal(root.item.poster))
@@ -62,18 +64,49 @@ Rectangle {
                     fillMode: Image.PreserveAspectFit
                     asynchronous: true
                     cache: true
+                    smooth: true
                     mipmap: true
                 }
 
-                Rectangle {
-                    anchors.centerIn: panelImg
-                    width: panelImg.paintedWidth > 0 ? panelImg.paintedWidth : 0
-                    height: panelImg.paintedHeight > 0 ? panelImg.paintedHeight : 0
-                    radius: Math.round(9 * Theme.scaleFactor)
-                    color: "transparent"
-                    border.color: parent.parent.hasPosterImg ? "transparent" : Theme.borderDim
-                    border.width: parent.parent.hasPosterImg ? 0 : 1
-                    visible: panelImg.status === Image.Ready
+                Item {
+                    id: paintedImgBox
+                    anchors.centerIn: parent
+                    width: panelImg.paintedWidth > 0 ? Math.round(panelImg.paintedWidth) : 0
+                    height: panelImg.paintedHeight > 0 ? Math.round(panelImg.paintedHeight) : 0
+                    visible: panelImg.status === Image.Ready && width > 0 && height > 0
+
+                    Rectangle {
+                        id: panelImgMask
+                        anchors.fill: parent
+                        radius: Math.round(9 * Theme.scaleFactor)
+                        visible: false
+                        layer.enabled: true
+                        layer.smooth: true
+                    }
+
+                    Image {
+                        anchors.fill: parent
+                        source: panelImg.source
+                        fillMode: Image.Stretch
+                        asynchronous: true
+                        cache: true
+                        smooth: true
+                        mipmap: true
+                        layer.enabled: paintedImgBox.visible
+                        layer.smooth: true
+                        layer.effect: MultiEffect {
+                            maskEnabled: true
+                            maskSource: panelImgMask
+                        }
+                    }
+
+                    Rectangle {
+                        anchors.fill: parent
+                        radius: Math.round(9 * Theme.scaleFactor)
+                        color: "transparent"
+                        border.color: parent.parent.parent.hasPosterImg ? "transparent" : Theme.borderDim
+                        border.width: parent.parent.parent.hasPosterImg ? 0 : 1
+                    }
                 }
             }
 
@@ -103,7 +136,7 @@ Rectangle {
                 }
             }
 
-            // Empty / No Selection Fallback
+            // Crisp Vector Icon or Empty / No Selection Fallback
             Rectangle {
                 anchors.fill: parent
                 visible: !root.hasSelection || (!root.item.is_dir && !root.item.is_image && (!root.item.is_video || root.safeVal(root.item.thumb) === "") && root.safeVal(root.item.preview_text) === "")
@@ -112,14 +145,36 @@ Rectangle {
                 border.color: Theme.borderDim
                 border.width: 1
 
-                Text {
+                readonly property string itemIconVal: root.hasSelection ? root.safeVal(root.item.icon) : ""
+                readonly property bool hasCustomFileIcon: itemIconVal.indexOf("/") !== -1 || itemIconVal.indexOf(".") !== -1
+
+                ColumnLayout {
                     anchors.centerIn: parent
                     width: parent.width - 16
-                    horizontalAlignment: Text.AlignHCenter
-                    wrapMode: Text.WordWrap
-                    text: root.hasSelection ? "📄 No preview available" : "📂 Select an item to inspect"
-                    color: Theme.textTertiary
-                    font.pixelSize: Theme.fontSizeNormal
+                    spacing: 8
+
+                    Image {
+                        visible: parent.parent.hasCustomFileIcon
+                        Layout.alignment: Qt.AlignHCenter
+                        Layout.preferredWidth: Math.round(68 * Theme.scaleFactor)
+                        Layout.preferredHeight: Math.round(68 * Theme.scaleFactor)
+                        source: visible ? ("file://" + parent.parent.itemIconVal) : ""
+                        fillMode: Image.PreserveAspectFit
+                        sourceSize.width: Math.round(width * Screen.devicePixelRatio * 2.0)
+                        sourceSize.height: Math.round(height * Screen.devicePixelRatio * 2.0)
+                        smooth: true
+                        mipmap: true
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        horizontalAlignment: Text.AlignHCenter
+                        wrapMode: Text.WordWrap
+                        text: root.hasSelection ? (parent.parent.hasCustomFileIcon ? root.safeVal(root.item.type) : "📄 No preview available") : "📂 Select an item to inspect"
+                        color: Theme.textTertiary
+                        font.pixelSize: Theme.fontSizeNormal
+                        font.bold: parent.parent.hasCustomFileIcon
+                    }
                 }
             }
         }

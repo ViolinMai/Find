@@ -32,6 +32,9 @@ Dialog {
     property var defaultIconsMap: backend ? backend.getDefaultTypeIcons() : ({})
     property var notifConfig: backend ? backend.getNotificationSettings() : ({})
     property var trackedWorksNotifList: backend ? backend.getTrackedWorksNotificationList() : []
+    property var groupOpenRulesList: backend ? backend.getExtensionGroupRules() : []
+    property var extOpenRulesList: backend ? backend.getExtensionRulesAndIcons() : []
+    property var installedDesktopAppsList: []
     property int selectedQAIndex: -1
     property string activePickerTarget: ""
     property string activeIconKeyTarget: ""
@@ -59,6 +62,10 @@ Dialog {
                 var key = root.activeIconKeyTarget.replace("def_icon_", "")
                 backend.setDefaultTypeIcon(key, chosenPath)
                 root.defaultIconsMap = backend.getDefaultTypeIcons()
+            } else if (root.activeIconKeyTarget.startsWith("ext_icon_")) {
+                var extKey = root.activeIconKeyTarget.replace("ext_icon_", "")
+                backend.setCustomExtensionIcon(extKey, chosenPath)
+                root.extOpenRulesList = backend.getExtensionRulesAndIcons()
             }
             root.activeIconKeyTarget = ""
         }
@@ -123,6 +130,12 @@ Dialog {
             if (backend) {
                 root.notifConfig = backend.getNotificationSettings()
                 root.trackedWorksNotifList = backend.getTrackedWorksNotificationList()
+            }
+        }
+        function onDefaultOpenRulesChanged() {
+            if (backend) {
+                root.groupOpenRulesList = backend.getExtensionGroupRules()
+                root.extOpenRulesList = backend.getExtensionRulesAndIcons()
             }
         }
     }
@@ -325,21 +338,27 @@ Dialog {
                 spacing: 4
 
                 Repeater {
-                    model: [
-                        { icon: "🎨", title: "Appearance & UI", isMedia: false },
-                        { icon: "⭐", title: "Quick Access & Favs", isMedia: false },
-                        { icon: "📺", title: "Media Hub & Rows", isMedia: true },
-                        { icon: "🔔", title: "Notification Center", isMedia: true },
-                        { icon: "🎬", title: "MPV Profiles", isMedia: true },
-                        { icon: "🚀", title: "System & .desktop", isMedia: false },
-                        { icon: "🔤", title: "Fonts & Icons", isMedia: false }
-                    ]
+                    model: root.mediaOnlyMode
+                           ? [
+                               { icon: "📺", title: "Media Hub & Rows", pageIdx: 2 },
+                               { icon: "🔔", title: "Notification Center", pageIdx: 3 },
+                               { icon: "🎬", title: "MPV Profiles", pageIdx: 4 }
+                             ]
+                           : [
+                               { icon: "🎨", title: "Appearance & UI", pageIdx: 0 },
+                               { icon: "⭐", title: "Quick Access & Favs", pageIdx: 1 },
+                               { icon: "📺", title: "Media Hub & Rows", pageIdx: 2 },
+                               { icon: "🔔", title: "Notification Center", pageIdx: 3 },
+                               { icon: "🎬", title: "MPV Profiles", pageIdx: 4 },
+                               { icon: "🚀", title: "System & .desktop", pageIdx: 5 },
+                               { icon: "📂", title: "Default Open & Fonts", pageIdx: 6 }
+                             ]
 
                     delegate: Rectangle {
-                        readonly property bool activeCat: root.currentCategory === index
-                        visible: !root.mediaOnlyMode || modelData.isMedia
+                        readonly property bool activeCat: root.currentCategory === modelData.pageIdx
                         Layout.fillWidth: true
-                        height: visible ? Math.round(36 * Theme.scaleFactor) : 0
+                        Layout.preferredHeight: Math.round(36 * Theme.scaleFactor)
+                        implicitHeight: Math.round(36 * Theme.scaleFactor)
                         radius: Theme.radiusMedium
                         color: activeCat ? (root.mediaOnlyMode ? Theme.mhAccent : Theme.accent) : (navMouse.containsMouse ? Theme.bgHover : "transparent")
 
@@ -368,7 +387,13 @@ Dialog {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: root.currentCategory = index
+                            onClicked: {
+                                root.currentCategory = modelData.pageIdx
+                                if (modelData.pageIdx === 6 && backend) {
+                                    root.groupOpenRulesList = backend.getExtensionGroupRules()
+                                    root.extOpenRulesList = backend.getExtensionRulesAndIcons()
+                                }
+                            }
                         }
                     }
                 }
@@ -2467,7 +2492,7 @@ Dialog {
             }
 
             // =================================================================
-            // PAGE 5: FONTS DIRECTORY & DEFAULT FILE ICONS
+            // PAGE 6: DEFAULT OPEN APPS, FONTS & PER-EXTENSION VECTOR ICONS
             // =================================================================
             ScrollView {
                 clip: true
@@ -2508,32 +2533,42 @@ Dialog {
                     }
 
                     SectionCard {
-                        sectionTitle: "Default File & Folder Icons"
-                        sectionSubtitle: "Customize fallback glyphs or custom image icons for file types."
+                        sectionTitle: "📂 Smart App Icon Fallback & Custom Openers"
+                        sectionSubtitle: "Assign custom applications to open specific extension groups or individual extensions instead of the system default. Folders, Videos, and Images keep their native previews."
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Text {
+                                text: "Use Primary Application Icon when Extension has no Bundled Icon (Excludes Folders, Videos, Images):"
+                                color: Theme.textPrimary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeSmall
+                                Layout.fillWidth: true
+                                wrapMode: Text.WordWrap
+                            }
+                            Switch {
+                                checked: backend ? backend.useAppIconFallback : true
+                                onToggled: if (backend) backend.setUseAppIconFallback(checked)
+                            }
+                        }
+                    }
+
+                    SectionCard {
+                        sectionTitle: "🗂️ Category / Group Default Openers"
+                        sectionSubtitle: "Override the default application for an entire category of files (e.g., open all Coding files in VS Code or Zed)."
 
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 6
 
                             Repeater {
-                                model: [
-                                    { key: "folder", label: "Folder Icon" },
-                                    { key: "file", label: "Generic File Icon" },
-                                    { key: "image", label: "Image Files Icon" },
-                                    { key: "video", label: "Video Files Icon" },
-                                    { key: "audio", label: "Audio Files Icon" },
-                                    { key: "py", label: "Python Script Icon" },
-                                    { key: "rs", label: "Rust Source Icon" },
-                                    { key: "json", label: "JSON Document Icon" },
-                                    { key: "archive", label: "Archive Files Icon" }
-                                ]
-
+                                model: root.groupOpenRulesList
                                 delegate: Rectangle {
                                     Layout.fillWidth: true
-                                    height: Math.round(36 * Theme.scaleFactor)
-                                    color: Theme.bgSurface
+                                    height: Math.round(46 * Theme.scaleFactor)
                                     radius: Theme.radiusSmall
-                                    border.color: Theme.borderDim
+                                    color: Theme.bgSurface
+                                    border.color: modelData.app_cmd !== "" ? Theme.accent : Theme.borderDim
 
                                     RowLayout {
                                         anchors.fill: parent
@@ -2541,68 +2576,447 @@ Dialog {
                                         anchors.rightMargin: 10
                                         spacing: 10
 
-                                        Text {
-                                            Layout.preferredWidth: 150
-                                            text: modelData.label
-                                            color: Theme.textPrimary
-                                            font.bold: true
-                                        }
-
-                                        // Visual Icon Preview Box (Renders actual SVG/PNG/ICO image instead of raw path string!)
-                                        Rectangle {
-                                            width: Math.round(28 * Theme.scaleFactor)
-                                            height: Math.round(28 * Theme.scaleFactor)
-                                            radius: Theme.radiusSmall
-                                            color: Theme.bgCard
-                                            border.color: Theme.borderDim
-                                            readonly property string rawIconVal: root.defaultIconsMap[modelData.key] || ""
-                                            readonly property bool isImageFile: rawIconVal.indexOf("/") !== -1 || rawIconVal.indexOf(".") !== -1
-
-                                            Image {
-                                                anchors.fill: parent
-                                                anchors.margins: 3
-                                                visible: parent.isImageFile
-                                                source: visible ? ("file://" + parent.rawIconVal) : ""
-                                                fillMode: Image.PreserveAspectFit
-                                                sourceSize.width: 64
-                                                sourceSize.height: 64
+                                        ColumnLayout {
+                                            Layout.fillWidth: true
+                                            spacing: 1
+                                            Text {
+                                                text: modelData.title
+                                                color: Theme.textPrimary
+                                                font.bold: true
+                                                font.pixelSize: Theme.fontSizeNormal
                                             }
                                             Text {
-                                                anchors.centerIn: parent
-                                                visible: !parent.isImageFile
-                                                text: parent.rawIconVal !== "" ? parent.rawIconVal : "📄"
-                                                font.pixelSize: Theme.fontSizeMedium
+                                                text: modelData.extensions_preview
+                                                color: Theme.textTertiary
+                                                font.family: "monospace"
+                                                font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
+                                                elide: Text.ElideRight
+                                                Layout.fillWidth: true
                                             }
                                         }
 
-                                        Text {
-                                            Layout.fillWidth: true
-                                            text: {
-                                                var v = root.defaultIconsMap[modelData.key] || "-"
-                                                if (v.indexOf("/") !== -1) {
-                                                    var parts = v.split("/")
-                                                    return parts[parts.length - 1]
-                                                }
-                                                return v
+                                        Rectangle {
+                                            implicitWidth: grpAppTxt.implicitWidth + 14
+                                            implicitHeight: Math.round(24 * Theme.scaleFactor)
+                                            radius: Theme.radiusSmall
+                                            color: modelData.app_cmd !== "" ? "#280078d4" : Theme.bgCard
+                                            border.color: modelData.app_cmd !== "" ? Theme.accent : Theme.borderDim
+                                            Text {
+                                                id: grpAppTxt
+                                                anchors.centerIn: parent
+                                                text: modelData.app_name
+                                                color: modelData.app_cmd !== "" ? Theme.accent : Theme.textSecondary
+                                                font.pixelSize: Theme.fontSizeSmall
+                                                font.bold: modelData.app_cmd !== ""
                                             }
-                                            color: Theme.textSecondary
-                                            font.pixelSize: Theme.fontSizeSmall
-                                            elide: Text.ElideMiddle
                                         }
 
                                         ActionBtn {
-                                            text: "🖼️ Pick Icon..."
+                                            text: "⚡ Choose App..."
                                             isPrimary: true
-                                            onClicked: {
-                                                root.activeIconKeyTarget = "def_icon_" + modelData.key
-                                                settingsIconBrowser.openIconBrowser("")
-                                            }
+                                            onClicked: appChooserDialog.openForGroup(modelData.key, modelData.title, modelData.app_cmd)
+                                        }
+
+                                        ActionBtn {
+                                            visible: modelData.app_cmd !== ""
+                                            text: "↺ Reset"
+                                            isDanger: true
+                                            onClicked: if (backend) backend.setExtensionGroupRule(modelData.key, "", "")
                                         }
                                     }
                                 }
                             }
                         }
                     }
+
+                    SectionCard {
+                        sectionTitle: "🧩 Per-Extension Vector Icons & Default Openers"
+                        sectionSubtitle: "Customize the vector SVG/PNG icon or default application for any specific file extension."
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            TextField {
+                                id: extSearchInput
+                                Layout.fillWidth: true
+                                placeholderText: "🔍 Filter extensions (e.g. .py, .rs, .json, .mkv, .srt)..."
+                                color: Theme.textPrimary
+                                font.pixelSize: Theme.fontSizeSmall
+                                selectByMouse: true
+                                background: Rectangle {
+                                    implicitHeight: Math.round(30 * Theme.scaleFactor)
+                                    color: Theme.bgSurface
+                                    radius: Theme.radiusSmall
+                                    border.color: extSearchInput.activeFocus ? Theme.accent : Theme.borderDim
+                                }
+                            }
+
+                            TextField {
+                                id: newCustomExtInput
+                                implicitWidth: Math.round(110 * Theme.scaleFactor)
+                                placeholderText: "+ .custom"
+                                color: Theme.textPrimary
+                                font.family: "monospace"
+                                font.pixelSize: Theme.fontSizeSmall
+                                selectByMouse: true
+                                background: Rectangle {
+                                    implicitHeight: Math.round(30 * Theme.scaleFactor)
+                                    color: Theme.bgSurface
+                                    radius: Theme.radiusSmall
+                                    border.color: newCustomExtInput.activeFocus ? Theme.accent : Theme.borderDim
+                                }
+                            }
+
+                            ActionBtn {
+                                text: "＋ Add Ext Rule"
+                                isPrimary: true
+                                enabled: newCustomExtInput.text.trim() !== ""
+                                onClicked: {
+                                    var rawExt = newCustomExtInput.text.trim().toLowerCase()
+                                    if (!rawExt.startsWith(".")) rawExt = "." + rawExt
+                                    newCustomExtInput.text = ""
+                                    appChooserDialog.openForExtension(rawExt, "")
+                                }
+                            }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 5
+
+                            Repeater {
+                                model: {
+                                    var q = extSearchInput.text.trim().toLowerCase()
+                                    var all = root.extOpenRulesList || []
+                                    if (q === "") return all
+                                    var filtered = []
+                                    for (var i = 0; i < all.length; i++) {
+                                        if (all[i].ext.toLowerCase().indexOf(q) !== -1 || all[i].desc.toLowerCase().indexOf(q) !== -1) {
+                                            filtered.push(all[i])
+                                        }
+                                    }
+                                    return filtered
+                                }
+
+                                delegate: Rectangle {
+                                    Layout.fillWidth: true
+                                    height: Math.round(40 * Theme.scaleFactor)
+                                    radius: Theme.radiusSmall
+                                    color: Theme.bgSurface
+                                    border.color: modelData.app_cmd !== "" ? Theme.accent : Theme.borderDim
+
+                                    RowLayout {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 8
+                                        spacing: 10
+
+                                        Rectangle {
+                                            width: Math.round(28 * Theme.scaleFactor)
+                                            height: Math.round(28 * Theme.scaleFactor)
+                                            radius: Theme.radiusSmall
+                                            color: Theme.bgCard
+                                            border.color: modelData.has_custom_icon ? Theme.accent : Theme.borderDim
+
+                                            Image {
+                                                anchors.fill: parent
+                                                anchors.margins: 4
+                                                visible: modelData.icon !== ""
+                                                source: visible ? ("file://" + modelData.icon) : ""
+                                                fillMode: Image.PreserveAspectFit
+                                                sourceSize.width: 48
+                                                sourceSize.height: 48
+                                                smooth: true
+                                                mipmap: true
+                                            }
+                                            Text {
+                                                anchors.centerIn: parent
+                                                visible: modelData.icon === ""
+                                                text: "📄"
+                                                font.pixelSize: Theme.fontSizeSmall
+                                            }
+                                        }
+
+                                        Text {
+                                            Layout.preferredWidth: Math.round(68 * Theme.scaleFactor)
+                                            text: modelData.ext
+                                            color: Theme.textPrimary
+                                            font.family: "monospace"
+                                            font.bold: true
+                                            font.pixelSize: Theme.fontSizeNormal
+                                            elide: Text.ElideRight
+                                        }
+
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: modelData.desc
+                                            color: Theme.textSecondary
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            elide: Text.ElideRight
+                                        }
+
+                                        Text {
+                                            text: modelData.app_name
+                                            color: modelData.app_cmd !== "" ? Theme.accent : Theme.textTertiary
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            font.bold: modelData.app_cmd !== ""
+                                            Layout.preferredWidth: Math.round(130 * Theme.scaleFactor)
+                                            horizontalAlignment: Text.AlignRight
+                                            elide: Text.ElideRight
+                                        }
+
+                                        ActionBtn {
+                                            text: "🖼️ Icon"
+                                            onClicked: {
+                                                root.activeIconKeyTarget = "ext_icon_" + modelData.ext
+                                                settingsIconBrowser.openIconBrowser("")
+                                            }
+                                        }
+
+                                        ActionBtn {
+                                            visible: modelData.has_custom_icon
+                                            text: "↺"
+                                            onClicked: if (backend) backend.setCustomExtensionIcon(modelData.ext, "")
+                                        }
+
+                                        ActionBtn {
+                                            text: "⚡ App"
+                                            isPrimary: modelData.app_cmd !== ""
+                                            onClicked: appChooserDialog.openForExtension(modelData.ext, modelData.app_cmd)
+                                        }
+
+                                        ActionBtn {
+                                            visible: modelData.app_cmd !== ""
+                                            text: "✕"
+                                            isDanger: true
+                                            onClicked: if (backend) backend.setSingleExtensionRule(modelData.ext, "", "")
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Modal App Chooser Dialog for Extension & Group Rules
+    Dialog {
+        id: appChooserDialog
+        title: "Choose Default Application"
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        width: Math.min(Math.round(500 * Theme.scaleFactor), root.width - 28)
+        height: Math.min(Math.round(440 * Theme.scaleFactor), root.height - 28)
+
+        property bool isGroupTarget: false
+        property string targetKey: ""
+        property string targetLabel: ""
+
+        function openForGroup(gKey, gTitle, curCmd) {
+            isGroupTarget = true
+            targetKey = gKey
+            targetLabel = gTitle
+            customAppCmdInput.text = curCmd || ""
+            appFilterInput.text = ""
+            if (backend && root.installedDesktopAppsList.length === 0) {
+                root.installedDesktopAppsList = backend.getAllInstalledDesktopApps()
+            }
+            appChooserDialog.open()
+            appFilterInput.forceActiveFocus()
+        }
+
+        function openForExtension(extKey, curCmd) {
+            isGroupTarget = false
+            targetKey = extKey
+            targetLabel = extKey
+            customAppCmdInput.text = curCmd || ""
+            appFilterInput.text = ""
+            if (backend && root.installedDesktopAppsList.length === 0) {
+                root.installedDesktopAppsList = backend.getAllInstalledDesktopApps()
+            }
+            appChooserDialog.open()
+            appFilterInput.forceActiveFocus()
+        }
+
+        background: Rectangle {
+            color: Theme.bgSurface
+            border.color: Theme.accent
+            border.width: 1
+            radius: Theme.radiusLarge
+        }
+
+        header: Rectangle {
+            height: Math.round(42 * Theme.scaleFactor)
+            color: Theme.bgCard
+            radius: Theme.radiusLarge
+            Text {
+                anchors.left: parent.left
+                anchors.leftMargin: 16
+                anchors.verticalCenter: parent.verticalCenter
+                text: "⚡ Default Opener for " + appChooserDialog.targetLabel
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontSizeMedium
+                font.bold: true
+            }
+        }
+
+        ColumnLayout {
+            anchors.fill: parent
+            spacing: 10
+
+            TextField {
+                id: appFilterInput
+                Layout.fillWidth: true
+                placeholderText: "🔍 Search installed applications (e.g. code, mpv, kitty, nvim)..."
+                color: Theme.textPrimary
+                font.pixelSize: Theme.fontSizeSmall
+                selectByMouse: true
+                background: Rectangle {
+                    implicitHeight: Math.round(32 * Theme.scaleFactor)
+                    color: Theme.bgCard
+                    radius: Theme.radiusSmall
+                    border.color: appFilterInput.activeFocus ? Theme.accent : Theme.borderDim
+                }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                color: Theme.bgBase
+                radius: Theme.radiusMedium
+                border.color: Theme.borderDim
+                clip: true
+
+                ListView {
+                    anchors.fill: parent
+                    anchors.margins: 6
+                    spacing: 4
+                    clip: true
+                    model: {
+                        var q = appFilterInput.text.trim().toLowerCase()
+                        var all = root.installedDesktopAppsList || []
+                        if (q === "") return all
+                        var out = []
+                        for (var i = 0; i < all.length; i++) {
+                            if (all[i].name.toLowerCase().indexOf(q) !== -1 || all[i].cmd.toLowerCase().indexOf(q) !== -1) {
+                                out.push(all[i])
+                            }
+                        }
+                        return out
+                    }
+
+                    delegate: Rectangle {
+                        width: ListView.view.width
+                        height: Math.round(36 * Theme.scaleFactor)
+                        radius: Theme.radiusSmall
+                        color: appRowMouse.containsMouse ? Theme.bgHover : Theme.bgCard
+                        border.color: appRowMouse.containsMouse ? Theme.accent : Theme.borderDim
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 10
+                            spacing: 10
+
+                            Item {
+                                Layout.preferredWidth: Math.round(22 * Theme.scaleFactor)
+                                Layout.preferredHeight: Math.round(22 * Theme.scaleFactor)
+
+                                Image {
+                                    anchors.fill: parent
+                                    visible: modelData.icon !== undefined && modelData.icon !== ""
+                                    source: visible ? ("file://" + modelData.icon) : ""
+                                    fillMode: Image.PreserveAspectFit
+                                    sourceSize.width: 44
+                                    sourceSize.height: 44
+                                    asynchronous: true
+                                    smooth: true
+                                }
+                                Text {
+                                    anchors.centerIn: parent
+                                    visible: !modelData.icon || modelData.icon === ""
+                                    text: "🚀"
+                                    font.pixelSize: Theme.fontSizeSmall
+                                }
+                            }
+                            Text {
+                                text: modelData.name
+                                color: Theme.textPrimary
+                                font.bold: true
+                                font.pixelSize: Theme.fontSizeSmall
+                                Layout.preferredWidth: Math.round(150 * Theme.scaleFactor)
+                                elide: Text.ElideRight
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: modelData.cmd
+                                color: Theme.textTertiary
+                                font.family: "monospace"
+                                font.pixelSize: Math.round(8.5 * Theme.scaleFactor)
+                                elide: Text.ElideMiddle
+                            }
+                        }
+
+                        MouseArea {
+                            id: appRowMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                if (backend) {
+                                    if (appChooserDialog.isGroupTarget) {
+                                        backend.setExtensionGroupRule(appChooserDialog.targetKey, modelData.name, modelData.cmd)
+                                    } else {
+                                        backend.setSingleExtensionRule(appChooserDialog.targetKey, modelData.name, modelData.cmd)
+                                    }
+                                }
+                                appChooserDialog.close()
+                            }
+                        }
+                    }
+                }
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                spacing: 8
+                TextField {
+                    id: customAppCmdInput
+                    Layout.fillWidth: true
+                    placeholderText: "Or enter custom command (e.g. code, kitty -e nvim)..."
+                    color: Theme.textPrimary
+                    font.family: "monospace"
+                    font.pixelSize: Theme.fontSizeSmall
+                    selectByMouse: true
+                    background: Rectangle {
+                        implicitHeight: Math.round(30 * Theme.scaleFactor)
+                        color: Theme.bgCard
+                        radius: Theme.radiusSmall
+                        border.color: customAppCmdInput.activeFocus ? Theme.accent : Theme.borderDim
+                    }
+                }
+                ActionBtn {
+                    text: "✔ Use Command"
+                    isPrimary: true
+                    enabled: customAppCmdInput.text.trim() !== ""
+                    onClicked: {
+                        var cmd = customAppCmdInput.text.trim()
+                        if (backend && cmd !== "") {
+                            if (appChooserDialog.isGroupTarget) {
+                                backend.setExtensionGroupRule(appChooserDialog.targetKey, cmd, cmd)
+                            } else {
+                                backend.setSingleExtensionRule(appChooserDialog.targetKey, cmd, cmd)
+                            }
+                        }
+                        appChooserDialog.close()
+                    }
+                }
+                ActionBtn {
+                    text: "Cancel"
+                    onClicked: appChooserDialog.close()
                 }
             }
         }

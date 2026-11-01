@@ -1,4 +1,4 @@
-from PySide6.QtCore import Qt, QAbstractListModel, QModelIndex, QObject
+from PySide6.QtCore import Qt, QAbstractListModel, QModelIndex, QObject, Slot
 import os
 
 
@@ -389,9 +389,11 @@ class FileListModel(QAbstractListModel):
                 model_idx = self.index(idx, 0)
                 self.dataChanged.emit(model_idx, model_idx, changed_roles)
 
+    @Slot(str, result=int)
     def get_row_for_path(self, item_path: str) -> int:
         return self._path_to_row.get(item_path, -1)
 
+    @Slot(int, result="QVariant")
     def get_entry_at(self, row: int):
         if 0 <= row < len(self._entries):
             return self._entries[row]
@@ -506,10 +508,12 @@ class MediaHubCardModel(QAbstractListModel):
         is_dir = bool(card.get("is_dir", False))
         is_movie = bool(card.get("is_movie_item", False))
         is_recent_batch = bool(card.get("is_recently_added_card", False))
+        is_airing = bool(card.get("is_airing_card", False))
         poster = str(card.get("poster") or "")
         thumb = str(card.get("thumb") or "")
 
-        if is_recent_batch or is_dir or is_movie:
+        # Vertical cards (Movies, Series Folders, Recently Added rows, Airing cards) ALWAYS prioritize the main work Poster!
+        if is_airing or is_recent_batch or is_dir or is_movie:
             if poster:
                 return "file://" + poster
             if thumb:

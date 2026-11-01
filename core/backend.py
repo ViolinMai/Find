@@ -36,6 +36,264 @@ import grp
 
 EXECUTABLE_EXTS = {".appimage", ".sh", ".bin", ".run", ".out", ".py"}
 
+BUNDLED_ICONS_DIR = Path(__file__).resolve().parent.parent / "icons"
+
+CURATED_EXT_ICONS = {
+    ".py": ("python.svg", "Python Script"),
+    ".pyc": ("python-misc.svg", "Python Bytecode"),
+    ".pyd": ("python-misc.svg", "Python Extension"),
+    ".ipynb": ("jupyter.svg", "Jupyter Notebook"),
+    ".rs": ("rust.svg", "Rust Source"),
+    ".c": ("c.svg", "C Source"),
+    ".h": ("h.svg", "C Header"),
+    ".cpp": ("cpp.svg", "C++ Source"),
+    ".cc": ("cpp.svg", "C++ Source"),
+    ".cxx": ("cpp.svg", "C++ Source"),
+    ".hpp": ("hpp.svg", "C++ Header"),
+    ".hxx": ("hpp.svg", "C++ Header"),
+    ".cs": ("csharp.svg", "C# Source"),
+    ".go": ("go.svg", "Go Source"),
+    ".mod": ("go-mod.svg", "Go Module"),
+    ".java": ("java.svg", "Java Source"),
+    ".class": ("javaclass.svg", "Java Class"),
+    ".jar": ("jar.svg", "Java Archive"),
+    ".kt": ("kotlin.svg", "Kotlin Source"),
+    ".kts": ("kotlin.svg", "Kotlin Script"),
+    ".js": ("javascript.svg", "JavaScript"),
+    ".mjs": ("javascript.svg", "JS Module"),
+    ".cjs": ("javascript.svg", "CommonJS"),
+    ".jsx": ("react.svg", "React JSX"),
+    ".ts": ("typescript.svg", "TypeScript"),
+    ".tsx": ("react_ts.svg", "React TSX"),
+    ".d.ts": ("typescript-def.svg", "TypeScript Definitions"),
+    ".vue": ("vue.svg", "Vue Component"),
+    ".svelte": ("svelte.svg", "Svelte Component"),
+    ".astro": ("astro.svg", "Astro Component"),
+    ".html": ("html.svg", "HTML Document"),
+    ".htm": ("html.svg", "HTML Document"),
+    ".css": ("css.svg", "CSS Stylesheet"),
+    ".scss": ("sass.svg", "Sass Stylesheet"),
+    ".sass": ("sass.svg", "Sass Stylesheet"),
+    ".less": ("less.svg", "Less Stylesheet"),
+    ".json": ("json.svg", "JSON Document"),
+    ".jsonc": ("json.svg", "JSON with Comments"),
+    ".toml": ("toml.svg", "TOML Config"),
+    ".yaml": ("yaml.svg", "YAML Config"),
+    ".yml": ("yaml.svg", "YAML Config"),
+    ".xml": ("xml.svg", "XML Document"),
+    ".xaml": ("xaml.svg", "XAML Document"),
+    ".svg": ("svg.svg", "SVG Vector Image"),
+    ".md": ("markdown.svg", "Markdown Document"),
+    ".mdx": ("mdx.svg", "MDX Document"),
+    ".txt": ("document.svg", "Text Document"),
+    ".log": ("log.svg", "Log File"),
+    ".pdf": ("pdf.svg", "PDF Document"),
+    ".epub": ("epub.svg", "EPUB Book"),
+    ".doc": ("word.svg", "Word Document"),
+    ".docx": ("word.svg", "Word Document"),
+    ".ppt": ("powerpoint.svg", "PowerPoint Presentation"),
+    ".pptx": ("powerpoint.svg", "PowerPoint Presentation"),
+    ".xls": ("table.svg", "Spreadsheet"),
+    ".xlsx": ("table.svg", "Excel Spreadsheet"),
+    ".csv": ("table.svg", "CSV Spreadsheet"),
+    ".tsv": ("table.svg", "TSV Spreadsheet"),
+    ".sql": ("database.svg", "SQL Database Script"),
+    ".db": ("database.svg", "SQLite Database"),
+    ".sqlite": ("database.svg", "SQLite Database"),
+    ".sqlite3": ("database.svg", "SQLite Database"),
+    ".sh": ("console.svg", "Shell Script"),
+    ".bash": ("console.svg", "Bash Script"),
+    ".zsh": ("console.svg", "Zsh Script"),
+    ".fish": ("console.svg", "Fish Script"),
+    ".ps1": ("powershell.svg", "PowerShell Script"),
+    ".bat": ("console.svg", "Batch Script"),
+    ".cmd": ("command.svg", "Command Script"),
+    ".lua": ("lua.svg", "Lua Script"),
+    ".luau": ("luau.svg", "Luau Script"),
+    ".php": ("php.svg", "PHP Script"),
+    ".rb": ("ruby.svg", "Ruby Script"),
+    ".pl": ("perl.svg", "Perl Script"),
+    ".swift": ("swift.svg", "Swift Source"),
+    ".dart": ("dart.svg", "Dart Source"),
+    ".zig": ("zig.svg", "Zig Source"),
+    ".nim": ("nim.svg", "Nim Source"),
+    ".ex": ("elixir.svg", "Elixir Source"),
+    ".exs": ("elixir.svg", "Elixir Script"),
+    ".erl": ("erlang.svg", "Erlang Source"),
+    ".hs": ("haskell.svg", "Haskell Source"),
+    ".ml": ("ocaml.svg", "OCaml Source"),
+    ".r": ("r.svg", "R Script"),
+    ".jl": ("julia.svg", "Julia Source"),
+    ".scala": ("scala.svg", "Scala Source"),
+    ".groovy": ("groovy.svg", "Groovy Source"),
+    ".gradle": ("gradle.svg", "Gradle Config"),
+    ".cmake": ("cmake.svg", "CMake Script"),
+    ".makefile": ("makefile.svg", "Makefile"),
+    ".mk": ("makefile.svg", "Makefile"),
+    ".dockerfile": ("docker.svg", "Dockerfile"),
+    ".nix": ("nix.svg", "Nix Expression"),
+    ".qml": ("slint.svg", "QML UI File"),
+    ".slint": ("slint.svg", "Slint UI File"),
+    ".graphql": ("graphql.svg", "GraphQL Query"),
+    ".gql": ("graphql.svg", "GraphQL Query"),
+    ".proto": ("proto.svg", "Protocol Buffers"),
+    ".wasm": ("webassembly.svg", "WebAssembly Binary"),
+    ".asm": ("assembly.svg", "Assembly Source"),
+    ".s": ("assembly.svg", "Assembly Source"),
+    ".vim": ("vim.svg", "Vim Script"),
+    ".ini": ("settings.svg", "INI Config"),
+    ".conf": ("settings.svg", "Configuration File"),
+    ".cfg": ("settings.svg", "Configuration File"),
+    ".env": ("tune.svg", "Environment File"),
+    ".service": ("systemd.svg", "systemd Service"),
+    ".lock": ("lock.svg", "Lockfile"),
+    ".key": ("key.svg", "Security Key"),
+    ".pem": ("certificate.svg", "SSL Certificate"),
+    ".crt": ("certificate.svg", "Certificate"),
+    ".cer": ("certificate.svg", "Certificate"),
+    ".pub": ("key.svg", "Public Key"),
+    ".zip": ("zip.svg", "ZIP Archive"),
+    ".tar": ("zip.svg", "TAR Archive"),
+    ".gz": ("zip.svg", "GZip Archive"),
+    ".tgz": ("zip.svg", "TAR.GZ Archive"),
+    ".bz2": ("zip.svg", "BZip2 Archive"),
+    ".xz": ("zip.svg", "XZ Archive"),
+    ".txz": ("zip.svg", "TAR.XZ Archive"),
+    ".7z": ("zip.svg", "7-Zip Archive"),
+    ".rar": ("zip.svg", "RAR Archive"),
+    ".zst": ("zip.svg", "Zstandard Archive"),
+    ".mp3": ("audio.svg", "MP3 Audio"),
+    ".flac": ("audio.svg", "FLAC Audio"),
+    ".wav": ("audio.svg", "WAV Audio"),
+    ".ogg": ("audio.svg", "OGG Audio"),
+    ".m4a": ("audio.svg", "M4A Audio"),
+    ".aac": ("audio.svg", "AAC Audio"),
+    ".opus": ("audio.svg", "Opus Audio"),
+    ".srt": ("srt.png", "SubRip Subtitles"),
+    ".ass": ("ass.png", "ASS Subtitles"),
+    ".ssa": ("ass.png", "SSA Subtitles"),
+    ".vtt": ("subtitles.svg", "WebVTT Subtitles"),
+    ".sub": ("subtitles.svg", "Subtitle File"),
+    ".ttf": ("font.svg", "TrueType Font"),
+    ".otf": ("font.svg", "OpenType Font"),
+    ".woff": ("font.svg", "WOFF Font"),
+    ".woff2": ("font.svg", "WOFF2 Font"),
+    ".exe": ("exe.svg", "Executable Binary"),
+    ".msi": ("installation.svg", "Windows Installer"),
+    ".dll": ("dll.svg", "Dynamic Library"),
+    ".so": ("lib.svg", "Shared Object Library"),
+    ".a": ("lib.svg", "Static Library"),
+    ".apk": ("android.svg", "Android Package"),
+    ".iso": ("disc.svg", "Disc Image"),
+    ".img": ("disc.svg", "Disk Image"),
+    ".blend": ("blender.svg", "Blender 3D Project"),
+    ".fbx": ("3d.svg", "FBX 3D Model"),
+    ".obj": ("3d.svg", "OBJ 3D Model"),
+    ".stl": ("3d.svg", "STL 3D Model"),
+    ".gltf": ("3d.svg", "glTF 3D Model"),
+    ".glb": ("3d.svg", "GLB 3D Model"),
+    ".psd": ("adobe-photoshop.svg", "Photoshop Document"),
+    ".ai": ("adobe-illustrator.svg", "Illustrator Document"),
+    ".fig": ("figma.svg", "Figma Design"),
+    ".drawio": ("drawio.svg", "Draw.io Diagram"),
+    ".excalidraw": ("excalidraw.svg", "Excalidraw Board"),
+    ".diff": ("diff.svg", "Diff Patch"),
+    ".patch": ("diff.svg", "Patch File"),
+    ".torrent": (" url.svg".strip(), "BitTorrent File"),
+}
+
+SPECIAL_FILENAME_ICONS = {
+    "cmakelists.txt": ("cmake.svg", "CMakeLists"),
+    "makefile": ("makefile.svg", "Makefile"),
+    "dockerfile": ("docker.svg", "Dockerfile"),
+    "docker-compose.yml": ("docker.svg", "Docker Compose"),
+    "docker-compose.yaml": ("docker.svg", "Docker Compose"),
+    "cargo.toml": ("rust.svg", "Cargo Manifest"),
+    "cargo.lock": ("lock.svg", "Cargo Lockfile"),
+    "package.json": ("nodejs.svg", "Node Package"),
+    "package-lock.json": ("npm.svg", "NPM Lockfile"),
+    "tsconfig.json": ("tsconfig.svg", "TypeScript Config"),
+    "jsconfig.json": ("jsconfig.svg", "JavaScript Config"),
+    "pyproject.toml": ("python.svg", "Python Project"),
+    "requirements.txt": ("python-misc.svg", "Python Requirements"),
+    "readme.md": ("readme.svg", "README Document"),
+    "readme": ("readme.svg", "README Document"),
+    "license": ("license.svg", "License"),
+    "license.md": ("license.svg", "License"),
+    "license.txt": ("license.svg", "License"),
+    "changelog.md": ("changelog.svg", "Changelog"),
+    ".gitignore": ("git.svg", "Git Ignore"),
+    ".gitattributes": ("git.svg", "Git Attributes"),
+    ".gitmodules": ("git.svg", "Git Submodules"),
+    ".gitconfig": ("git.svg", "Git Config"),
+    ".viminfo": ("vim.svg", "Vim Info"),
+    ".vimrc": ("vim.svg", "Vim Config"),
+    ".bashrc": ("console.svg", "Bash Config"),
+    ".bash_profile": ("console.svg", "Bash Profile"),
+    ".bash_history": ("console.svg", "Bash History"),
+    ".zshrc": ("console.svg", "Zsh Config"),
+    ".zsh_history": ("console.svg", "Zsh History"),
+    ".profile": ("console.svg", "Shell Profile"),
+    ".gtkrc-2.0": ("settings.svg", "GTK2 Config"),
+    ".xinitrc": ("settings.svg", "X11 Init Config"),
+    ".Xresources": ("settings.svg", "X11 Resources"),
+    ".steampid": ("controller.svg", "Steam PID"),
+    ".editorconfig": ("editorconfig.svg", "EditorConfig"),
+    ".env": ("tune.svg", "Environment Config"),
+}
+
+EXTENSION_GROUPS = {
+    "coding": {
+        "title": "💻 Coding & Scripts",
+        "extensions": {
+            ".py", ".rs", ".c", ".h", ".cpp", ".hpp", ".cs", ".go", ".java", ".kt",
+            ".js", ".mjs", ".cjs", ".jsx", ".ts", ".tsx", ".vue", ".svelte", ".html",
+            ".css", ".scss", ".sass", ".less", ".json", ".toml", ".yaml", ".yml",
+            ".xml", ".sql", ".sh", ".bash", ".zsh", ".fish", ".lua", ".php", ".rb",
+            ".pl", ".swift", ".dart", ".zig", ".nim", ".ex", ".exs", ".hs", ".r",
+            ".jl", ".scala", ".qml", ".slint", ".cmake", ".nix", ".graphql", ".proto",
+            ".ini", ".conf", ".cfg", ".env", ".service", ".dockerfile", ".makefile"
+        }
+    },
+    "documents": {
+        "title": "📄 Documents & Text",
+        "extensions": {
+            ".txt", ".md", ".mdx", ".pdf", ".epub", ".doc", ".docx", ".ppt", ".pptx",
+            ".xls", ".xlsx", ".csv", ".tsv", ".log", ".rtf", ".odt", ".ods"
+        }
+    },
+    "images": {
+        "title": "🖼️ Images & Vector Art",
+        "extensions": {
+            ".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".ico", ".svg", ".psd", ".ai"
+        }
+    },
+    "videos": {
+        "title": "🎬 Videos & Anime",
+        "extensions": {
+            ".mp4", ".mkv", ".webm", ".avi", ".mov", ".flv", ".m4v", ".ts", ".m2ts"
+        }
+    },
+    "audio": {
+        "title": "🎵 Audio & Music",
+        "extensions": {
+            ".mp3", ".flac", ".wav", ".ogg", ".m4a", ".aac", ".opus", ".wma"
+        }
+    },
+    "archives": {
+        "title": "📦 Archives & Packages",
+        "extensions": {
+            ".zip", ".tar", ".gz", ".tgz", ".bz2", ".tbz2", ".xz", ".txz", ".7z", ".rar", ".zst"
+        }
+    },
+    "subtitles": {
+        "title": "💬 Subtitles",
+        "extensions": {
+            ".srt", ".ass", ".ssa", ".vtt", ".sub", ".idx", ".sup", ".smi"
+        }
+    }
+}
+
 PROTECTED_SYSTEM_PATHS = {
     "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
     "/mnt", "/opt", "/proc", "/root", "/run", "/sbin", "/srv", "/sys",
@@ -289,7 +547,7 @@ class AsyncWorkerSignals(QObject):
     externalPickerFinished = Signal(list)
     iconGalleryReady = Signal(list)
     archiveProgress = Signal(float, str)
-    archiveFinished = Signal(bool, str)
+    archiveFinished = Signal(bool, str, list)
     mediaHubSectionsReady = Signal(list)
     storageAnalyzerReady = Signal(str, list, object)
     episodeQuickDetailsReady = Signal(str, str, str, bool)
@@ -373,14 +631,14 @@ class ArchiveTask(QRunnable):
                         processed += 1
                         self.signals.archiveProgress.emit(processed / total_items, f"Compressing {f_path.name}")
 
-            self.signals.archiveFinished.emit(True, f"✔ Created archive: {self.dest_archive_path.name}")
+            self.signals.archiveFinished.emit(True, f"✔ Created archive: {self.dest_archive_path.name}", [str(self.dest_archive_path)])
         except Exception as e:
             try:
                 if self.dest_archive_path.exists():
                     self.dest_archive_path.unlink()
             except OSError:
                 pass
-            self.signals.archiveFinished.emit(False, f"⚠️ Compression failed: {e}")
+            self.signals.archiveFinished.emit(False, f"⚠️ Compression failed: {e}", [])
 
 
 class ExtractTask(QRunnable):
@@ -396,10 +654,16 @@ class ExtractTask(QRunnable):
         import tarfile
 
         if not self.archive_path.exists():
-            self.signals.archiveFinished.emit(False, "⚠️ Archive file not found.")
+            self.signals.archiveFinished.emit(False, "⚠️ Archive file not found.", [])
             return
 
         try:
+            pre_existing = set()
+            if self.dest_dir.exists():
+                try:
+                    pre_existing = {p.name for p in self.dest_dir.iterdir()}
+                except OSError:
+                    pass
             self.dest_dir.mkdir(parents=True, exist_ok=True)
             name_lower = self.archive_path.name.lower()
             self.signals.archiveProgress.emit(0.05, f"Extracting {self.archive_path.name}...")
@@ -457,9 +721,19 @@ class ExtractTask(QRunnable):
             else:
                 shutil.unpack_archive(str(self.archive_path), str(self.dest_dir))
 
-            self.signals.archiveFinished.emit(True, f"✔ Extracted to {self.dest_dir.name}")
+            created_paths = []
+            try:
+                for p in self.dest_dir.iterdir():
+                    if p.name not in pre_existing:
+                        created_paths.append(os.path.abspath(str(p)))
+            except OSError:
+                pass
+            if not created_paths and os.path.abspath(str(self.dest_dir)) != os.path.abspath(str(self.archive_path.parent)):
+                created_paths = [os.path.abspath(str(self.dest_dir))]
+
+            self.signals.archiveFinished.emit(True, f"✔ Extracted to {self.dest_dir.name}", created_paths)
         except Exception as e:
-            self.signals.archiveFinished.emit(False, f"⚠️ Extraction failed: {e}")
+            self.signals.archiveFinished.emit(False, f"⚠️ Extraction failed: {e}", [])
 
 
 class MpvSessionMonitorTask(QRunnable):
@@ -1522,9 +1796,18 @@ class MediaHubBuilderTask(QRunnable):
             except Exception:
                 pass
 
-        poster = override_poster or (jf_meta.get("poster") if jf_meta else "") or (parent_jf.get("poster") if parent_jf else "")
-        series_title = (jf_meta.get("series_name") if jf_meta else "") or (parent_jf.get("title") if parent_jf else "")
         is_movie_flag = bool(is_in_movie_dir or (jf_meta and jf_meta.get("item_type") == "Movie"))
+        poster = override_poster or (jf_meta.get("poster") if jf_meta else "") or (parent_jf.get("poster") if parent_jf else "")
+        if not poster:
+            if is_dir:
+                poster = self.backend._resolve_folder_poster_candidate(target_path)
+            elif not is_movie_flag:
+                cand_show_dir = str(p_obj.parent.parent if self.backend.jf_bridge.is_season_folder_name(p_obj.parent.name) else p_obj.parent)
+                poster = self.backend._resolve_folder_poster_candidate(cand_show_dir)
+            else:
+                poster = self.backend._resolve_folder_poster_candidate(str(p_obj.parent))
+
+        series_title = (jf_meta.get("series_name") if jf_meta else "") or (parent_jf.get("title") if parent_jf else "")
 
         if is_dir:
             show_folder_path = target_path
@@ -2123,6 +2406,8 @@ class FileManagerBackend(QObject):
     notificationSettingsChanged = Signal()
     folderMediaSummaryChanged = Signal(str, dict)
     requestRefreshSignal = Signal()
+    scrollToSelectionRequested = Signal()
+    defaultOpenRulesChanged = Signal()
 
     def __init__(self, parent=None, is_picker_mode: bool = False, is_mediahub_mode: bool = False):
         super().__init__(parent)
@@ -2232,6 +2517,8 @@ class FileManagerBackend(QObject):
         self._compression_progress = 0.0
         self._compression_status = ""
         self._pending_highlight_paths = []
+        self._recent_extracted_paths = []
+        self._recent_extracted_dir = ""
         self._folder_size_cache = {}
         self._calculating_folders = set()
         self._folder_calc_token = 0
@@ -2240,6 +2527,10 @@ class FileManagerBackend(QObject):
         self._trash_total_size_str = "0 B"
         self._trash_item_count = 0
         self._mime_apps_cache = {}
+        self._ext_default_app_icon_cache = {}
+        self._system_icon_name_cache = {}
+        self._desktop_Apps_list_cache = None
+        self._mimeapps_default_map = None
         self._media_info_cache = {}
         self._ep_quick_details_cache = {}
         self._probing_ep_details = set()
@@ -2597,6 +2888,88 @@ class FileManagerBackend(QObject):
                 if p_cand:
                     break
         return p_cand
+
+    @Slot(str, result=dict)
+    def getMovieWorkSummary(self, movie_file_path: str) -> dict:
+        """Builds rich metadata for the dedicated Movie Work Page in Media Hub (--mh)."""
+        target = os.path.abspath(movie_file_path) if movie_file_path else ""
+        if not target or not os.path.isfile(target):
+            return {}
+        p_obj = Path(target)
+        jf_meta = self.jf_bridge.get_cached_item(target) or {}
+        if not jf_meta and self.jf_bridge.is_enabled:
+            try:
+                self.jf_bridge.sync_directory_items_sync(
+                    str(p_obj.parent),
+                    [{"path": target, "name": p_obj.name, "is_dir": False, "is_movie_item": True}]
+                )
+                jf_meta = self.jf_bridge.get_cached_item(target) or {}
+            except Exception:
+                pass
+
+        poster = jf_meta.get("poster", "")
+        if not poster:
+            poster = self._resolve_folder_poster_candidate(str(p_obj.parent))
+        thumb = self.thumb_mgr.get_existing_thumbnail(target)
+        if not thumb:
+            self.thumb_mgr.request_thumbnail(target, is_high_priority=True)
+
+        p_info = self.config_mgr.get_media_progress(target)
+        pos = float(p_info.get("position", 0.0) or 0.0)
+        dur = float(p_info.get("duration", 0.0) or 0.0)
+        if dur <= 0 and jf_meta.get("duration", 0.0) > 0:
+            dur = float(jf_meta["duration"])
+        prog = float(p_info.get("progress", 0.0) or 0.0)
+        watched = bool(p_info.get("watched", False))
+
+        tot_mins = int(dur // 60)
+        hrs, mins = divmod(tot_mins, 60)
+        dur_str = f"{hrs}h {mins:02d}m" if hrs > 0 else (f"{mins}m" if mins > 0 else "Movie")
+
+        res_mins, res_secs = divmod(int(pos), 60)
+        res_hrs, res_mins = divmod(res_mins, 60)
+        time_str = f"{res_hrs}:{res_mins:02d}:{res_secs:02d}" if res_hrs > 0 else f"{res_mins:02d}:{res_secs:02d}"
+
+        size_str = "-"
+        is_hdr = False
+        try:
+            st = p_obj.stat()
+            size_str = self._format_size(st.st_size)
+            c_hdr = self.config_mgr.get_cached_hdr(target, st.st_mtime)
+            if c_hdr is not None:
+                is_hdr = bool(c_hdr)
+        except OSError:
+            pass
+
+        mi = self._media_info_cache.get(target, {})
+        if not mi:
+            task = MediaInfoTask(target, p_info.get("ext_sub", ""), self.signals)
+            self.thread_pool.start(task)
+
+        return {
+            "title": jf_meta.get("title") or p_obj.stem,
+            "filename": p_obj.name,
+            "path": target,
+            "parent_dir": str(p_obj.parent),
+            "poster": poster,
+            "thumb": thumb,
+            "year": str(jf_meta.get("year") or ""),
+            "rating": str(jf_meta.get("rating") or ""),
+            "overview": jf_meta.get("overview") or "Direct local movie file ready for playback in MPV.",
+            "size": size_str,
+            "duration_str": dur_str,
+            "progress": round(prog, 4),
+            "watched": watched,
+            "is_resumable": pos > 10.0 and not watched,
+            "resume_time_str": time_str if pos > 10.0 else "",
+            "is_hdr": is_hdr,
+            "resolution": mi.get("resolution", ""),
+            "codec": mi.get("codec", ""),
+            "bit_depth": mi.get("bit_depth", ""),
+            "audio_codec": mi.get("audio_codec", ""),
+            "audio_langs": mi.get("audio_langs", []),
+            "sub_langs": mi.get("sub_langs", [])
+        }
 
     @Slot(str, result=dict)
     def getFolderMediaSummary(self, folder_path_str: str) -> dict:
@@ -4368,28 +4741,198 @@ class FileManagerBackend(QObject):
         self.canGoBackChanged.emit()
         self.canGoForwardChanged.emit()
 
+    def _resolve_system_icon_name(self, icon_name: str) -> str:
+        if not icon_name:
+            return ""
+        clean = icon_name.strip()
+        if clean in self._system_icon_name_cache:
+            return self._system_icon_name_cache[clean]
+        if os.path.isabs(clean) and os.path.exists(clean):
+            self._system_icon_name_cache[clean] = clean
+            return clean
+
+        search_dirs = [
+            Path.home() / ".local" / "share" / "icons" / "hicolor" / "scalable" / "apps",
+            Path.home() / ".local" / "share" / "icons" / "hicolor" / "128x128" / "apps",
+            Path.home() / ".local" / "share" / "icons" / "hicolor" / "64x64" / "apps",
+            Path("/usr/share/icons/hicolor/scalable/apps"),
+            Path("/usr/share/icons/hicolor/128x128/apps"),
+            Path("/usr/share/icons/hicolor/64x64/apps"),
+            Path("/usr/share/icons/hicolor/48x48/apps"),
+            Path("/usr/share/pixmaps"),
+            Path("/var/lib/flatpak/exports/share/icons/hicolor/scalable/apps"),
+            Path("/var/lib/flatpak/exports/share/icons/hicolor/128x128/apps"),
+            Path.home() / ".local" / "share" / "flatpak" / "exports" / "share" / "icons" / "hicolor" / "scalable" / "apps",
+        ]
+        for sdir in search_dirs:
+            if not sdir.is_dir():
+                continue
+            for ext in (".svg", ".png", ".xpm"):
+                cand = sdir / f"{clean}{ext}"
+                if cand.is_file():
+                    res_p = str(cand)
+                    self._system_icon_name_cache[clean] = res_p
+                    return res_p
+
+        self._system_icon_name_cache[clean] = ""
+        return ""
+
+    def _load_mimeapps_defaults_fast(self) -> dict:
+        if self._mimeapps_default_map is not None:
+            return self._mimeapps_default_map
+        mapping = {}
+        xdg_cfg = os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config"))
+        xdg_data = os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local" / "share"))
+        candidates = [
+            Path(xdg_cfg) / "mimeapps.list",
+            Path(xdg_data) / "applications" / "mimeapps.list",
+            Path("/usr/share/applications/mimeapps.list"),
+            Path("/usr/share/applications/defaults.list"),
+        ]
+        for cf in candidates:
+            if not cf.is_file():
+                continue
+            try:
+                in_def = False
+                with open(cf, "r", encoding="utf-8", errors="ignore") as f:
+                    for ln in f:
+                        s = ln.strip()
+                        if s.startswith("["):
+                            in_def = s in ("[Default Applications]", "[Added Associations]")
+                            continue
+                        if in_def and "=" in s and not s.startswith("#"):
+                            mt, d_list = s.split("=", 1)
+                            mt = mt.strip().lower()
+                            first_d = d_list.split(";")[0].strip()
+                            if mt and first_d and mt not in mapping:
+                                mapping[mt] = first_d
+            except Exception:
+                pass
+        self._mimeapps_default_map = mapping
+        return mapping
+
+    def _get_default_app_icon_for_ext(self, suffix: str) -> str:
+        if not suffix or len(suffix) < 2 or not suffix.startswith("."):
+            return ""
+        # Never use app icon fallback for numeric/random suffixes like .0, .2, .bak, .old, .tmp
+        if suffix[1:].isdigit() or any(ch.isdigit() for ch in suffix[1:] if len(suffix) <= 3):
+            return ""
+        if suffix in self._ext_default_app_icon_cache:
+            return self._ext_default_app_icon_cache[suffix]
+
+        desktop_dirs = [
+            Path.home() / ".local" / "share" / "applications",
+            Path("/var/lib/flatpak/exports/share/applications"),
+            Path.home() / ".local" / "share" / "flatpak" / "exports" / "share" / "applications",
+            Path("/usr/local/share/applications"),
+            Path("/usr/share/applications"),
+        ]
+
+        # 1. Check if user assigned a custom app rule in Find Settings
+        custom_cmd = self._get_custom_open_command_for_ext(suffix)
+        if custom_cmd:
+            cmd_bin = os.path.basename(custom_cmd.replace("TERM:", "").split()[0]).lower()
+            direct_icon = self._resolve_system_icon_name(cmd_bin)
+            if direct_icon:
+                self._ext_default_app_icon_cache[suffix] = direct_icon
+                return direct_icon
+
+        # 2. Fast in-memory lookup from mimeapps.list (0ms, never blocks or spawns xdg-mime!)
+        mime_type, _ = mimetypes.guess_type(f"dummy{suffix}")
+        # Ignore generic text/plain or application/octet-stream so unknown files don't get subtitle/editor app icons
+        if mime_type and mime_type.lower() not in ("text/plain", "application/octet-stream", "application/x-zerosize"):
+            mime_map = self._load_mimeapps_defaults_fast()
+            desktop_name = mime_map.get(mime_type.lower(), "")
+            if desktop_name and desktop_name != "find.desktop":
+                for ddir in desktop_dirs:
+                    dp = ddir / desktop_name
+                    if dp.is_file():
+                        try:
+                            with open(dp, "r", encoding="utf-8", errors="ignore") as f:
+                                for ln in f:
+                                    s = ln.strip()
+                                    if s.startswith("Icon="):
+                                        ic_val = s.split("=", 1)[1].strip()
+                                        resolved_ic = self._resolve_system_icon_name(ic_val)
+                                        if resolved_ic:
+                                            self._ext_default_app_icon_cache[suffix] = resolved_ic
+                                            return resolved_ic
+                                        break
+                        except Exception:
+                            pass
+
+        self._ext_default_app_icon_cache[suffix] = ""
+        return ""
+
     def _determine_icon_and_type(self, path_obj: Path, is_dir: bool):
         defaults = self.config_mgr.get("default_type_icons", {})
         if path_obj.is_symlink():
             return "🔗", "Symbolic Link"
+
+        # Keep Folders, Videos, and Images strictly as they are currently!
         if is_dir:
             return defaults.get("folder", "📁"), "Folder"
 
+        name_low = path_obj.name.lower()
         suffix = path_obj.suffix.lower()
-        if suffix == ".py":
-            return defaults.get("py", "🐍"), "Python Script"
-        if suffix == ".rs":
-            return defaults.get("rs", "🦀"), "Rust Source"
-        if suffix == ".json":
-            return defaults.get("json", "📋"), "JSON Document"
+
         if suffix in IMAGE_EXTS:
             return defaults.get("image", "🖼️"), "Image"
         if suffix in VIDEO_EXTS:
             return defaults.get("video", "🎬"), "Video"
-        if suffix in {".mp3", ".flac", ".wav", ".ogg", ".m4a", ".aac"}:
-            return defaults.get("audio", "🎵"), "Audio"
-        if suffix in {".zip", ".tar", ".gz", ".xz", ".7z", ".rar"}:
-            return defaults.get("archive", "📦"), "Archive"
+
+        # 1. Check user custom extension icon overrides from Settings
+        custom_ext_icons = self.config_mgr.get("custom_extension_icons", {}) or {}
+        if suffix and suffix in custom_ext_icons:
+            c_ic = custom_ext_icons[suffix]
+            if c_ic and (not os.path.isabs(c_ic) or os.path.exists(c_ic)):
+                _, desc = CURATED_EXT_ICONS.get(suffix, ("", f"{suffix.upper().lstrip('.')} File"))
+                return c_ic, desc
+
+        # 2. Check special exact filenames (e.g., CMakeLists.txt, Dockerfile, Cargo.toml)
+        if name_low in SPECIAL_FILENAME_ICONS:
+            svg_name, desc = SPECIAL_FILENAME_ICONS[name_low]
+            svg_path = BUNDLED_ICONS_DIR / svg_name
+            if svg_path.is_file():
+                return str(svg_path), desc
+
+        # 3. Check compound extensions like .d.ts or .tar.gz
+        if name_low.endswith(".d.ts"):
+            svg_path = BUNDLED_ICONS_DIR / "typescript-def.svg"
+            if svg_path.is_file():
+                return str(svg_path), "TypeScript Definitions"
+        elif any(name_low.endswith(x) for x in (".tar.gz", ".tar.xz", ".tar.bz2", ".tar.zst")):
+            svg_path = BUNDLED_ICONS_DIR / "zip.svg"
+            if svg_path.is_file():
+                return str(svg_path), "Compressed Tar Archive"
+
+        # 4. Check Curated Bundled SVG/PNG Icons in Find/icons/
+        if suffix in CURATED_EXT_ICONS:
+            svg_name, desc = CURATED_EXT_ICONS[suffix]
+            svg_path = BUNDLED_ICONS_DIR / svg_name
+            if svg_path.is_file():
+                return str(svg_path), desc
+            if svg_name == "ass.png":
+                alt_sub = BUNDLED_ICONS_DIR / "subtitles.svg"
+                if alt_sub.is_file():
+                    return str(alt_sub), desc
+
+        # 5. Dotfiles without a known extension (e.g. .gtkrc-2.0, .steampid, .xprofile) -> settings/config icon
+        if name_low.startswith("."):
+            cfg_svg = BUNDLED_ICONS_DIR / "settings.svg"
+            if cfg_svg.is_file():
+                return str(cfg_svg), "Hidden Config File"
+
+        # 6. Fallback to Primary Application Icon that opens this extension (only for real extensions)
+        if suffix and not name_low.startswith(".") and bool(self.config_mgr.get("use_app_icon_fallback", True)):
+            app_icon = self._get_default_app_icon_for_ext(suffix)
+            if app_icon:
+                return app_icon, f"{suffix.upper().lstrip('.')} File"
+
+        # 7. Final fallback to clean document.svg (Never use file.png because file.png in icons/ has 'ASS' printed on it!)
+        generic_doc = BUNDLED_ICONS_DIR / "document.svg"
+        if generic_doc.is_file() and defaults.get("file", "📄") == "📄":
+            return str(generic_doc), "File"
 
         return defaults.get("file", "📄"), "File"
 
@@ -4686,6 +5229,7 @@ class FileManagerBackend(QObject):
             return
 
         target_resolved = str(target_path)
+        self.config_mgr.record_folder_visit(target_resolved)
         if self._current_path != target_resolved:
             self._current_path = target_resolved
             self.currentPathChanged.emit()
@@ -4919,6 +5463,8 @@ class FileManagerBackend(QObject):
                     self._selected_item = dict(ent)
             self.selectedItemChanged.emit()
             self.selectedPathsChanged.emit()
+            if to_sel:
+                QTimer.singleShot(40, self.scrollToSelectionRequested.emit)
         elif is_same_dir and self._selected_paths:
             surviving = [p for p in self._selected_paths if self.file_model.get_row_for_path(p) >= 0]
             if surviving != self._selected_paths:
@@ -5052,7 +5598,16 @@ class FileManagerBackend(QObject):
         else:
             files = sorted([e for e in entries if not e["is_dir"]], key=base_key, reverse=rev)
 
-        entries[:] = dirs + files
+        combined = dirs + files
+
+        # Windows Explorer style: Keep newly extracted items temporarily at the very bottom of the current folder!
+        if self._recent_extracted_paths and str(self._current_path) == self._recent_extracted_dir:
+            ext_set = set(self._recent_extracted_paths)
+            normal_items = [e for e in combined if os.path.abspath(e.get("path", "")) not in ext_set]
+            bottom_items = [e for e in combined if os.path.abspath(e.get("path", "")) in ext_set]
+            combined = normal_items + bottom_items
+
+        entries[:] = combined
 
     def _format_size(self, size):
         try:
@@ -5078,8 +5633,68 @@ class FileManagerBackend(QObject):
             self.thumb_mgr.prune_stale_requests(set(visible_paths))
 
     @Slot(str)
-    def requestFolderPreview(self, folder_path_str: str):
-        self.thumb_mgr.request_folder_preview(folder_path_str, self._show_hidden)
+    @Slot(str, bool)
+    def requestFolderPreview(self, folder_path_str: str, is_high_priority: bool = False):
+        self.thumb_mgr.request_folder_preview(folder_path_str, self._show_hidden, is_high_priority=is_high_priority)
+
+    @Slot(int, int)
+    @Slot(int, int, int, int)
+    def ensureVisibleRangePreviews(self, screen_start: int, screen_end: int, buffer_start: int = -1, buffer_end: int = -1):
+        """
+        Smart Viewport Watchdog: inspects the exact visible rows and 1-page buffer directly in Python
+        so QML never misses a single thumbnail or folder preview.
+        """
+        total = self.file_model.rowCount()
+        if total <= 0:
+            return
+
+        s_start = max(0, min(total - 1, int(screen_start)))
+        s_end = max(s_start, min(total - 1, int(screen_end)))
+        b_start = max(0, min(total - 1, int(buffer_start if buffer_start >= 0 else s_start)))
+        b_end = max(b_start, min(total - 1, int(buffer_end if buffer_end >= 0 else s_end)))
+
+        active_window_paths = set()
+
+        # Pass 1: Strictly visible on-screen items (High priority)
+        for idx in range(s_start, s_end + 1):
+            ent = self.file_model.get_entry_at(idx)
+            if not ent:
+                continue
+            p = ent.get("path", "")
+            if not p:
+                continue
+            active_window_paths.add(p)
+            if ent.get("is_dir"):
+                fps = ent.get("folder_previews")
+                if not fps:
+                    self.thumb_mgr.request_folder_preview(p, self._show_hidden, is_high_priority=True)
+            else:
+                th = ent.get("thumb", "")
+                if not th:
+                    self.thumb_mgr.request_thumbnail(p, is_high_priority=True)
+
+        # Pass 2: 1-Page pre-fetch buffer above & below (Normal priority)
+        for idx in range(b_start, b_end + 1):
+            if s_start <= idx <= s_end:
+                continue
+            ent = self.file_model.get_entry_at(idx)
+            if not ent:
+                continue
+            p = ent.get("path", "")
+            if not p:
+                continue
+            active_window_paths.add(p)
+            if ent.get("is_dir"):
+                fps = ent.get("folder_previews")
+                if not fps:
+                    self.thumb_mgr.request_folder_preview(p, self._show_hidden, is_high_priority=False)
+            else:
+                th = ent.get("thumb", "")
+                if not th:
+                    self.thumb_mgr.request_thumbnail(p, is_high_priority=False)
+
+        if active_window_paths:
+            self.thumb_mgr.prune_stale_requests(active_window_paths)
 
     def _trigger_background_airing_sync(self, force: bool = False):
         if getattr(self.airing_tracker, "_sync_in_progress", False):
@@ -5595,8 +6210,13 @@ class FileManagerBackend(QObject):
                 self.picker_ctx.setSelectedPath(str(path))
                 self.confirmPickerSelection()
             else:
-                if path.suffix.lower() in VIDEO_EXTS and shutil.which("mpv"):
+                custom_cmd = self._get_custom_open_command_for_ext(path.suffix.lower())
+                if custom_cmd:
+                    self.openWithApp(str(path), custom_cmd)
+                elif path.suffix.lower() in VIDEO_EXTS and shutil.which("mpv"):
                     self._launch_in_mpv_with_tracking(str(path), hdr_mode=None)
+                elif self.isExecutableFile(str(path)):
+                    self.runExecutable(str(path), in_terminal=False)
                 else:
                     subprocess.Popen(["xdg-open", str(path)], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -6143,7 +6763,7 @@ class FileManagerBackend(QObject):
         self._compression_status = status_text
         self.compressionProgressChanged.emit()
 
-    def _on_archive_finished(self, success: bool, message: str):
+    def _on_archive_finished(self, success: bool, message: str, created_paths: list = None):
         self._is_compressing = False
         self._compression_progress = 0.0
         self._compression_status = ""
@@ -6151,6 +6771,14 @@ class FileManagerBackend(QObject):
         if message:
             self.toastMessage.emit(message)
         if success:
+            if created_paths:
+                norm_created = [os.path.abspath(p) for p in created_paths if p and os.path.exists(p)]
+                if norm_created:
+                    parent_d = os.path.dirname(norm_created[0])
+                    if parent_d == os.path.abspath(str(self._current_path)):
+                        self._recent_extracted_dir = parent_d
+                        self._recent_extracted_paths = norm_created
+                        self._pending_highlight_paths = norm_created
             self.refresh()
 
     @Slot(str, result=bool)
@@ -6369,6 +6997,10 @@ class FileManagerBackend(QObject):
                 self.toastMessage.emit(f"⚠️ Path does not exist: {target}")
                 return
 
+        if target != self._recent_extracted_dir:
+            self._recent_extracted_paths = []
+            self._recent_extracted_dir = ""
+
         if self._history and self._history[self._history_idx] == target:
             self.load_directory(target)
             return
@@ -6401,6 +7033,7 @@ class FileManagerBackend(QObject):
 
     @Slot(str)
     def setSort(self, sort_key: str):
+        self._recent_extracted_paths = []
         if self._sort_by == sort_key:
             self._sort_ascending = not self._sort_ascending
         else:
@@ -6774,15 +7407,56 @@ class FileManagerBackend(QObject):
         all_paths = []
         for r in range(total):
             ent = self.file_model.get_entry_at(r)
-            if ent:
+            if ent and ent.get("path"):
                 all_paths.append(ent["path"])
+        if not all_paths:
+            return
+
         self._selected_paths = all_paths
+        self._last_selected_row = 0
         self.file_model.sync_selection_paths(self._selected_paths)
         self.selectedPathsChanged.emit()
-        if not self._selected_item and total > 0:
+
+        if self.picker_ctx.isActive:
+            file_sels = [sp for sp in self._selected_paths if os.path.isfile(sp)]
+            self.picker_ctx.setSelectedPaths(file_sels)
+
+        if len(all_paths) == 1:
             first = self.file_model.get_entry_at(0)
             if first:
-                self.selectItem(first["path"], first["name"], first["is_dir"], first["size"], first["modified"], first["type"], Qt.KeyboardModifier.ControlModifier.value)
+                self.selectItem(first["path"], first["name"], first["is_dir"], first["size"], first["modified"], first["type"], 0)
+        else:
+            token = f"sel_all_{time.time()}_{len(self._selected_paths)}"
+            self._selection_calc_token = token
+            self._selected_item = {
+                "path": self._selected_paths[0],
+                "name": f"{len(self._selected_paths)} Items Selected",
+                "is_dir": False,
+                "is_multi": True,
+                "multi_count": len(self._selected_paths),
+                "size": "Calculating total size...",
+                "modified": "",
+                "type": "Multiple Selection",
+                "preview_text": "",
+                "is_image": False,
+                "is_video": False,
+                "thumb": "",
+                "folder_previews": [],
+                "episode_title": "",
+                "overview": "",
+                "rating": "",
+                "poster": "",
+                "resolution": "",
+                "codec": "",
+                "bit_depth": "",
+                "color_profile": "",
+                "bitrate": "",
+                "fps": "",
+                "audio_codec": ""
+            }
+            self.selectedItemChanged.emit()
+            ms_task = MultiSelectionSizeTask(self._selected_paths, token, self.signals)
+            self.thread_pool.start(ms_task)
 
     @Slot()
     def clearSelection(self):
@@ -6899,6 +7573,7 @@ class FileManagerBackend(QObject):
                     self._selected_item = dict(ent)
                 self.selectedItemChanged.emit()
                 self.selectedPathsChanged.emit()
+                QTimer.singleShot(40, self.scrollToSelectionRequested.emit)
 
     def _get_unique_path(self, parent_dir: Path, base_name: str, ext: str = "") -> Path:
         target = parent_dir / f"{base_name}{ext}"
@@ -7293,6 +7968,211 @@ class FileManagerBackend(QObject):
         icons = dict(self.config_mgr.get("default_type_icons", {}))
         icons[type_key] = icon_val
         self.config_mgr.set("default_type_icons", icons)
+        self.refresh()
+
+    # ==========================================================================
+    # Default Open Rules (Per-Extension & Per-Group) + Extension Icon Overrides
+    # ==========================================================================
+
+    def _get_custom_open_command_for_ext(self, suffix: str) -> str:
+        if not suffix:
+            return ""
+        ext = suffix.lower() if suffix.startswith(".") else f".{suffix.lower()}"
+        rules = self.config_mgr.get("custom_open_rules", {}) or {}
+        ext_map = rules.get("extensions", {}) or {}
+        if ext in ext_map and isinstance(ext_map[ext], dict):
+            cmd = str(ext_map[ext].get("cmd") or "").strip()
+            if cmd:
+                return cmd
+
+        group_map = rules.get("groups", {}) or {}
+        for g_key, g_info in EXTENSION_GROUPS.items():
+            if ext in g_info["extensions"] and g_key in group_map and isinstance(group_map[g_key], dict):
+                cmd = str(group_map[g_key].get("cmd") or "").strip()
+                if cmd:
+                    return cmd
+        return ""
+
+    @Property(bool, notify=defaultOpenRulesChanged)
+    def useAppIconFallback(self) -> bool:
+        return bool(self.config_mgr.get("use_app_icon_fallback", True))
+
+    @Slot(bool)
+    def setUseAppIconFallback(self, enabled: bool):
+        self.config_mgr.set("use_app_icon_fallback", bool(enabled))
+        self._ext_default_app_icon_cache.clear()
+        self.defaultOpenRulesChanged.emit()
+        self.refresh()
+
+    @Slot(result=list)
+    def getAllInstalledDesktopApps(self) -> list:
+        if self._desktop_Apps_list_cache is not None:
+            return self._desktop_Apps_list_cache
+
+        app_dirs = [
+            Path.home() / ".local" / "share" / "applications",
+            Path("/var/lib/flatpak/exports/share/applications"),
+            Path.home() / ".local" / "share" / "flatpak" / "exports" / "share" / "applications",
+            Path("/usr/local/share/applications"),
+            Path("/usr/share/applications"),
+        ]
+        apps = []
+        seen = set()
+        import shlex
+        for adir in app_dirs:
+            if not adir.is_dir():
+                continue
+            try:
+                for entry in os.scandir(str(adir)):
+                    if not entry.name.endswith(".desktop"):
+                        continue
+                    try:
+                        with open(entry.path, "r", encoding="utf-8", errors="ignore") as f:
+                            content = f.read()
+                        if "[Desktop Entry]" not in content:
+                            continue
+                        name_val = ""
+                        exec_val = ""
+                        icon_val = ""
+                        no_display = False
+                        is_term = False
+                        in_entry = False
+                        for ln in content.splitlines():
+                            s = ln.strip()
+                            if s.startswith("["):
+                                in_entry = (s == "[Desktop Entry]")
+                                continue
+                            if not in_entry or not s or s.startswith("#"):
+                                continue
+                            if s.startswith("NoDisplay=") and s.split("=", 1)[1].strip().lower() == "true":
+                                no_display = True
+                            elif s.startswith("Terminal=") and s.split("=", 1)[1].strip().lower() == "true":
+                                is_term = True
+                            elif s.startswith("Name=") and not name_val:
+                                name_val = s.split("=", 1)[1].strip()
+                            elif s.startswith("Exec=") and not exec_val:
+                                exec_val = s.split("=", 1)[1].strip()
+                            elif s.startswith("Icon=") and not icon_val:
+                                icon_val = s.split("=", 1)[1].strip()
+                        if no_display or not name_val or not exec_val or name_val.lower() == "find":
+                            continue
+                        cleaned_exec = self._clean_desktop_exec(exec_val)
+                        parts = shlex.split(cleaned_exec)
+                        if not parts:
+                            continue
+                        bin_cmd = parts[0]
+                        if not (os.path.isabs(bin_cmd) and os.access(bin_cmd, os.X_OK)) and not shutil.which(bin_cmd):
+                            continue
+                        key_l = name_val.lower()
+                        if key_l in seen:
+                            continue
+                        seen.add(key_l)
+                        apps.append({
+                            "name": name_val,
+                            "cmd": ("TERM:" + cleaned_exec) if is_term else cleaned_exec,
+                            "icon": self._resolve_system_icon_name(icon_val)
+                        })
+                    except Exception:
+                        pass
+            except OSError:
+                pass
+        apps.sort(key=lambda x: x["name"].lower())
+        self._desktop_Apps_list_cache = apps
+        return apps
+
+    @Slot(result=list)
+    def getExtensionGroupRules(self) -> list:
+        rules = self.config_mgr.get("custom_open_rules", {}) or {}
+        group_map = rules.get("groups", {}) or {}
+        out = []
+        for g_key, g_info in EXTENSION_GROUPS.items():
+            saved = group_map.get(g_key, {}) if isinstance(group_map.get(g_key), dict) else {}
+            out.append({
+                "key": g_key,
+                "title": g_info["title"],
+                "extensions_preview": ", ".join(sorted(list(g_info["extensions"]))[:8]) + "...",
+                "app_name": str(saved.get("name") or "System Default"),
+                "app_cmd": str(saved.get("cmd") or "")
+            })
+        return out
+
+    @Slot(str, str, str)
+    def setExtensionGroupRule(self, group_key: str, app_name: str, app_cmd: str):
+        if group_key not in EXTENSION_GROUPS:
+            return
+        rules = dict(self.config_mgr.get("custom_open_rules", {}) or {})
+        groups = dict(rules.get("groups", {}) or {})
+        if not app_cmd.strip():
+            groups.pop(group_key, None)
+        else:
+            groups[group_key] = {"name": app_name.strip() or app_cmd.strip(), "cmd": app_cmd.strip()}
+        rules["groups"] = groups
+        self.config_mgr.set("custom_open_rules", rules)
+        self._ext_default_app_icon_cache.clear()
+        self.defaultOpenRulesChanged.emit()
+        self.toastMessage.emit(f"✔ Updated default opener for {EXTENSION_GROUPS[group_key]['title']}")
+        self.refresh()
+
+    @Slot(result=list)
+    def getExtensionRulesAndIcons(self) -> list:
+        rules = self.config_mgr.get("custom_open_rules", {}) or {}
+        ext_rules = rules.get("extensions", {}) or {}
+        custom_icons = self.config_mgr.get("custom_extension_icons", {}) or {}
+
+        all_exts = sorted(set(CURATED_EXT_ICONS.keys()) | set(ext_rules.keys()) | set(custom_icons.keys()))
+        out = []
+        for ext in all_exts:
+            svg_name, desc = CURATED_EXT_ICONS.get(ext, ("", f"{ext.upper().lstrip('.')} File"))
+            bundled_p = str(BUNDLED_ICONS_DIR / svg_name) if (svg_name and (BUNDLED_ICONS_DIR / svg_name).is_file()) else ""
+            if not bundled_p and svg_name == "ass.png" and (BUNDLED_ICONS_DIR / "subtitles.svg").is_file():
+                bundled_p = str(BUNDLED_ICONS_DIR / "subtitles.svg")
+            override_ic = str(custom_icons.get(ext) or "")
+            active_icon = override_ic if (override_ic and os.path.exists(override_ic)) else bundled_p
+            r_obj = ext_rules.get(ext, {}) if isinstance(ext_rules.get(ext), dict) else {}
+            out.append({
+                "ext": ext,
+                "desc": desc,
+                "icon": active_icon,
+                "has_custom_icon": bool(override_ic),
+                "app_name": str(r_obj.get("name") or "System / Group Default"),
+                "app_cmd": str(r_obj.get("cmd") or "")
+            })
+        return out
+
+    @Slot(str, str, str)
+    def setSingleExtensionRule(self, ext_str: str, app_name: str, app_cmd: str):
+        clean_ext = ext_str.strip().lower()
+        if not clean_ext:
+            return
+        if not clean_ext.startswith("."):
+            clean_ext = "." + clean_ext
+        rules = dict(self.config_mgr.get("custom_open_rules", {}) or {})
+        exts = dict(rules.get("extensions", {}) or {})
+        if not app_cmd.strip():
+            exts.pop(clean_ext, None)
+        else:
+            exts[clean_ext] = {"name": app_name.strip() or app_cmd.strip(), "cmd": app_cmd.strip()}
+        rules["extensions"] = exts
+        self.config_mgr.set("custom_open_rules", rules)
+        self._ext_default_app_icon_cache.clear()
+        self.defaultOpenRulesChanged.emit()
+        self.toastMessage.emit(f"✔ Updated default opener for '{clean_ext}'")
+        self.refresh()
+
+    @Slot(str, str)
+    def setCustomExtensionIcon(self, ext_str: str, icon_path: str):
+        clean_ext = ext_str.strip().lower()
+        if not clean_ext:
+            return
+        if not clean_ext.startswith("."):
+            clean_ext = "." + clean_ext
+        custom_icons = dict(self.config_mgr.get("custom_extension_icons", {}) or {})
+        if not icon_path.strip():
+            custom_icons.pop(clean_ext, None)
+        else:
+            custom_icons[clean_ext] = icon_path.strip()
+        self.config_mgr.set("custom_extension_icons", custom_icons)
+        self.defaultOpenRulesChanged.emit()
         self.refresh()
 
     @Slot(str)
@@ -7762,8 +8642,9 @@ class FileManagerBackend(QObject):
                 saved_list.insert(0, record)
 
             self.config_mgr.set("saved_desktop_apps", saved_list)
+            self._desktop_Apps_list_cache = None
             self.desktopAppsUpdated.emit()
-            self.toastMessage.emit(f"✔ Added '{app_name.strip()}' to Applications (.desktop)")
+            self.toastMessage.emit(f"✔ Saved to ~/.local/share/applications/{desktop_filename}")
             return True
         except Exception:
             return False
@@ -7895,6 +8776,8 @@ class FileManagerBackend(QObject):
     def getIconSearchRoots(self) -> list:
         custom_dir = self.config_mgr.get("custom_icons_dir", "")
         candidates = []
+        if BUNDLED_ICONS_DIR.is_dir():
+            candidates.append(str(BUNDLED_ICONS_DIR))
         if custom_dir and os.path.isdir(custom_dir):
             candidates.append(custom_dir)
         candidates.extend([

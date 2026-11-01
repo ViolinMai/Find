@@ -21,10 +21,28 @@ ApplicationWindow {
     LayoutMirroring.childrenInherit: true
 
     readonly property bool isViewingEpisodeList: backend ? (backend.currentPath !== "mediahub://") : false
+    readonly property bool isMovieLibraryFolder: backend ? (isViewingEpisodeList && backend.isMovieFolderView) : false
+    property string activeMovieWorkPath: ""
+    property var currentMovieSummary: ({})
+    readonly property bool isViewingMoviePage: activeMovieWorkPath !== ""
     property string activeToastText: ""
     property var currentShowSummary: ({})
 
+    function openMoviePage(moviePath) {
+        if (!backend || !moviePath) return
+        activeMovieWorkPath = moviePath
+        currentMovieSummary = backend.getMovieWorkSummary(moviePath)
+    }
+
+    function closeMoviePage() {
+        activeMovieWorkPath = ""
+        currentMovieSummary = ({})
+    }
+
     function refreshShowSummary() {
+        if (backend && isViewingMoviePage) {
+            currentMovieSummary = backend.getMovieWorkSummary(activeMovieWorkPath)
+        }
         if (backend && isViewingEpisodeList) {
             currentShowSummary = backend.getFolderMediaSummary(backend.currentPath)
         } else {
@@ -45,11 +63,17 @@ ApplicationWindow {
     Connections {
         target: backend
         function onCurrentPathChanged() {
+            mhWindow.closeMoviePage()
             mhWindow.refreshShowSummary()
         }
         function onMediaLibraryStateChanged() {
-            if (mhWindow.isViewingEpisodeList) {
+            if (mhWindow.isViewingEpisodeList || mhWindow.isViewingMoviePage) {
                 mhWindow.refreshShowSummary()
+            }
+        }
+        function onSelectedItemChanged() {
+            if (mhWindow.isViewingMoviePage && backend) {
+                mhWindow.currentMovieSummary = backend.getMovieWorkSummary(mhWindow.activeMovieWorkPath)
             }
         }
         function onFolderMediaSummaryChanged(folderPath, summaryData) {
@@ -86,7 +110,9 @@ ApplicationWindow {
         sequence: "Escape"
         context: Qt.WindowShortcut
         onActivated: {
-            if (mhWindow.isViewingEpisodeList && backend) {
+            if (mhWindow.isViewingMoviePage) {
+                mhWindow.closeMoviePage()
+            } else if (mhWindow.isViewingEpisodeList && backend) {
                 backend.navigateTo("mediahub://")
             }
         }
@@ -95,7 +121,9 @@ ApplicationWindow {
         sequence: "Backspace"
         context: Qt.WindowShortcut
         onActivated: {
-            if (mhWindow.isViewingEpisodeList && backend) {
+            if (mhWindow.isViewingMoviePage) {
+                mhWindow.closeMoviePage()
+            } else if (mhWindow.isViewingEpisodeList && backend) {
                 backend.navigateTo("mediahub://")
             }
         }
@@ -143,10 +171,10 @@ ApplicationWindow {
                 onActiveChanged: if (active) mhWindow.startSystemMove()
             }
 
-            // Floating Back Arrow (Top-Left, visible only inside episode list)
+            // Floating Back Arrow (Top-Left, visible inside Movie Page or Episode List)
             Rectangle {
                 id: backArrowBtn
-                visible: mhWindow.isViewingEpisodeList
+                visible: mhWindow.isViewingMoviePage || mhWindow.isViewingEpisodeList
                 anchors.left: parent.left
                 anchors.leftMargin: Math.round(18 * Theme.scaleFactor)
                 anchors.verticalCenter: parent.verticalCenter
@@ -159,7 +187,7 @@ ApplicationWindow {
 
                 Text {
                     anchors.centerIn: parent
-                    text: "→"
+                    text: "←"
                     color: backArrowMouse.containsMouse ? Theme.accent : Theme.textPrimary
                     font.pixelSize: Math.round(18 * Theme.scaleFactor)
                     font.bold: true
@@ -170,7 +198,13 @@ ApplicationWindow {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onClicked: if (backend) backend.navigateTo("mediahub://")
+                    onClicked: {
+                        if (mhWindow.isViewingMoviePage) {
+                            mhWindow.closeMoviePage()
+                        } else if (backend) {
+                            backend.navigateTo("mediahub://")
+                        }
+                    }
                 }
             }
 
@@ -286,7 +320,7 @@ ApplicationWindow {
             Flickable {
                 id: hubFlick
                 anchors.fill: parent
-                visible: !mhWindow.isViewingEpisodeList
+                visible: !mhWindow.isViewingEpisodeList && !mhWindow.isViewingMoviePage
                 contentWidth: width
                 contentHeight: hubCol.implicitHeight + Math.round(50 * Theme.scaleFactor)
                 clip: true
@@ -413,6 +447,8 @@ ApplicationWindow {
                                                     if (model.is_dir) {
                                                         backend.setViewMode("details")
                                                         backend.navigateTo(model.path)
+                                                    } else if (model.is_movie_item && !model.is_airing_card) {
+                                                        mhWindow.openMoviePage(model.path)
                                                     } else {
                                                         backend.openEntry(model.path)
                                                     }
@@ -638,8 +674,12 @@ ApplicationWindow {
                                                         onClicked: function(mouse) {
                                                             mouse.accepted = true
                                                             if (backend && model.show_path) {
-                                                                backend.setViewMode("details")
-                                                                backend.navigateTo(model.show_path)
+                                                                if (model.is_movie_item && !model.is_dir && !model.is_airing_card) {
+                                                                    mhWindow.openMoviePage(model.path)
+                                                                } else {
+                                                                    backend.setViewMode("details")
+                                                                    backend.navigateTo(model.show_path)
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -655,11 +695,372 @@ ApplicationWindow {
             }
 
             // =========================================================
-            // 2. SHOW DETAILS & EPISODES LIST VIEW
+            // 1B. DEDICATED CINEMATIC MOVIE WORK PAGE
+            // =========================================================
+            Flickable {
+                id: moviePageFlick
+                anchors.fill: parent
+                visible: mhWindow.isViewingMoviePage
+                contentWidth: width
+                contentHeight: Math.max(height, movieHeroLayout.implicitHeight + Math.round(64 * Theme.scaleFactor))
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+
+                Rectangle {
+                    id: moviePageCard
+                    width: Math.min(Math.round(1080 * Theme.scaleFactor), parent.width - Math.round(44 * Theme.scaleFactor))
+                    implicitHeight: movieHeroLayout.implicitHeight + Math.round(48 * Theme.scaleFactor)
+                    anchors.horizontalCenter: parent.horizontalCenter
+                    y: Math.max(Math.round(52 * Theme.scaleFactor), (parent.height - implicitHeight) / 2)
+                    radius: Math.round(16 * Theme.scaleFactor)
+                    color: "#24161822"
+                    border.color: "#33ffffff"
+                    border.width: 1
+
+                    RowLayout {
+                        id: movieHeroLayout
+                        anchors.fill: parent
+                        anchors.margins: Math.round(24 * Theme.scaleFactor)
+                        spacing: Math.round(28 * Theme.scaleFactor)
+
+                        // Large Vertical Movie Poster
+                        Rectangle {
+                            id: movieHeroPosterBox
+                            Layout.preferredWidth: Math.round((mhWindow.width < 680 ? 150 : 230) * Theme.scaleFactor)
+                            Layout.preferredHeight: Math.round((mhWindow.width < 680 ? 220 : 335) * Theme.scaleFactor)
+                            Layout.alignment: Qt.AlignTop
+                            radius: Math.round(12 * Theme.scaleFactor)
+                            color: "#12131a"
+                            border.color: "#40ffffff"
+                            border.width: 1
+                            clip: true
+
+                            readonly property string posterSrc: {
+                                if (!mhWindow.currentMovieSummary) return ""
+                                if (mhWindow.currentMovieSummary.poster && mhWindow.currentMovieSummary.poster !== "") {
+                                    return "file://" + mhWindow.currentMovieSummary.poster
+                                }
+                                if (mhWindow.currentMovieSummary.thumb && mhWindow.currentMovieSummary.thumb !== "") {
+                                    return "file://" + mhWindow.currentMovieSummary.thumb
+                                }
+                                return ""
+                            }
+
+                            Image {
+                                anchors.fill: parent
+                                visible: parent.posterSrc !== ""
+                                source: parent.posterSrc
+                                fillMode: Image.PreserveAspectCrop
+                                asynchronous: true
+                                smooth: true
+                                mipmap: true
+                            }
+
+                            Text {
+                                anchors.centerIn: parent
+                                visible: parent.posterSrc === ""
+                                text: "🎬"
+                                font.pixelSize: Math.round(54 * Theme.scaleFactor)
+                            }
+                        }
+
+                        // Movie Details, Badges, Synopsis & Play Actions
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            Layout.alignment: Qt.AlignVCenter
+                            spacing: Math.round(12 * Theme.scaleFactor)
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
+
+                                Rectangle {
+                                    implicitWidth: movBadgeTxt.implicitWidth + 12
+                                    implicitHeight: Math.round(22 * Theme.scaleFactor)
+                                    radius: height / 2
+                                    color: Qt.rgba(Theme.mhAccent.r, Theme.mhAccent.g, Theme.mhAccent.b, 0.25)
+                                    border.color: Theme.mhAccent
+                                    Text {
+                                        id: movBadgeTxt
+                                        anchors.centerIn: parent
+                                        text: "FEATURE FILM"
+                                        color: "#ffffff"
+                                        font.pixelSize: Math.round(9 * Theme.scaleFactor)
+                                        font.bold: true
+                                        font.letterSpacing: 1.2
+                                    }
+                                }
+
+                                Rectangle {
+                                    visible: Boolean(mhWindow.currentMovieSummary && mhWindow.currentMovieSummary.is_hdr)
+                                    implicitWidth: movHdrTxt.implicitWidth + 12
+                                    implicitHeight: Math.round(22 * Theme.scaleFactor)
+                                    radius: Math.round(4 * Theme.scaleFactor)
+                                    color: "#33fbbf24"
+                                    border.color: "#fbbf24"
+                                    Text {
+                                        id: movHdrTxt
+                                        anchors.centerIn: parent
+                                        text: "HDR10 / Dolby Vision"
+                                        color: "#fde68a"
+                                        font.pixelSize: Math.round(9 * Theme.scaleFactor)
+                                        font.bold: true
+                                    }
+                                }
+
+                                Rectangle {
+                                    visible: Boolean(mhWindow.currentMovieSummary && mhWindow.currentMovieSummary.watched)
+                                    implicitWidth: movWatchedTxt.implicitWidth + 12
+                                    implicitHeight: Math.round(22 * Theme.scaleFactor)
+                                    radius: height / 2
+                                    color: "#2810b981"
+                                    border.color: "#10b981"
+                                    Text {
+                                        id: movWatchedTxt
+                                        anchors.centerIn: parent
+                                        text: "✓ WATCHED"
+                                        color: "#34d399"
+                                        font.pixelSize: Math.round(9 * Theme.scaleFactor)
+                                        font.bold: true
+                                    }
+                                }
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: (mhWindow.currentMovieSummary && mhWindow.currentMovieSummary.title) ? mhWindow.currentMovieSummary.title : "Movie"
+                                color: Theme.textPrimary
+                                font.pixelSize: Math.round(26 * Theme.scaleFactor)
+                                font.bold: true
+                                wrapMode: Text.WordWrap
+                            }
+
+                            Flow {
+                                Layout.fillWidth: true
+                                spacing: 10
+
+                                Text {
+                                    visible: Boolean(mhWindow.currentMovieSummary && mhWindow.currentMovieSummary.year)
+                                    text: "📅 " + (mhWindow.currentMovieSummary.year || "")
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeNormal
+                                    font.bold: true
+                                }
+                                Text {
+                                    visible: Boolean(mhWindow.currentMovieSummary && mhWindow.currentMovieSummary.rating)
+                                    text: "⭐ " + (mhWindow.currentMovieSummary.rating || "")
+                                    color: "#fbbf24"
+                                    font.pixelSize: Theme.fontSizeNormal
+                                    font.bold: true
+                                }
+                                Text {
+                                    text: "⏱ " + ((mhWindow.currentMovieSummary && mhWindow.currentMovieSummary.duration_str) ? mhWindow.currentMovieSummary.duration_str : "Movie")
+                                    color: Theme.textSecondary
+                                    font.pixelSize: Theme.fontSizeNormal
+                                    font.bold: true
+                                }
+                                Text {
+                                    text: "💾 " + ((mhWindow.currentMovieSummary && mhWindow.currentMovieSummary.size) ? mhWindow.currentMovieSummary.size : "-")
+                                    color: Theme.textSecondary
+                                    font.pixelSize: Theme.fontSizeNormal
+                                    font.bold: true
+                                }
+                                Text {
+                                    visible: Boolean(mhWindow.currentMovieSummary && mhWindow.currentMovieSummary.resolution && mhWindow.currentMovieSummary.resolution !== "N/A")
+                                    text: "🖥 " + (mhWindow.currentMovieSummary.resolution || "") + (mhWindow.currentMovieSummary.codec ? (" • " + mhWindow.currentMovieSummary.codec) : "")
+                                    color: Theme.mhAccent
+                                    font.pixelSize: Theme.fontSizeNormal
+                                    font.bold: true
+                                }
+                            }
+
+                            // Progress bar if movie is partially watched
+                            ColumnLayout {
+                                visible: Boolean(mhWindow.currentMovieSummary && mhWindow.currentMovieSummary.progress > 0.005)
+                                Layout.fillWidth: true
+                                spacing: 4
+
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    height: Math.round(6 * Theme.scaleFactor)
+                                    radius: height / 2
+                                    color: "#33ffffff"
+                                    clip: true
+
+                                    Rectangle {
+                                        width: parent.width * Math.min(1.0, Math.max(0.0, (mhWindow.currentMovieSummary ? mhWindow.currentMovieSummary.progress : 0.0)))
+                                        height: parent.height
+                                        radius: parent.radius
+                                        color: (mhWindow.currentMovieSummary && mhWindow.currentMovieSummary.watched) ? "#10b981" : Theme.mhAccent
+                                    }
+                                }
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: (mhWindow.currentMovieSummary && mhWindow.currentMovieSummary.overview)
+                                      ? mhWindow.currentMovieSummary.overview
+                                      : "Local movie file ready for direct playback in MPV."
+                                color: Theme.textSecondary
+                                font.pixelSize: Theme.fontSizeNormal
+                                wrapMode: Text.WordWrap
+                                maximumLineCount: 5
+                                elide: Text.ElideRight
+                            }
+
+                            Text {
+                                Layout.fillWidth: true
+                                text: (mhWindow.currentMovieSummary && mhWindow.currentMovieSummary.filename) ? ("File: " + mhWindow.currentMovieSummary.filename) : ""
+                                color: Theme.textTertiary
+                                font.family: "monospace"
+                                font.pixelSize: Theme.fontSizeSmall
+                                elide: Text.ElideMiddle
+                            }
+
+                            // Action Buttons Row
+                            Flow {
+                                Layout.fillWidth: true
+                                Layout.topMargin: 6
+                                spacing: 12
+
+                                // Primary Play / Resume Movie Button
+                                Rectangle {
+                                    width: Math.round(220 * Theme.scaleFactor)
+                                    height: Math.round(42 * Theme.scaleFactor)
+                                    radius: height / 2
+                                    color: playMovieHeroMouse.containsMouse ? Qt.lighter(Theme.mhAccent, 1.15) : Theme.mhAccent
+                                    border.color: "#ffffff"
+                                    border.width: 1
+
+                                    RowLayout {
+                                        anchors.centerIn: parent
+                                        spacing: 8
+                                        Text { text: "▶"; color: "#ffffff"; font.pixelSize: Theme.fontSizeMedium; font.bold: true }
+                                        Text {
+                                            text: (mhWindow.currentMovieSummary && mhWindow.currentMovieSummary.is_resumable)
+                                                  ? ("Resume (" + mhWindow.currentMovieSummary.resume_time_str + ")")
+                                                  : "Play Movie"
+                                            color: "#ffffff"
+                                            font.pixelSize: Theme.fontSizeNormal
+                                            font.bold: true
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: playMovieHeroMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: if (backend && mhWindow.activeMovieWorkPath) backend.openEntry(mhWindow.activeMovieWorkPath)
+                                    }
+                                }
+
+                                // Play with HDR Force Button
+                                Rectangle {
+                                    width: Math.round(160 * Theme.scaleFactor)
+                                    height: Math.round(42 * Theme.scaleFactor)
+                                    radius: height / 2
+                                    color: hdrMovieMouse.containsMouse ? "#35fbbf24" : "#221c1c28"
+                                    border.color: "#fbbf24"
+                                    border.width: 1
+
+                                    RowLayout {
+                                        anchors.centerIn: parent
+                                        spacing: 6
+                                        Text { text: "🔆"; font.pixelSize: Theme.fontSizeSmall }
+                                        Text {
+                                            text: "Play MPV HDR"
+                                            color: "#fde68a"
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            font.bold: true
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: hdrMovieMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: if (backend && mhWindow.activeMovieWorkPath) backend.openInMpvCustom(mhWindow.activeMovieWorkPath, true)
+                                    }
+                                }
+
+                                // Toggle Watched Status
+                                Rectangle {
+                                    width: Math.round(150 * Theme.scaleFactor)
+                                    height: Math.round(42 * Theme.scaleFactor)
+                                    radius: height / 2
+                                    color: toggleWatchedMovMouse.containsMouse ? "#3510b981" : "#221c1c28"
+                                    border.color: Theme.borderDim
+                                    border.width: 1
+
+                                    RowLayout {
+                                        anchors.centerIn: parent
+                                        spacing: 6
+                                        Text {
+                                            text: (mhWindow.currentMovieSummary && mhWindow.currentMovieSummary.watched) ? "↺ Mark Unwatched" : "✓ Mark Watched"
+                                            color: Theme.textPrimary
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            font.bold: true
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: toggleWatchedMovMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            if (backend && mhWindow.activeMovieWorkPath) {
+                                                var curW = Boolean(mhWindow.currentMovieSummary && mhWindow.currentMovieSummary.watched)
+                                                backend.markMediaWatched(mhWindow.activeMovieWorkPath, !curW)
+                                                mhWindow.currentMovieSummary = backend.getMovieWorkSummary(mhWindow.activeMovieWorkPath)
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // Open in Find
+                                Rectangle {
+                                    width: Math.round(145 * Theme.scaleFactor)
+                                    height: Math.round(42 * Theme.scaleFactor)
+                                    radius: height / 2
+                                    color: openFindMovMouse.containsMouse ? "#45222230" : "#221c1c28"
+                                    border.color: Theme.borderDim
+                                    border.width: 1
+
+                                    RowLayout {
+                                        anchors.centerIn: parent
+                                        spacing: 6
+                                        Text { text: "📂"; font.pixelSize: Theme.fontSizeSmall }
+                                        Text {
+                                            text: "Open in Find"
+                                            color: Theme.textPrimary
+                                            font.pixelSize: Theme.fontSizeSmall
+                                            font.bold: true
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        id: openFindMovMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: if (backend && mhWindow.activeMovieWorkPath) backend.openInFindInstance(mhWindow.activeMovieWorkPath)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // =========================================================
+            // 2. SHOW DETAILS & EPISODES LIST VIEW (OR MOVIES FOLDER GRID)
             // =========================================================
             ColumnLayout {
                 anchors.fill: parent
-                visible: mhWindow.isViewingEpisodeList
+                visible: mhWindow.isViewingEpisodeList && !mhWindow.isViewingMoviePage
                 spacing: 0
 
                 // ADAPTIVE DYNAMIC HEADER BANNER (Tailored for Extreme Hyprland Tiling & Split-Screen)
@@ -944,9 +1345,109 @@ ApplicationWindow {
                     }
                 }
 
+                // MOVIES FOLDER POSTER GRID (When viewing a Movies Folder so it's never treated as a TV series!)
+                GridView {
+                    id: moviesCatalogGrid
+                    visible: mhWindow.isMovieLibraryFolder
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    Layout.margins: Math.round(18 * Theme.scaleFactor)
+                    clip: true
+                    cellWidth: Math.round(176 * Theme.scaleFactor)
+                    cellHeight: Math.round(268 * Theme.scaleFactor)
+                    model: visible && backend ? backend.files : null
+
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    SmoothScroll { target: moviesCatalogGrid; orientation: Qt.Vertical }
+
+                    delegate: Item {
+                        width: moviesCatalogGrid.cellWidth
+                        height: moviesCatalogGrid.cellHeight
+
+                        Rectangle {
+                            id: movGridCard
+                            anchors.fill: parent
+                            anchors.margins: 6
+                            radius: Theme.radiusLarge
+                            color: movGridMouse.containsMouse ? "#28ffffff" : "#161822"
+                            border.color: movGridMouse.containsMouse ? Theme.mhAccent : "#26ffffff"
+                            border.width: 1
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 6
+                                spacing: 6
+
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+                                    radius: Math.round(8 * Theme.scaleFactor)
+                                    color: "#10121a"
+                                    clip: true
+
+                                    readonly property string artUrl: (model.poster && model.poster !== "")
+                                                                     ? ("file://" + model.poster)
+                                                                     : ((model.thumb && model.thumb !== "") ? ("file://" + model.thumb) : "")
+
+                                    Image {
+                                        anchors.fill: parent
+                                        visible: parent.artUrl !== ""
+                                        source: parent.artUrl
+                                        fillMode: Image.PreserveAspectCrop
+                                        asynchronous: true
+                                        smooth: true
+                                    }
+
+                                    Text {
+                                        anchors.centerIn: parent
+                                        visible: parent.artUrl === ""
+                                        text: model.is_dir ? "📁" : "🎬"
+                                        font.pixelSize: Math.round(38 * Theme.scaleFactor)
+                                    }
+                                }
+
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: (model.episode_title && model.episode_title !== "") ? model.episode_title : model.name
+                                    color: Theme.textPrimary
+                                    font.pixelSize: Theme.fontSizeSmall
+                                    font.bold: true
+                                    horizontalAlignment: Text.AlignHCenter
+                                    elide: Text.ElideRight
+                                }
+                            }
+
+                            MouseArea {
+                                id: movGridMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: function(mouse) {
+                                    if (mouse.button === Qt.RightButton) {
+                                        mhContext.targetPath = model.path || ""
+                                        mhContext.targetName = model.name || ""
+                                        mhContext.showPath = ""
+                                        mhContext.isDir = Boolean(model.is_dir)
+                                        mhContext.isAiringItem = false
+                                        mhContext.popupSafe(movGridCard, mouse.x, mouse.y)
+                                    } else {
+                                        if (model.is_dir) {
+                                            backend.navigateTo(model.path)
+                                        } else {
+                                            mhWindow.openMoviePage(model.path)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // EPISODES LIST (Translucent Glass cards, pure 'ar' tag when Arabic subtitle metadata is present)
                 ListView {
                     id: episodesList
+                    visible: !mhWindow.isMovieLibraryFolder
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     Layout.margins: Math.round(16 * Theme.scaleFactor)

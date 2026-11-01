@@ -128,9 +128,10 @@ def main():
     app.setOrganizationName("Find")
     app.setDesktopFileName("find")
 
-    # Single-instance check for normal file manager launches (skip for standalone picker, mediahub, or explicit --new-window)
-    if not is_picker_launch and not is_mediahub_launch and not getattr(args, "new_window", False):
-        if _try_send_to_existing_instance(cleaned_paths, bool(args.select)):
+    # Only forward to an existing instance if explicitly invoked with --select (e.g. browser "Show in Folder");
+    # otherwise always allow opening multiple independent Find windows simultaneously!
+    if bool(args.select) and not is_picker_launch and not is_mediahub_launch and not getattr(args, "new_window", False):
+        if _try_send_to_existing_instance(cleaned_paths, True):
             sys.exit(0)
 
     engine = QQmlApplicationEngine()

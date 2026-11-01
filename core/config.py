@@ -144,8 +144,15 @@ class ConfigManager:
         ),
         "hidden_sidebar_paths": [],
         "folder_views": {},
+        "folder_visit_counts": {},
         "favorites": [],
         "saved_desktop_apps": [],
+        "custom_open_rules": {
+            "groups": {},
+            "extensions": {}
+        },
+        "custom_extension_icons": {},
+        "use_app_icon_fallback": True,
         "fonts_install_dir": str(Path.home() / ".local" / "share" / "fonts"),
         "custom_quick_access": [
             {"name": "Media Hub", "path": "mediahub://", "icon": "🎬", "visible": True},
@@ -391,6 +398,18 @@ class ConfigManager:
         views = self._config.get("folder_views", {})
         return views.get(path_str, None)
 
+    def record_folder_visit(self, path_str: str):
+        if not path_str or path_str in ("recent://", "trash://", "favorites://", "mediahub://") or path_str.startswith("analyzer://"):
+            return
+        norm = os.path.abspath(path_str)
+        with self._lock:
+            counts = dict(self._config.get("folder_visit_counts", {}) or {})
+            counts[norm] = int(counts.get(norm, 0) or 0) + 1
+            if len(counts) > 1500:
+                top_items = sorted(counts.items(), key=lambda kv: kv[1], reverse=True)[:1000]
+                counts = dict(top_items)
+            self._config["folder_visit_counts"] = counts
+
     def set_folder_view(self, path_str: str, view_mode: str, sort_by: str, sort_ascending: bool):
         views = dict(self._config.get("folder_views", {}))
         views[path_str] = {
@@ -460,9 +479,11 @@ class ConfigManager:
                         manifest.pop(thumb_file.name, None)
                         dirty_manifest = True
 
-        # Step 2: Utilize 100% of allocated max_cache_mb, evicting oldest-accessed items above 98%
+        # Step 2: Smart LFU + Recency Cache Eviction — Retain thumbnails belonging to frequently visited folders
+        # and evict thumbnails from the least-visited folders first when cache exceeds max_cache_mb
         max_bytes = int(self.get("max_cache_mb", 500) * 1024 * 1024)
         current_size = self.get_cache_size_bytes()
+        visit_counts = dict(self.get("folder_visit_counts", {}) or {})
 
         if current_size > max_bytes and thumbs_dir.exists():
             files = []
@@ -471,13 +492,18 @@ class ConfigManager:
                     try:
                         st = p.stat()
                         last_used = max(st.st_atime, st.st_mtime)
-                        files.append((p, last_used, st.st_size))
+                        meta = manifest.get(p.name, {})
+                        src_path = str(meta.get("src") or "")
+                        parent_dir = os.path.dirname(src_path) if src_path else ""
+                        folder_visits = int(visit_counts.get(parent_dir, 0) or 0)
+                        files.append((p, folder_visits, last_used, st.st_size))
                     except OSError:
                         pass
-            files.sort(key=lambda x: x[1])
+            # Sort ascending by (folder_visits, last_used) so least-visited folders are evicted first!
+            files.sort(key=lambda x: (x[1], x[2]))
 
             target_bytes = int(max_bytes * 0.98)
-            for p, _, sz in files:
+            for p, _, _, sz in files:
                 try:
                     p.unlink()
                     manifest.pop(p.name, None)

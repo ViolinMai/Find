@@ -258,9 +258,10 @@ Dialog {
                             Layout.fillHeight: true
                             source: "file://" + modelData.path
                             fillMode: Image.PreserveAspectFit
-                            sourceSize.width: 96
-                            sourceSize.height: 96
+                            sourceSize.width: Math.round(96 * Theme.scaleFactor * Screen.devicePixelRatio)
+                            sourceSize.height: Math.round(96 * Theme.scaleFactor * Screen.devicePixelRatio)
                             asynchronous: true
+                            smooth: true
                             mipmap: true
                         }
 

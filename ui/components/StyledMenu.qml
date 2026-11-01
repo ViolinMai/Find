@@ -12,6 +12,10 @@ Menu {
     leftPadding: Math.round(6 * Theme.scaleFactor)
     rightPadding: Math.round(6 * Theme.scaleFactor)
 
+    onAboutToShow: {
+        control.currentIndex = -1
+    }
+
     onOpened: {
         control.currentIndex = -1
     }
@@ -20,12 +24,20 @@ Menu {
         control.currentIndex = -1
     }
 
+    function closeOtherSubMenus(activeItem) {
+        for (var i = 0; i < control.count; ++i) {
+            var it = control.itemAt(i)
+            if (it && it !== activeItem && it.subMenu && it.subMenu.visible) {
+                it.subMenu.close()
+            }
+        }
+    }
+
     enter: Transition {
-        NumberAnimation { property: "opacity"; from: 0.0; to: 1.0; duration: 100; easing.type: Easing.OutCubic }
-        NumberAnimation { property: "scale"; from: 0.96; to: 1.0; duration: 100; easing.type: Easing.OutCubic }
+        NumberAnimation { property: "opacity"; from: 0.0; to: 1.0; duration: 90; easing.type: Easing.OutCubic }
     }
     exit: Transition {
-        NumberAnimation { property: "opacity"; from: 1.0; to: 0.0; duration: 75; easing.type: Easing.InCubic }
+        NumberAnimation { property: "opacity"; from: 1.0; to: 0.0; duration: 65; easing.type: Easing.InCubic }
     }
 
     contentItem: ListView {
@@ -34,18 +46,11 @@ Menu {
         interactive: contentHeight > implicitHeight
         boundsBehavior: Flickable.StopAtBounds
         clip: true
-        currentIndex: control.currentIndex
+        currentIndex: -1
+        highlightFollowsCurrentItem: false
 
         ScrollBar.vertical: ScrollBar {
             policy: ScrollBar.AsNeeded
-        }
-
-        HoverHandler {
-            onHoveredChanged: {
-                if (!hovered) {
-                    control.currentIndex = -1
-                }
-            }
         }
     }
 

@@ -30,16 +30,25 @@ Rectangle {
         return fileGridView.actualCols > 0 ? fileGridView.actualCols : 1
     }
 
-    function syncViewScrollToSelection() {
+    function syncViewScrollToSelection(centerInView) {
         if (!backend) return
         var rowIdx = backend.getSelectedRowIndex()
         if (rowIdx < 0) return
+        var mode = centerInView ? ListView.Center : ListView.Contain
+        var gMode = centerInView ? GridView.Center : GridView.Contain
         if (backend.viewMode === "details") {
             fileListView.currentIndex = rowIdx
-            fileListView.positionViewAtIndex(rowIdx, ListView.Contain)
+            fileListView.positionViewAtIndex(rowIdx, mode)
         } else {
             fileGridView.currentIndex = rowIdx
-            fileGridView.positionViewAtIndex(rowIdx, GridView.Contain)
+            fileGridView.positionViewAtIndex(rowIdx, gMode)
+        }
+    }
+
+    Connections {
+        target: backend
+        function onScrollToSelectionRequested() {
+            root.syncViewScrollToSelection(true)
         }
     }
 
@@ -617,6 +626,7 @@ Rectangle {
     MouseArea {
         id: backgroundArea
         anchors.fill: parent
+        enabled: backend ? backend.isMediaHubView : false
         acceptedButtons: Qt.LeftButton | Qt.RightButton
         onClicked: function(mouse) {
             if (!backend) return
@@ -676,6 +686,10 @@ Rectangle {
                                 visible: !modelData.is_dir && ((modelData.thumb && modelData.thumb !== "") || (modelData.icon && (modelData.icon.indexOf("/") !== -1 || modelData.icon.indexOf(".") !== -1)))
                                 source: visible ? ((modelData.thumb && modelData.thumb !== "") ? ("file://" + modelData.thumb) : ("file://" + modelData.icon)) : ""
                                 fillMode: Image.PreserveAspectFit
+                                sourceSize.width: Math.round(width * Screen.devicePixelRatio * 1.5)
+                                sourceSize.height: Math.round(height * Screen.devicePixelRatio * 1.5)
+                                smooth: true
+                                mipmap: true
                             }
 
                             Text {
@@ -1674,14 +1688,32 @@ Rectangle {
                         cacheBuffer: 720
                         focus: true
 
+                        function probeVisibleListRange() {
+                            if (!backend || !fileListView.visible || fileListView.count <= 0 || fileListView.height <= 0) return
+                            var vH = fileListView.height
+                            var startY = Math.max(0, fileListView.contentY)
+                            var rowH = Math.max(1, fileListView.uniformRowHeight)
+
+                            var firstScreenIdx = Math.max(0, Math.floor(startY / rowH))
+                            var lastScreenIdx = Math.min(fileListView.count - 1, Math.ceil((startY + vH) / rowH))
+
+                            var windowStartY = Math.max(0, startY - vH)
+                            var windowEndY = startY + vH * 2
+                            var firstWindowIdx = Math.max(0, Math.floor(windowStartY / rowH))
+                            var lastWindowIdx = Math.min(fileListView.count - 1, Math.ceil(windowEndY / rowH))
+
+                            backend.ensureVisibleRangePreviews(firstScreenIdx, lastScreenIdx, firstWindowIdx, lastWindowIdx)
+                        }
+
                         onCountChanged: {
                             if (backend && (!backend.selectedPaths || backend.selectedPaths.length === 0)) {
                                 fileListView.currentIndex = -1
                             }
                             listViewportProbeTimer.restart()
                         }
+                        onVisibleChanged: if (visible) listViewportProbeTimer.restart()
+                        onHeightChanged: if (visible) listViewportProbeTimer.restart()
                         onContentYChanged: {
-                            // Quick Scroll Guard: Don't spawn workers while moving fast; wait for slowdown
                             if (!fileListView.moving) {
                                 listViewportProbeTimer.restart()
                             } else {
@@ -1691,66 +1723,25 @@ Rectangle {
 
                         Timer {
                             id: listFastScrollDebounce
-                            interval: 80
+                            interval: 75
                             repeat: false
                             onTriggered: listViewportProbeTimer.restart()
                         }
 
                         Timer {
                             id: listViewportProbeTimer
-                            interval: 40
+                            interval: 35
                             repeat: false
-                            onTriggered: {
-                                if (!backend || !fileListView.visible || fileListView.count === 0) return
-                                var vH = fileListView.height
-                                var startY = fileListView.contentY
-                                // Windowing: Strictly 1 Page Above and 1 Page Below the current viewport
-                                var windowStartY = Math.max(0, startY - vH)
-                                var windowEndY = Math.min(fileListView.contentHeight, startY + vH * 2)
+                            onTriggered: fileListView.probeVisibleListRange()
+                        }
 
-                                var rowH = Math.max(1, fileListView.uniformRowHeight)
-                                var firstWindowIdx = Math.max(0, Math.floor(windowStartY / rowH))
-                                var lastWindowIdx = Math.min(fileListView.count - 1, Math.ceil(windowEndY / rowH))
-
-                                var firstScreenIdx = Math.max(0, Math.floor(startY / rowH))
-                                var lastScreenIdx = Math.min(fileListView.count - 1, Math.ceil((startY + vH) / rowH))
-
-                                var activeWindowPaths = []
-
-                                // Pass 1: Screen-visible items get immediate HIGHEST priority
-                                for (var i = firstScreenIdx; i <= lastScreenIdx; i++) {
-                                    var scrEnt = backend.files.get_entry_at(i)
-                                    if (scrEnt && scrEnt.path) {
-                                        activeWindowPaths.push(scrEnt.path)
-                                        if (scrEnt.is_dir) {
-                                            if (!scrEnt.folder_previews || scrEnt.folder_previews.length === 0) {
-                                                backend.requestFolderPreview(scrEnt.path)
-                                            }
-                                        } else if (!scrEnt.thumb || scrEnt.thumb === "") {
-                                            backend.requestItemThumbnail(scrEnt.path, true)
-                                        }
-                                    }
-                                }
-
-                                // Pass 2: 1-Page buffer above/below gets secondary priority
-                                for (var j = firstWindowIdx; j <= lastWindowIdx; j++) {
-                                    if (j >= firstScreenIdx && j <= lastScreenIdx) continue
-                                    var bufEnt = backend.files.get_entry_at(j)
-                                    if (bufEnt && bufEnt.path) {
-                                        activeWindowPaths.push(bufEnt.path)
-                                        if (bufEnt.is_dir) {
-                                            if (!bufEnt.folder_previews || bufEnt.folder_previews.length === 0) {
-                                                backend.requestFolderPreview(bufEnt.path)
-                                            }
-                                        } else if (!bufEnt.thumb || bufEnt.thumb === "") {
-                                            backend.requestItemThumbnail(bufEnt.path, false)
-                                        }
-                                    }
-                                }
-
-                                // Cancel out-of-window requests from memory
-                                backend.updateActiveVisibleWindow(activeWindowPaths)
-                            }
+                        // Smart Viewport Watchdog: Periodically verifies no visible item in sight was missed
+                        Timer {
+                            id: listPreviewWatchdog
+                            interval: 450
+                            repeat: true
+                            running: fileListView.visible && fileListView.count > 0
+                            onTriggered: fileListView.probeVisibleListRange()
                         }
 
                         readonly property int uniformRowHeight: {
@@ -1866,14 +1857,17 @@ Rectangle {
 
                                             Image {
                                                 anchors.fill: parent
+                                                readonly property bool isVectorSvg: !parent.parent.hasVerticalPoster && model.thumb === "" && model.icon !== undefined && model.icon.toLowerCase().endsWith(".svg")
                                                 source: parent.visible
                                                         ? (parent.parent.hasVerticalPoster
                                                            ? ("file://" + model.poster)
                                                            : (model.thumb !== "" ? ("file://" + model.thumb) : ("file://" + model.icon)))
                                                         : ""
                                                 fillMode: parent.parent.hasVerticalPoster ? Image.PreserveAspectFit : (rowContainer.isMediaVideoRow ? Image.PreserveAspectCrop : Image.PreserveAspectFit)
-                                                asynchronous: true
-                                                cache: false
+                                                sourceSize.width: isVectorSvg ? Math.round(width * Screen.devicePixelRatio * 2.0) : 0
+                                                sourceSize.height: isVectorSvg ? Math.round(height * Screen.devicePixelRatio * 2.0) : 0
+                                                asynchronous: !isVectorSvg
+                                                cache: true
                                                 smooth: true
                                                 mipmap: true
                                             }
@@ -2236,14 +2230,38 @@ Rectangle {
                         cacheBuffer: 720
                         focus: true
 
+                        function probeVisibleGridRange() {
+                            if (!backend || !fileGridView.visible || fileGridView.count <= 0 || fileGridView.height <= 0) return
+                            var gH = fileGridView.height
+                            var startY = Math.max(0, fileGridView.contentY)
+                            var ch = Math.max(1, fileGridView.cellHeight)
+                            var cols = Math.max(1, fileGridView.actualCols)
+
+                            var rScrStart = Math.max(0, Math.floor(startY / ch))
+                            var rScrEnd = Math.floor((startY + gH) / ch) + 1
+                            var firstScrIdx = Math.max(0, rScrStart * cols)
+                            var lastScrIdx = Math.min(fileGridView.count - 1, rScrEnd * cols - 1)
+
+                            var windowStartY = Math.max(0, startY - gH)
+                            var windowEndY = startY + gH * 2
+                            var rWinStart = Math.max(0, Math.floor(windowStartY / ch))
+                            var rWinEnd = Math.floor(windowEndY / ch) + 1
+                            var firstWinIdx = Math.max(0, rWinStart * cols)
+                            var lastWinIdx = Math.min(fileGridView.count - 1, rWinEnd * cols - 1)
+
+                            backend.ensureVisibleRangePreviews(firstScrIdx, lastScrIdx, firstWinIdx, lastWinIdx)
+                        }
+
                         onCountChanged: {
                             if (backend && (!backend.selectedPaths || backend.selectedPaths.length === 0)) {
                                 fileGridView.currentIndex = -1
                             }
                             gridViewportProbeTimer.restart()
                         }
+                        onVisibleChanged: if (visible) gridViewportProbeTimer.restart()
+                        onHeightChanged: if (visible) gridViewportProbeTimer.restart()
+                        onWidthChanged: if (visible) gridViewportProbeTimer.restart()
                         onContentYChanged: {
-                            // Quick Scroll Guard for Grid View
                             if (!fileGridView.moving) {
                                 gridViewportProbeTimer.restart()
                             } else {
@@ -2253,70 +2271,25 @@ Rectangle {
 
                         Timer {
                             id: gridFastScrollDebounce
-                            interval: 80
+                            interval: 75
                             repeat: false
                             onTriggered: gridViewportProbeTimer.restart()
                         }
 
                         Timer {
                             id: gridViewportProbeTimer
-                            interval: 40
+                            interval: 35
                             repeat: false
-                            onTriggered: {
-                                if (!backend || !fileGridView.visible || fileGridView.count === 0) return
-                                var gH = fileGridView.height
-                                var startY = fileGridView.contentY
-                                var windowStartY = Math.max(0, startY - gH)
-                                var windowEndY = Math.min(fileGridView.contentHeight, startY + gH * 2)
+                            onTriggered: fileGridView.probeVisibleGridRange()
+                        }
 
-                                var ch = Math.max(1, fileGridView.cellHeight)
-                                var cols = Math.max(1, fileGridView.actualCols)
-
-                                var rScrStart = Math.max(0, Math.floor(startY / ch))
-                                var rScrEnd = Math.floor((startY + gH) / ch) + 1
-                                var firstScrIdx = rScrStart * cols
-                                var lastScrIdx = Math.min(fileGridView.count - 1, rScrEnd * cols - 1)
-
-                                var rWinStart = Math.max(0, Math.floor(windowStartY / ch))
-                                var rWinEnd = Math.floor(windowEndY / ch) + 1
-                                var firstWinIdx = rWinStart * cols
-                                var lastWinIdx = Math.min(fileGridView.count - 1, rWinEnd * cols - 1)
-
-                                var activeWindowPaths = []
-
-                                // Pass 1: Active visible screen items
-                                for (var i = firstScrIdx; i <= lastScrIdx; i++) {
-                                    var scrEnt = backend.files.get_entry_at(i)
-                                    if (scrEnt && scrEnt.path) {
-                                        activeWindowPaths.push(scrEnt.path)
-                                        if (scrEnt.is_dir) {
-                                            if (!scrEnt.folder_previews || scrEnt.folder_previews.length === 0) {
-                                                backend.requestFolderPreview(scrEnt.path)
-                                            }
-                                        } else if (!scrEnt.thumb || scrEnt.thumb === "") {
-                                            backend.requestItemThumbnail(scrEnt.path, true)
-                                        }
-                                    }
-                                }
-
-                                // Pass 2: 1-Page buffer above and below
-                                for (var j = firstWinIdx; j <= lastWinIdx; j++) {
-                                    if (j >= firstScrIdx && j <= lastScrIdx) continue
-                                    var bufEnt = backend.files.get_entry_at(j)
-                                    if (bufEnt && bufEnt.path) {
-                                        activeWindowPaths.push(bufEnt.path)
-                                        if (bufEnt.is_dir) {
-                                            if (!bufEnt.folder_previews || bufEnt.folder_previews.length === 0) {
-                                                backend.requestFolderPreview(bufEnt.path)
-                                            }
-                                        } else if (!bufEnt.thumb || bufEnt.thumb === "") {
-                                            backend.requestItemThumbnail(bufEnt.path, false)
-                                        }
-                                    }
-                                }
-
-                                backend.updateActiveVisibleWindow(activeWindowPaths)
-                            }
+                        // Smart Viewport Watchdog for Grid Mode
+                        Timer {
+                            id: gridPreviewWatchdog
+                            interval: 450
+                            repeat: true
+                            running: fileGridView.visible && fileGridView.count > 0
+                            onTriggered: fileGridView.probeVisibleGridRange()
                         }
 
                         readonly property bool isMoviePosterGrid: backend ? (backend.isMovieFolderView || (backend.isMediaLibraryView && backend.showSeriesPosters)) : false
@@ -2426,16 +2399,19 @@ Rectangle {
                                             Image {
                                                 id: thumbImg
                                                 anchors.centerIn: parent
-                                                width: parent.width
-                                                height: parent.height
+                                                readonly property bool isVectorSvg: !gridContainer.hasMoviePoster && model.thumb === "" && model.icon !== undefined && model.icon.toLowerCase().endsWith(".svg")
+                                                width: isVectorSvg ? Math.min(parent.width * 0.64, parent.height * 0.72) : parent.width
+                                                height: isVectorSvg ? width : parent.height
                                                 source: parent.visible
                                                         ? (gridContainer.hasMoviePoster
                                                            ? ("file://" + model.poster)
                                                            : (model.thumb !== "" ? ("file://" + model.thumb) : ("file://" + model.icon)))
                                                         : ""
                                                 fillMode: Image.PreserveAspectFit
-                                                asynchronous: true
-                                                cache: false
+                                                sourceSize.width: isVectorSvg ? Math.round(width * Screen.devicePixelRatio * 2.0) : 0
+                                                sourceSize.height: isVectorSvg ? Math.round(height * Screen.devicePixelRatio * 2.0) : 0
+                                                asynchronous: !isVectorSvg
+                                                cache: true
                                                 smooth: true
                                                 mipmap: true
                                             }
@@ -2649,7 +2625,7 @@ Rectangle {
                     Rectangle {
                         id: marqueeBoxOverlay
                         visible: false
-                        z: 80
+                        z: 210
                         color: "#280078d4"
                         border.color: Theme.accent
                         border.width: 1
@@ -2660,10 +2636,10 @@ Rectangle {
                         id: viewportMarqueeArea
                         anchors.fill: parent
                         anchors.rightMargin: Math.round(18 * Theme.scaleFactor)
-                        z: 10
+                        z: isMarqueeActive ? 200 : 10
                         enabled: (backend ? !backend.isMediaHubView : true) && !fileListScrollBar.pressed && !fileGridScrollBar.pressed
                         preventStealing: true
-                        propagateComposedEvents: true
+                        propagateComposedEvents: false
                         acceptedButtons: Qt.LeftButton | Qt.RightButton
 
                         property real startContentX: 0
@@ -2675,6 +2651,26 @@ Rectangle {
                             return (backend && backend.viewMode === "grid") ? fileGridView : fileListView
                         }
 
+                        function isPointOnInnerCard(av, viewX, viewY, cx, cy) {
+                            var hitItem = av.itemAt(cx, cy)
+                            if (hitItem === null) return false
+                            if (backend && backend.viewMode === "details") {
+                                // Allow starting marquee drag from the left/right margins of the list view
+                                var marginX = Math.round(14 * Theme.scaleFactor)
+                                if (viewX < marginX || viewX > av.width - marginX) {
+                                    return false
+                                }
+                            } else if (backend && backend.viewMode === "grid") {
+                                // Allow starting marquee drag in the gaps between grid cards
+                                var ptInCell = av.contentItem.mapToItem(hitItem, cx, cy)
+                                var pad = Math.round(8 * Theme.scaleFactor)
+                                if (ptInCell.x < pad || ptInCell.x > hitItem.width - pad || ptInCell.y < pad || ptInCell.y > hitItem.height - pad) {
+                                    return false
+                                }
+                            }
+                            return true
+                        }
+
                         onPressed: function(mouse) {
                             if (!backend || backend.isMediaHubView || fileListScrollBar.pressed || fileGridScrollBar.pressed) {
                                 mouse.accepted = false
@@ -2684,10 +2680,9 @@ Rectangle {
                             av.forceActiveFocus()
                             var cx = mouse.x + av.contentX
                             var cy = mouse.y + av.contentY
-                            var hitItem = av.itemAt(cx, cy)
 
-                            // If pressed directly on an item delegate, let the item's MouseArea handle click/drag
-                            if (hitItem !== null) {
+                            // If pressed directly inside an item delegate card, let the item's MouseArea handle click/drag
+                            if (isPointOnInnerCard(av, mouse.x, mouse.y, cx, cy)) {
                                 mouse.accepted = false
                                 return
                             }
@@ -2725,7 +2720,7 @@ Rectangle {
 
                             var curX = mouse.x + av.contentX
                             var curY = mouse.y + av.contentY
-                            if (!isMarqueeActive && (Math.abs(curX - startContentX) > 6 || Math.abs(curY - startContentY) > 6)) {
+                            if (!isMarqueeActive && (Math.abs(curX - startContentX) > 5 || Math.abs(curY - startContentY) > 5)) {
                                 isMarqueeActive = true
                                 marqueeBoxOverlay.visible = true
                             }
@@ -2772,6 +2767,7 @@ Rectangle {
                         }
 
                         onReleased: function(mouse) {
+                            mouse.accepted = true
                             if (isMarqueeActive) {
                                 isMarqueeActive = false
                                 marqueeBoxOverlay.visible = false

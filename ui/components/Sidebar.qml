@@ -117,6 +117,10 @@ Rectangle {
                         visible: entryRoot.itemIcon.indexOf("/") !== -1 || entryRoot.itemIcon.indexOf(".") !== -1
                         source: visible ? ("file://" + entryRoot.itemIcon) : ""
                         fillMode: Image.PreserveAspectFit
+                        sourceSize.width: Math.round(width * Screen.devicePixelRatio * 2.0)
+                        sourceSize.height: Math.round(height * Screen.devicePixelRatio * 2.0)
+                        smooth: true
+                        mipmap: true
                     }
 
                     Text {

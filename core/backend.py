@@ -2206,8 +2206,8 @@ class MediaHubBuilderTask(QRunnable):
 
             per_lib_rows[row_id] = {
                 "id": row_id,
-                "title": f"📂  Recently Added — {lib_name}",
-                "subtitle": f"Latest titles added to {lib_name} ({lp})",
+                "title": f"Recently Added — {lib_name}",
+                "subtitle": f"Latest titles added to {lib_name}",
                 "items": lib_cards
             }
 
@@ -2948,12 +2948,28 @@ class FileManagerBackend(QObject):
             task = MediaInfoTask(target, p_info.get("ext_sub", ""), self.signals)
             self.thread_pool.start(task)
 
+        backdrop = jf_meta.get("backdrop", "")
+        if not backdrop and self.jf_bridge.is_enabled:
+            item_id = jf_meta.get("item_id", "")
+            if item_id:
+                backdrop = self.jf_bridge._ensure_backdrop_cached(item_id)
+        if not backdrop:
+            backdrop = poster
+
+        if not backdrop and self.jf_bridge.is_enabled:
+            item_id = jf_meta.get("item_id", "")
+            if item_id:
+                backdrop = self.jf_bridge._ensure_backdrop_cached(item_id)
+        if not backdrop:
+            backdrop = poster
+
         return {
             "title": jf_meta.get("title") or p_obj.stem,
             "filename": p_obj.name,
             "path": target,
             "parent_dir": str(p_obj.parent),
             "poster": poster,
+            "backdrop": backdrop,
             "thumb": thumb,
             "year": str(jf_meta.get("year") or ""),
             "rating": str(jf_meta.get("rating") or ""),
@@ -3049,6 +3065,13 @@ class FileManagerBackend(QObject):
 
             disp_overview = jf_meta.get("overview") or parent_meta.get("overview") or ""
 
+            series_id = jf_meta.get("item_id", "") or parent_meta.get("item_id", "")
+            backdrop = jf_meta.get("backdrop", "") or parent_meta.get("backdrop", "")
+            if not backdrop and series_id and self.jf_bridge.is_enabled:
+                backdrop = self.jf_bridge._ensure_backdrop_cached(series_id)
+            if not backdrop:
+                backdrop = resolved_poster
+
             res_summary = {
                 "title": disp_title,
                 "path": target_dir,
@@ -3061,6 +3084,7 @@ class FileManagerBackend(QObject):
                 "rating": str(jf_meta.get("rating", "")) if jf_meta.get("rating") else (str(parent_meta.get("rating", "")) if parent_meta.get("rating") else ""),
                 "overview": disp_overview,
                 "poster": resolved_poster,
+                "backdrop": backdrop,
                 "resume": resume_info
             }
             self.signals.folderMediaSummaryReady.emit(target_dir, res_summary)

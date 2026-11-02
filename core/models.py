@@ -595,9 +595,11 @@ class MediaHubCardModel(QAbstractListModel):
         elif role == self.LinkedPathRole:
             return str(c.get("linked_path", ""))
         elif role == self.LocalWatchedEpsRole:
-            return int(c.get("local_watched_eps", 0) or 0)
+            val = c.get("local_watched_eps", 0)
+            return int(val) if val is not None else 0
         elif role == self.BehindCountRole:
-            return int(c.get("behind_count", 0) or 0)
+            val = c.get("behind_count", 0)
+            return int(val) if val is not None else 0
         elif role == self.IsGoingTightRole:
             return bool(c.get("is_going_tight", False))
         elif role == self.ArtSourceRole:

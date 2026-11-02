@@ -152,6 +152,8 @@ class JellyfinBridge:
         self.cache_file = self.config_mgr.config_dir / "jellyfin_map.json"
         self.posters_dir = self.config_mgr.cache_dir / "jf_posters_v2"
         self.posters_dir.mkdir(parents=True, exist_ok=True)
+        self.backdrops_dir = self.config_mgr.cache_dir / "jf_backdrops"
+        self.backdrops_dir.mkdir(parents=True, exist_ok=True)
         self._path_map = self._load_cache()
         self._server_online = True
         self._last_fail_ts = 0.0
@@ -336,6 +338,29 @@ class JellyfinBridge:
         ]
         return any(re.search(pat, n_lower) for pat in season_patterns)
 
+    def _ensure_backdrop_cached(self, item_id: str, fallback_series_id: str = "") -> str:
+        if not item_id or not self._can_attempt_network():
+            return ""
+        dest_file = self.backdrops_dir / f"{item_id}_backdrop.jpg"
+        if dest_file.exists() and dest_file.stat().st_size > 500:
+            return str(dest_file)
+
+        candidate_ids = [item_id]
+        if fallback_series_id and fallback_series_id != item_id:
+            candidate_ids.append(fallback_series_id)
+
+        for cid in candidate_ids:
+            try:
+                url = f"{self.api_url}/Items/{cid}/Images/Backdrop/0?maxWidth=1920&quality=85"
+                res = self.session.get(url, timeout=3.5)
+                if res.status_code == 200 and len(res.content) > 500:
+                    with open(dest_file, "wb") as f:
+                        f.write(res.content)
+                    return str(dest_file)
+            except Exception:
+                pass
+        return ""
+
     def _ensure_poster_cached(self, item_id: str, fallback_series_id: str = "", is_poster_target: bool = True) -> str:
         if not item_id or not is_poster_target:
             return ""
@@ -405,6 +430,9 @@ class JellyfinBridge:
         should_download_poster = fetch_poster and item_type in ("Movie", "Series", "Season", "BoxSet")
         series_id = str(itm.get("SeriesId") or itm.get("ParentId") or "")
         poster_path = self._ensure_poster_cached(iid, fallback_series_id=series_id, is_poster_target=should_download_poster)
+        backdrop_path = ""
+        if should_download_poster and (itm.get("BackdropImageTags") or itm.get("ParentBackdropImageTags")):
+            backdrop_path = self._ensure_backdrop_cached(iid, fallback_series_id=series_id)
 
         return {
             "item_id": iid,
@@ -418,6 +446,7 @@ class JellyfinBridge:
             "overview": str(itm.get("Overview") or ""),
             "rating": round(float(itm["CommunityRating"]), 1) if itm.get("CommunityRating") else None,
             "poster": poster_path,
+            "backdrop": backdrop_path,
             "index_number": itm.get("IndexNumber"),
             "season_number": itm.get("ParentIndexNumber"),
             "position": pos_sec,

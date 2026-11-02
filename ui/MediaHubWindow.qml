@@ -15,10 +15,30 @@ ApplicationWindow {
     title: "Find — Media Hub"
     flags: Qt.Window | Qt.FramelessWindowHint
 
-    color: (backend && backend.transparentBlur) ? "transparent" : Theme.mhBgBase
+    color: Theme.mhBgBase
 
     LayoutMirroring.enabled: false
     LayoutMirroring.childrenInherit: true
+
+    readonly property string activeBackdropSource: {
+        if (isViewingMoviePage && currentMovieSummary) {
+            if (currentMovieSummary.backdrop && currentMovieSummary.backdrop !== "") {
+                return "file://" + currentMovieSummary.backdrop
+            }
+            if (currentMovieSummary.poster && currentMovieSummary.poster !== "") {
+                return "file://" + currentMovieSummary.poster
+            }
+        }
+        if (isViewingEpisodeList && currentShowSummary) {
+            if (currentShowSummary.backdrop && currentShowSummary.backdrop !== "") {
+                return "file://" + currentShowSummary.backdrop
+            }
+            if (currentShowSummary.poster && currentShowSummary.poster !== "") {
+                return "file://" + currentShowSummary.poster
+            }
+        }
+        return ""
+    }
 
     readonly property bool isViewingEpisodeList: backend ? (backend.currentPath !== "mediahub://") : false
     readonly property bool isMovieLibraryFolder: backend ? (isViewingEpisodeList && backend.isMovieFolderView) : false
@@ -155,7 +175,48 @@ ApplicationWindow {
     Rectangle {
         id: mhContainer
         anchors.fill: parent
-        color: (backend && backend.transparentBlur) ? "transparent" : Theme.mhBgBase
+        color: Theme.mhBgBase
+
+        // Ambient Cinematic Backdrop Layer (Blur + Dark Vignette)
+        Item {
+            id: backdropContainer
+            anchors.fill: parent
+            z: 0
+            visible: mhWindow.activeBackdropSource !== ""
+
+            Image {
+                id: backdropImage
+                anchors.fill: parent
+                source: mhWindow.activeBackdropSource
+                fillMode: Image.PreserveAspectCrop
+                asynchronous: true
+                smooth: true
+                opacity: status === Image.Ready ? 0.85 : 0.0
+                Behavior on opacity { NumberAnimation { duration: 350; easing.type: Easing.OutQuad } }
+                visible: true
+                mipmap: false
+            }
+
+            MultiEffect {
+                anchors.fill: backdropImage
+                source: backdropImage
+                blurEnabled: true
+                blur: 0.00
+                blurMax: 24
+                saturation: 0.90
+                brightness: -0.05
+            }
+
+            Rectangle {
+                anchors.fill: parent
+                gradient: Gradient {
+                    orientation: Gradient.Vertical
+                    GradientStop { position: 0.0; color: "#880b0d13" }
+                    GradientStop { position: 0.6; color: "#440b0d13" }
+                    GradientStop { position: 1.0; color: Theme.mhBgBase }
+                }
+            }
+        }
 
         // Completely Transparent Floating Window Drag/Control Area (No solid header bar)
         Item {
@@ -490,7 +551,7 @@ ApplicationWindow {
                                                     fillMode: Image.PreserveAspectCrop
                                                     asynchronous: true
                                                     smooth: true
-                                                    mipmap: true
+                                                    mipmap: false
                                                     layer.enabled: visible
                                                     layer.smooth: true
                                                     layer.effect: MultiEffect {
@@ -753,7 +814,7 @@ ApplicationWindow {
                                 fillMode: Image.PreserveAspectCrop
                                 asynchronous: true
                                 smooth: true
-                                mipmap: true
+                                mipmap: false
                             }
 
                             Text {
@@ -1215,6 +1276,7 @@ ApplicationWindow {
                                 fillMode: Image.PreserveAspectCrop
                                 asynchronous: true
                                 smooth: true
+                                mipmap: false
                             }
 
                             Text {
@@ -1396,6 +1458,7 @@ ApplicationWindow {
                                         fillMode: Image.PreserveAspectCrop
                                         asynchronous: true
                                         smooth: true
+                                        mipmap: false
                                     }
 
                                     Text {
@@ -1515,7 +1578,7 @@ ApplicationWindow {
                                     fillMode: Image.PreserveAspectCrop
                                     asynchronous: true
                                     smooth: true
-                                    mipmap: true
+                                    mipmap: false
                                     layer.enabled: visible
                                     layer.smooth: true
                                     layer.effect: MultiEffect {

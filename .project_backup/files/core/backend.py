@@ -2956,6 +2956,13 @@ class FileManagerBackend(QObject):
         if not backdrop:
             backdrop = poster
 
+        if not backdrop and self.jf_bridge.is_enabled:
+            item_id = jf_meta.get("item_id", "")
+            if item_id:
+                backdrop = self.jf_bridge._ensure_backdrop_cached(item_id)
+        if not backdrop:
+            backdrop = poster
+
         return {
             "title": jf_meta.get("title") or p_obj.stem,
             "filename": p_obj.name,

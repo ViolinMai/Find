@@ -1,7 +1,7 @@
 {
   "modified": [
-    "ui/MediaHubWindow.qml",
-    "core/backend.py"
+    "core/backend.py",
+    "ui/main.qml"
   ],
   "created": []
 }

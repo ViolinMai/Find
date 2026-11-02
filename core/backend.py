@@ -2764,7 +2764,13 @@ class FileManagerBackend(QObject):
     @Slot()
     def quitApplicationCompletely(self):
         self.shutdownCleanup()
+        try:
+            self.thread_pool.clear()
+            self.dir_pool.clear()
+        except Exception:
+            pass
         QGuiApplication.quit()
+        os._exit(0)
 
     def _on_mounts_changed(self, _path: str = ""):
         self._last_drives_ts = 0.0

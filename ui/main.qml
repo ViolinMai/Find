@@ -231,13 +231,12 @@ ApplicationWindow {
             backend.cancelPicker()
             return
         }
-        if (backend && backend.keepAliveInBackground) {
-            close.accepted = false
-            root.hide()
-            return
-        }
+        // Force absolute termination on window close to prevent orphaned RAM processes
+        close.accepted = true
         if (backend) {
             backend.quitApplicationCompletely()
+        } else {
+            Qt.quit()
         }
     }
 
